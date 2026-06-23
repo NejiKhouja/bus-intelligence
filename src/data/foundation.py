@@ -1,3 +1,4 @@
+
 """GPS trip reconstruction — the shared foundation layer.
 
 Turns raw GPS pings (`Historique_pos`) into reconstructed trips with a derived actual

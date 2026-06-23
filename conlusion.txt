@@ -1,0 +1,13 @@
+-the gps tracking intervall was changed 
+-the avg pings per day also increased
+-the type of gps was also changed now the gps is also able to calculate the speed plus other things
+-peak houe are 5 6 10
+-most of the times the bus is empty ,but doo note that this because of hisory
+this a 1 week reservations only ,also could be because the companies that they work with is rural 
+so people dont take the bus come and go
+-there are several bad lines
+
+
+
+
+if i was given the full history of the reservations i would have been able to tell or determine the location of the stops without needed an official doc,could it be done ?

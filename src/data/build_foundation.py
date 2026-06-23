@@ -32,10 +32,13 @@ Usage:
 """
 import argparse
 import time
+import warnings
 from pathlib import Path
 
 import pandas as pd
 from pymongo import MongoClient
+
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 from src.data import foundation as fdn
 
