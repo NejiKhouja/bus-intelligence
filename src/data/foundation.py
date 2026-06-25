@@ -68,7 +68,7 @@ import pandas as pd
 from pymongo.database import Database
 
 
-# --------------------------------------------------------------------------- config
+# config
 @dataclass(frozen=True)
 class Config:
     # geometry
@@ -102,7 +102,7 @@ class Config:
                 "arrival", "departure", "dwell_s", "dist_m", "matched"]
 
 
-# --------------------------------------------------------------------------- geometry
+# geometry
 def haversine(lat1, lon1, lat2, lon2):
     """Great-circle distance in metres (scalars or numpy arrays)."""
     R = 6371000.0
@@ -112,11 +112,11 @@ def haversine(lat1, lon1, lat2, lon2):
     return 2 * R * np.arcsin(np.sqrt(a))
 
 
-def real_anchor_stops(lg: dict) -> list:
+def real_anchor_stops(ligne: dict) -> list:
     """Geocoded stops only, in route order, keeping each stop's original route position."""
-    la = lg.get("array_lat_opendata") or []
-    lo = lg.get("array_lng_opendata") or []
-    names = lg.get("stationnames") or []
+    la = ligne.get("array_lat_opendata") or []
+    lo = ligne.get("array_lng_opendata") or []
+    names = ligne.get("stationnames") or []
     rows = []
     for i in range(min(len(la), len(lo))):
         try:
@@ -130,9 +130,9 @@ def real_anchor_stops(lg: dict) -> list:
     return rows
 
 
-def stops_frame(lg: dict) -> pd.DataFrame:
+def stops_frame(ligne: dict) -> pd.DataFrame:
     """Anchor stops with a compact `seq` and cumulative distance-along-route `s_m`."""
-    rows = real_anchor_stops(lg)
+    rows = real_anchor_stops(ligne)
     st = pd.DataFrame(rows)
     seg = haversine(st["lat"].values[:-1], st["lon"].values[:-1],
                     st["lat"].values[1:], st["lon"].values[1:])
@@ -141,20 +141,20 @@ def stops_frame(lg: dict) -> pd.DataFrame:
     return st
 
 
-def usable_geometry(lg: dict, cfg: Config) -> bool:
-    return len(real_anchor_stops(lg)) >= cfg.min_anchors
+def usable_geometry(ligne: dict, cfg: Config) -> bool:
+    return len(real_anchor_stops(ligne)) >= cfg.min_anchors
 
 
 def build_usable_lines(db: Database, cfg: Config) -> dict:
-    """Map {(code, societe) -> stops_frame} for every usable line (queried once)."""
-    out = {}
-    for lg in db["ligne"].find({}):
-        if usable_geometry(lg, cfg):
-            out[(str(lg["code"]), lg.get("societe"))] = stops_frame(lg)
+    """Map {(code, societe) -> stops_frame} for every usable line."""
+    out ={}
+    for linge in db["ligne"].find({}):
+        if usable_geometry(linge, cfg):
+            out[(str(linge["code"]), linge.get("societe"))] = stops_frame(linge)
     return out
 
 
-# --------------------------------------------------------------------------- pings
+# pings
 def load_pings(gps_db: Database, day: str, line: str, bus) -> pd.DataFrame:
     """One bus-day for one line. Filtered + projected query = memory-safe.
 

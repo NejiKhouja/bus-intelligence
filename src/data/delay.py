@@ -109,7 +109,7 @@ def trip_features(d: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# --------------------------------------------------------------------- day-type + rolling model
+# day-type + rolling model
 # Numeric + categorical features used by the rolling next-stop model. `line`/`dir` are passed
 # natively as categoricals (HistGradientBoosting handles them), so training and serving use the
 # exact same columns with no manual one-hot bookkeeping.
@@ -119,7 +119,7 @@ TARGET = "next_delay_min"
 
 
 def add_daytype(m: pd.DataFrame) -> pd.DataFrame:
-    """Add cheap calendar features. (Weather would need an external source -- not in the DB.)
+    """Add cheap calendar features. (Weather would need an external source not in the DB.)
     Tunisia's weekend is Saturday/Sunday -> dayofweek 5/6."""
     m = m.copy()
     m["is_weekend"] = m["dow"].isin([5, 6]).astype(int)
@@ -162,9 +162,7 @@ def train_rolling_model(roll: pd.DataFrame, **kw):
     return model
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # LSTM rolling delay model (PyTorch)
-# ──────────────────────────────────────────────────────────────────────────────
 
 # Features fed to the LSTM at each stop along a trip.
 # WHY these five:
@@ -321,7 +319,7 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
     no_improve = 0
 
     for ep in range(epochs):
-        # ── training pass ────────────────────────────────────────────────────
+        # training pass
         model.train()
         train_loss = 0.0
         for xb, yb in loader:
@@ -332,7 +330,7 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
             opt.step()
             train_loss += loss.item() * len(xb)
 
-        # ── validation pass (no gradients) ───────────────────────────────────
+        # validation pass (no gradients)
         model.eval()
         with torch.no_grad():
             val_loss = float(loss_fn(model(Xv), yv))
@@ -341,7 +339,7 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
             print(f"  epoch {ep+1:3d}/{epochs}  "
                   f"train={train_loss/len(X_tr):.4f}  val={val_loss:.4f}")
 
-        # ── early stopping: save best, stop if no improvement ────────────────
+        # early stopping
         if val_loss < best_val - 1e-4:
             best_val   = val_loss
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -431,9 +429,7 @@ def serve_eta_lstm(model, baseline: pd.DataFrame, *,
     return pd.DataFrame(rows)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Prophet delay forecasting
-# ──────────────────────────────────────────────────────────────────────────────
 
 def fit_prophet(d: pd.DataFrame, line: str, direction: str, societe: str):
     """Fit a Prophet model on the daily mean delay for one (line, dir).

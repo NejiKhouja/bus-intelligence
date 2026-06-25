@@ -13,3 +13,11 @@ the line is cut ,how many line has no stops,how many lines go from one terminal 
 
 -in preprocessing show the shecduled time in comparison to the actual depature and arrival
 -in preprocessing dist_m
+
+
+- add the weather and other features to the predictions factor like tunisian special seanoons summer ramadon etc etc 
+
+-you said this in the deduction 
+Then the LSTM could learn that "on route 209, approaching stop 15, buses consistently slow down more than Kalman predicts" and apply that learned bias to improve accuracy.
+
+but in the training pipline im training on many lines so it is worth the training time 
