@@ -1,25 +1,26 @@
-"""Delay layer -- built on top of the reconstructed arrival foundation.
+"""Couche retard — construite sur la fondation d'arrivées reconstruites.
 
-There are NO official per-stop timetables in the data (`ligne.horaires` only stores origin
-departure times). So "delay" here is measured against a DATA-DRIVEN baseline: the typical
-(median) time each line takes to reach each stop, learned from all reconstructed trips.
+Il n'y a PAS d'horaires officiels par arrêt dans les données (`ligne.horaires` ne stocke
+que les heures de départ à l'origine). Donc le « retard » ici est mesuré par rapport à une
+base de référence PILOTÉE PAR LES DONNÉES : le temps typique (médiane) que met chaque ligne
+pour atteindre chaque arrêt, appris à partir de tous les trajets reconstruits.
 
-    delay = actual elapsed-to-stop  -  expected elapsed-to-stop (baseline)
+    retard = temps écoulé réel jusqu'à l'arrêt  -  temps écoulé attendu jusqu'à l'arrêt (base de référence)
 
-Interpretation: this is delay *relative to how the line normally performs* (i.e. "this run
-is slower/faster than usual / disrupted"), NOT lateness vs a published schedule. If the
-company later provides real per-stop timetables, swap `build_baseline` for that schedule and
-everything downstream is unchanged.
+Interprétation : il s'agit du retard *par rapport aux performances habituelles de la ligne*
+(c'est-à-dire « cette course est plus lente/rapide que d'habitude / perturbée »), PAS du
+retard par rapport à un horaire publié. Si l'entreprise fournit ultérieurement de vrais
+horaires par arrêt, remplacer `build_baseline` par cet horaire et tout l'aval reste inchangé.
 
 Pipeline
 --------
-1. `with_elapsed`   - keep matched arrivals, compute minutes since the trip started, drop
-                      physically impossible values.
-2. `build_baseline` - expected elapsed-to-stop = median over trips, per
-                      (societe, line, dir, seq); keep cells with >= `min_obs` trips.
-3. `with_delay`     - delay = elapsed - expected; clip extreme artifacts.
-4. `trip_features`  - per-trip table for PREDICTION: state known at `cut_frac` of the route
-                      (delay so far, hour, line, ...) -> target = delay at the final stop.
+1. `with_elapsed`   - garder les arrivées correspondantes, calculer les minutes depuis le début
+                      du trajet, supprimer les valeurs physiquement impossibles.
+2. `build_baseline` - temps écoulé attendu jusqu'à l'arrêt = médiane sur les trajets, par
+                      (societe, line, dir, seq) ; garder les cellules avec >= `min_obs` trajets.
+3. `with_delay`     - retard = écoulé - attendu ; écrêter les artefacts extrêmes.
+4. `trip_features`  - table par trajet pour la PRÉDICTION : état connu à `cut_frac` de la route
+                      (retard jusqu'ici, heure, ligne, ...) -> cible = retard au dernier arrêt.
 """
 from __future__ import annotations
 
@@ -29,19 +30,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# NOTE: torch and prophet are imported lazily inside functions so the module
-# loads in environments that don't have them (e.g. py310 kernel).
+# NOTE : torch et prophet sont importés paresseusement à l'intérieur des fonctions pour que
+# le module se charge dans des environnements qui ne les ont pas (ex. noyau py310).
 
 TRIP_KEYS = ["day", "line", "societe", "bus", "trip_id"]
 
 
 @dataclass(frozen=True)
 class DelayConfig:
-    min_obs: int = 20            # min trips per (societe,line,dir,seq) to trust a baseline
-    max_elapsed_h: float = 24.0  # drop arrivals whose elapsed exceeds this (broken trips)
-    max_abs_delay_min: float = 120.0  # clip |delay| beyond this (reconstruction artifacts)
-    cut_frac: float = 0.40       # route fraction "known so far" when predicting final delay
-    min_trip_stops: int = 4      # trips need at least this many matched stops to be usable
+    min_obs: int = 20            # trajets min par (societe,line,dir,seq) pour faire confiance à une base de référence
+    max_elapsed_h: float = 24.0  # supprimer les arrivées dont le temps écoulé dépasse ceci (trajets cassés)
+    max_abs_delay_min: float = 120.0  # écrêter |retard| au-delà de ceci (artefacts de reconstruction)
+    cut_frac: float = 0.40       # fraction de la route « connue jusqu'ici » lors de la prédiction du retard final
+    min_trip_stops: int = 4      # les trajets ont besoin d'au moins ce nombre d'arrêts correspondants pour être utilisables
 
 
 def load_foundation(path: str | Path) -> pd.DataFrame:
@@ -53,7 +54,7 @@ def load_foundation(path: str | Path) -> pd.DataFrame:
 
 
 def with_elapsed(df: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
-    """Matched arrivals only, with `elapsed_min` = minutes from trip start to the stop."""
+    """Arrivées correspondantes uniquement, avec `elapsed_min` = minutes depuis le début du trajet jusqu'à l'arrêt."""
     m = df[df["matched"]].copy()
     m["elapsed_min"] = (m["arrival"] - m["trip_start"]).dt.total_seconds() / 60
     m = m[(m["elapsed_min"] >= 0) & (m["elapsed_min"] < cfg.max_elapsed_h * 60)]
@@ -63,7 +64,7 @@ def with_elapsed(df: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
 
 
 def build_baseline(m: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
-    """Expected elapsed-to-stop per (societe, line, dir, seq) -- the data-driven 'schedule'."""
+    """Temps écoulé attendu jusqu'à l'arrêt par (societe, line, dir, seq) — l'« horaire » piloté par les données."""
     g = m.groupby(["societe", "line", "dir", "seq"])["elapsed_min"]
     base = g.agg(expected_min="median", p10=lambda s: s.quantile(0.10),
                  p90=lambda s: s.quantile(0.90), n="count").reset_index()
@@ -71,7 +72,7 @@ def build_baseline(m: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
 
 
 def with_delay(m: pd.DataFrame, baseline: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
-    """Attach expected time and `delay_min = elapsed - expected` (clipped)."""
+    """Attache le temps attendu et `delay_min = écoulé - attendu` (écrêté)."""
     out = m.merge(baseline[["societe", "line", "dir", "seq", "expected_min"]],
                   on=["societe", "line", "dir", "seq"], how="inner")
     out["delay_min"] = (out["elapsed_min"] - out["expected_min"]).clip(
@@ -80,11 +81,11 @@ def with_delay(m: pd.DataFrame, baseline: pd.DataFrame, cfg: DelayConfig) -> pd.
 
 
 def trip_features(d: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
-    """One row per trip: the delay state known at `cut_frac` of the route (the moment we
-    'predict from') and the target = delay at the final reached stop.
+    """Une ligne par trajet : l'état du retard connu à `cut_frac` de la route (le moment où l'on
+    « prédit ») et la cible = retard au dernier arrêt atteint.
 
-    This is the table a delay-prediction model trains on: predict how late the bus will be
-    at the end of its run, given how it is doing partway through.
+    C'est la table sur laquelle un modèle de prédiction de retard s'entraîne : prédire le
+    retard du bus à la fin de sa course en fonction de ses performances à mi-parcours.
     """
     rows = []
     for keys, t in d.sort_values("seq").groupby(TRIP_KEYS):
@@ -102,25 +103,26 @@ def trip_features(d: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
             "dow": int(cur["dow"]),
             "cur_seq": int(cur["seq"]),
             "cur_seq_frac": float(cur["seq"] / smax) if smax else 0.0,
-            "cur_delay_min": float(cur["delay_min"]),     # delay so far  (key predictor)
+            "cur_delay_min": float(cur["delay_min"]),     # retard jusqu'ici  (prédicteur clé)
             "cur_elapsed_min": float(cur["elapsed_min"]),
-            "final_delay_min": float(fin["delay_min"]),   # TARGET
+            "final_delay_min": float(fin["delay_min"]),   # CIBLE
         })
     return pd.DataFrame(rows)
 
 
-# day-type + rolling model
-# Numeric + categorical features used by the rolling next-stop model. `line`/`dir` are passed
-# natively as categoricals (HistGradientBoosting handles them), so training and serving use the
-# exact same columns with no manual one-hot bookkeeping.
+# modèle par type de jour + glissant
+# Caractéristiques numériques + catégorielles utilisées par le modèle glissant au prochain arrêt.
+# `line`/`dir` sont passées nativement comme catégorielles (HistGradientBoosting les gère),
+# donc l'entraînement et l'inférence utilisent exactement les mêmes colonnes sans codage
+# one-hot manuel.
 FEATURES_NUM = ["dep_hour", "dow", "is_weekend", "seq", "seq_frac", "delay_min", "elapsed_min"]
 FEATURES_CAT = ["line", "dir"]
 TARGET = "next_delay_min"
 
 
 def add_daytype(m: pd.DataFrame) -> pd.DataFrame:
-    """Add cheap calendar features. (Weather would need an external source not in the DB.)
-    Tunisia's weekend is Saturday/Sunday -> dayofweek 5/6."""
+    """Ajoute des caractéristiques calendaires simples. (La météo nécessiterait une source externe absente de la BD.)
+    Le week-end tunisien est samedi/dimanche -> dayofweek 5/6."""
     m = m.copy()
     m["is_weekend"] = m["dow"].isin([5, 6]).astype(int)
     m["month"] = m["trip_start"].dt.month
@@ -128,10 +130,11 @@ def add_daytype(m: pd.DataFrame) -> pd.DataFrame:
 
 
 def rolling_table(d: pd.DataFrame) -> pd.DataFrame:
-    """One row per (trip, stop k): current state + target = delay at the NEXT stop k+1.
+    """Une ligne par (trajet, arrêt k) : état actuel + cible = retard à l'arrêt SUIVANT k+1.
 
-    This is the table the rolling model trains on -- predict the delay one stop ahead as the
-    bus progresses, which chains into a full ETA for the rest of the run.
+    C'est la table sur laquelle le modèle glissant s'entraîne — prédire le retard à un arrêt
+    en avance à mesure que le bus progresse, ce qui se chaîne en une ETA complète pour le
+    reste de la course.
     """
     d = d.sort_values(TRIP_KEYS + ["seq"]).copy()
     g = d.groupby(TRIP_KEYS)
@@ -149,7 +152,7 @@ def _design(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def train_rolling_model(roll: pd.DataFrame, **kw):
-    """Fit the next-stop delay model. `line`/`dir` handled as native categoricals."""
+    """Entraîne le modèle de retard au prochain arrêt. `line`/`dir` gérées comme catégorielles natives."""
     from sklearn.ensemble import HistGradientBoostingRegressor
     model = HistGradientBoostingRegressor(
         categorical_features=FEATURES_CAT,
@@ -162,39 +165,39 @@ def train_rolling_model(roll: pd.DataFrame, **kw):
     return model
 
 
-# LSTM rolling delay model (PyTorch)
+# Modèle LSTM glissant de retard (PyTorch)
 
-# Features fed to the LSTM at each stop along a trip.
-# WHY these five:
-#   delay_min    -- how late the bus is RIGHT NOW (strongest predictor; delay compounds)
-#   elapsed_min  -- absolute time since departure (captures long-haul fatigue effects)
-#   seq_frac     -- progress along route 0->1 (later stops see more accumulated delay)
-#   is_weekend   -- Tunisia weekend (Sat/Sun) is measurably less congested
-#   dep_hour     -- rush-hour vs off-peak behaviour
+# Caractéristiques fournies au LSTM à chaque arrêt le long d'un trajet.
+# POURQUOI ces cinq :
+#   delay_min    -- retard actuel du bus (prédicteur le plus fort ; le retard se cumule)
+#   elapsed_min  -- temps absolu depuis le départ (capture les effets de fatigue longue distance)
+#   seq_frac     -- progression le long de la route 0->1 (les arrêts tardifs voient plus de retard cumulé)
+#   is_weekend   -- le week-end tunisien (sam/dim) est mesurабlement moins embouteillé
+#   dep_hour     -- comportement heure de pointe vs hors pointe
 LSTM_STEP_FEATS = ["delay_min", "elapsed_min", "seq_frac", "is_weekend", "dep_hour"]
 
 
 def build_lstm_sequences(roll: pd.DataFrame, max_len: int = 30
                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build padded input sequences and targets for LSTM training.
+    """Construit des séquences d'entrée rembourrées et des cibles pour l'entraînement LSTM.
 
-    Sliding-window approach: for each trip and each stop k, the input is the
-    full history of stops [0..k] (right-aligned, zero-padded on the left) and
-    the target is the delay at the NEXT stop k+1.
+    Approche par fenêtre glissante : pour chaque trajet et chaque arrêt k, l'entrée est
+    l'historique complet des arrêts [0..k] (aligné à droite, rembourré de zéros à gauche)
+    et la cible est le retard à l'arrêt SUIVANT k+1.
 
-    WHY right-alignment: the LSTM reads left-to-right; placing the most recent
-    stop at the rightmost position means the hidden state at the last timestep
-    always reflects "right now", regardless of trip length.
+    POURQUOI l'alignement à droite : le LSTM lit de gauche à droite ; placer l'arrêt le plus
+    récent à la position la plus à droite signifie que l'état caché au dernier pas de temps
+    reflète toujours « maintenant », quelle que soit la longueur du trajet.
 
-    Returns
-    -------
-    X       : (N, max_len, n_feats)  -- padded raw feature sequences
-    lengths : (N,)                   -- true sequence length before padding
-    y       : (N,)                   -- target next_delay_min
+    Retourne
+    --------
+    X       : (N, max_len, n_feats)  -- séquences brutes rembourrées
+    lengths : (N,)                   -- vraie longueur de séquence avant rembourrage
+    y       : (N,)                   -- cible next_delay_min
 
-    NOTE: X is returned UN-normalised. Call fit_lstm_scaler(X_train) then
-    scale_sequences() before training so stats come from training data only
-    (no leakage into val/test).
+    NOTE : X est retourné NON normalisé. Appeler fit_lstm_scaler(X_train) puis
+    scale_sequences() avant l'entraînement pour que les statistiques viennent uniquement
+    des données d'entraînement (pas de fuite vers val/test).
     """
     seqs, lengths, targets = [], [], []
     roll = roll.sort_values(TRIP_KEYS + ["seq"])
@@ -214,42 +217,43 @@ def build_lstm_sequences(roll: pd.DataFrame, max_len: int = 30
 
 
 def fit_lstm_scaler(X_train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Compute per-feature mean and std from training sequences ONLY.
+    """Calcule la moyenne et l'écart-type par caractéristique à partir des séquences d'entraînement UNIQUEMENT.
 
-    WHY: delay_min ranges -120..+120, elapsed_min 0..600, dep_hour 0..23.
-    Without standardisation the LSTM gradient is dominated by the largest-scale
-    feature and the smaller ones (seq_frac, is_weekend) are effectively ignored.
+    POURQUOI : delay_min varie de -120..+120, elapsed_min de 0..600, dep_hour de 0..23.
+    Sans normalisation, le gradient du LSTM est dominé par la caractéristique à plus grande
+    échelle et les plus petites (seq_frac, is_weekend) sont effectivement ignorées.
 
-    MUST be called on X_train only. Apply the returned stats to val and test
-    with scale_sequences() to avoid data leakage.
+    DOIT être appelé sur X_train uniquement. Appliquer les statistiques retournées à val et test
+    avec scale_sequences() pour éviter la fuite de données.
 
-    Returns (mean, std) each shaped (n_feats,).
+    Retourne (mean, std) chacun de forme (n_feats,).
     """
-    # Flatten all timesteps from all training sequences to get global stats
+    # Aplatir tous les pas de temps de toutes les séquences d'entraînement pour obtenir les statistiques globales
     flat = X_train.reshape(-1, X_train.shape[-1])
     mean = flat.mean(axis=0)
-    std  = flat.std(axis=0) + 1e-8   # +eps prevents /0 on binary features (is_weekend)
+    std  = flat.std(axis=0) + 1e-8   # +eps empêche /0 sur les caractéristiques binaires (is_weekend)
     return mean.astype(np.float32), std.astype(np.float32)
 
 
 def scale_sequences(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    """Apply standardisation (z-score) to a (N, T, F) sequence array."""
+    """Applique la normalisation (z-score) à un tableau de séquences (N, T, F)."""
     return ((X - mean) / std).astype(np.float32)
 
 
 def _make_delay_lstm(n_feats: int, hidden: int = 64, n_layers: int = 2):
-    """Stacked LSTM encoder -> linear regression head.
+    """Encodeur LSTM empilé -> tête de régression linéaire.
 
-    Architecture choices:
-      - 2 layers: first layer learns local stop-to-stop patterns, second learns
-        trip-level trends (compounding, recovery).
-      - dropout=0.1 between layers: mild regularisation -- the sequences are short
-        (<=30 steps) so aggressive dropout hurts more than it helps.
-      - Output: scalar (regression, not classification -- we predict minutes, not
-        a binary "late/on time" label).
+    Choix d'architecture :
+      - 2 couches : la première apprend les schémas locaux arrêt-à-arrêt, la seconde
+        apprend les tendances au niveau du trajet (cumul, récupération).
+      - dropout=0.1 entre les couches : régularisation légère -- les séquences sont courtes
+        (<=30 pas) donc un dropout agressif fait plus de mal que de bien.
+      - Sortie : scalaire (régression, pas classification -- on prédit des minutes, pas
+        une étiquette binaire « en retard/à l'heure »).
 
-    WHY NOT Transformer: sequences are short (<=30 steps), dataset is ~100k
-    samples. LSTMs train faster and perform comparably at this scale.
+    POURQUOI PAS Transformer : les séquences sont courtes (<=30 pas), le jeu de données
+    fait ~100k échantillons. Les LSTM s'entraînent plus vite et performent de façon
+    comparable à cette échelle.
     """
     import torch.nn as nn
 
@@ -262,7 +266,7 @@ def _make_delay_lstm(n_feats: int, hidden: int = 64, n_layers: int = 2):
 
         def forward(self, x):
             out, _ = self.lstm(x)
-            return self.head(out[:, -1, :]).squeeze(-1)  # last timestep = current bus state
+            return self.head(out[:, -1, :]).squeeze(-1)  # dernier pas de temps = état actuel du bus
 
     return DelayLSTM()
 
@@ -271,32 +275,32 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
                      hidden: int = 64, n_layers: int = 2,
                      epochs: int = 30, lr: float = 1e-3, batch: int = 256,
                      patience: int = 5) -> object:
-    """Train LSTM delay predictor with validation split and early stopping.
+    """Entraîne le prédicteur de retard LSTM avec division de validation et arrêt anticipé.
 
-    Data split
-    ----------
-    X/y are already the TRAINING portion (day < cut_day). We split off the
-    last 10% of sequences as a temporal validation set. This is intentionally
-    the LAST 10% (not random) to simulate future data -- random shuffling would
-    leak future trip patterns into the validation set.
+    Division des données
+    --------------------
+    X/y sont déjà la portion d'ENTRAÎNEMENT (jour < cut_day). On sépare les
+    10 derniers % de séquences comme ensemble de validation temporel. C'est
+    intentionnellement les DERNIERS 10 % (pas aléatoire) pour simuler des données futures —
+    un mélange aléatoire fuirait les schémas de trajets futurs dans l'ensemble de validation.
 
-    Early stopping
-    --------------
-    Training halts when validation loss stops improving for `patience` epochs.
-    The BEST checkpoint (lowest val loss) is restored before returning, so the
-    model is never the overfitted end-of-training state.
+    Arrêt anticipé
+    ---------------
+    L'entraînement s'arrête quand la perte de validation cesse de s'améliorer pendant
+    `patience` époques. Le MEILLEUR point de contrôle (perte val la plus basse) est restauré
+    avant le retour, donc le modèle n'est jamais dans l'état de sur-ajustement de fin d'entraînement.
 
-    WHY patience=5: each epoch ~200s on CPU; 5 epochs grace = ~17 min max
-    overshoot before stopping. On GPU (10x faster) you can raise this.
+    POURQUOI patience=5 : chaque époque ~200s sur CPU ; 5 époques de grâce = ~17 min max
+    de dépassement avant arrêt. Sur GPU (10x plus rapide), on peut augmenter ceci.
 
-    Returns trained model (CPU, eval mode).
+    Retourne le modèle entraîné (CPU, mode évaluation).
     """
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Temporal val split: keep temporal order, take last 10% as val
+    # Division val temporelle : conserver l'ordre temporel, prendre les 10 derniers % comme val
     n_val = max(1, int(0.10 * len(X)))
     X_tr, X_val = X[:-n_val], X[-n_val:]
     y_tr, y_val = y[:-n_val], y[-n_val:]
@@ -319,7 +323,7 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
     no_improve = 0
 
     for ep in range(epochs):
-        # training pass
+        # passe d'entraînement
         model.train()
         train_loss = 0.0
         for xb, yb in loader:
@@ -330,16 +334,16 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
             opt.step()
             train_loss += loss.item() * len(xb)
 
-        # validation pass (no gradients)
+        # passe de validation (sans gradients)
         model.eval()
         with torch.no_grad():
             val_loss = float(loss_fn(model(Xv), yv))
 
         if (ep + 1) % 5 == 0:
-            print(f"  epoch {ep+1:3d}/{epochs}  "
+            print(f"  époque {ep+1:3d}/{epochs}  "
                   f"train={train_loss/len(X_tr):.4f}  val={val_loss:.4f}")
 
-        # early stopping
+        # arrêt anticipé
         if val_loss < best_val - 1e-4:
             best_val   = val_loss
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -347,11 +351,11 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
         else:
             no_improve += 1
             if no_improve >= patience:
-                print(f"  Early stopping at epoch {ep+1}  "
-                      f"(best val={best_val:.4f})")
+                print(f"  Arrêt anticipé à l'époque {ep+1}  "
+                      f"(meilleure val={best_val:.4f})")
                 break
 
-    # Restore the best checkpoint, not the last epoch
+    # Restaurer le meilleur point de contrôle, pas la dernière époque
     if best_state is not None:
         model.load_state_dict(best_state)
 
@@ -361,10 +365,10 @@ def train_lstm_delay(X: np.ndarray, y: np.ndarray, *,
 def predict_lstm(model, X: np.ndarray,
                  scaler_mean: np.ndarray | None = None,
                  scaler_std:  np.ndarray | None = None) -> np.ndarray:
-    """Run inference on a batch of sequences. Returns (N,) predictions.
+    """Exécute l'inférence sur un lot de séquences. Retourne (N,) prédictions.
 
-    If scaler_mean/std are provided the input is normalised before inference --
-    the same transform applied during training must be applied here.
+    Si scaler_mean/std sont fournis, l'entrée est normalisée avant l'inférence —
+    la même transformation appliquée pendant l'entraînement doit être appliquée ici.
     """
     import torch
     if scaler_mean is not None:
@@ -379,15 +383,15 @@ def serve_eta_lstm(model, baseline: pd.DataFrame, *,
                    max_len: int = 30,
                    scaler_mean: np.ndarray | None = None,
                    scaler_std:  np.ndarray | None = None) -> pd.DataFrame:
-    """ETA table for all remaining stops using the trained LSTM.
+    """Table ETA pour tous les arrêts restants en utilisant le LSTM entraîné.
 
-    At each step we build the history up to the current stop, right-align it,
-    apply the same normalisation used during training, and predict the next
-    stop's delay. We then advance and repeat -- this is autoregressive inference.
+    À chaque étape, on construit l'historique jusqu'à l'arrêt actuel, on l'aligne à droite,
+    on applique la même normalisation utilisée pendant l'entraînement, et on prédit le retard
+    au prochain arrêt. On avance ensuite et on répète — c'est une inférence autorégressive.
 
-    WHY autoregressive (rather than predicting all stops at once): the model
-    was trained to predict ONE step ahead; feeding its own output back as input
-    lets it extrapolate the full route without requiring a variable-length output.
+    POURQUOI autorégressive (plutôt que prédire tous les arrêts à la fois) : le modèle a
+    été entraîné à prédire UN pas en avant ; réinjecter sa propre sortie comme entrée
+    permet d'extrapoler la route complète sans nécessiter une sortie de longueur variable.
     """
     b = baseline[(baseline["societe"] == societe) & (baseline["line"] == line)
                  & (baseline["dir"] == direction)].sort_values("seq")
@@ -400,7 +404,7 @@ def serve_eta_lstm(model, baseline: pd.DataFrame, *,
     exp  = dict(zip(b["seq"].astype(int), b["expected_min"]))
     smax = int(b["seq"].max())
 
-    # Seed the rolling history with the bus's known current state
+    # Initialiser l'historique glissant avec l'état actuel connu du bus
     history: list[list[float]] = [
         [current_delay_min, exp.get(current_seq, 0.0) + current_delay_min,
          current_seq / smax if smax else 0.0, is_wkend, dep_hour]
@@ -429,12 +433,12 @@ def serve_eta_lstm(model, baseline: pd.DataFrame, *,
     return pd.DataFrame(rows)
 
 
-# Prophet delay forecasting
+# Prévision de retard avec Prophet
 
 def fit_prophet(d: pd.DataFrame, line: str, direction: str, societe: str):
-    """Fit a Prophet model on the daily mean delay for one (line, dir).
+    """Ajuste un modèle Prophet sur le retard moyen quotidien pour un (ligne, dir).
 
-    Returns the fitted Prophet model. Input `d` must have delay_min and trip_start.
+    Retourne le modèle Prophet ajusté. L'entrée `d` doit avoir delay_min et trip_start.
     """
     from prophet import Prophet
     import warnings
@@ -455,7 +459,7 @@ def fit_prophet(d: pd.DataFrame, line: str, direction: str, societe: str):
 
 
 def prophet_forecast(m, periods: int = 30) -> pd.DataFrame:
-    """Forecast `periods` days ahead. Returns ds, yhat, yhat_lower, yhat_upper."""
+    """Prévoit `periods` jours en avance. Retourne ds, yhat, yhat_lower, yhat_upper."""
     future = m.make_future_dataframe(periods=periods)
     fc = m.predict(future)
     return fc[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(periods).reset_index(drop=True)
@@ -463,10 +467,11 @@ def prophet_forecast(m, periods: int = 30) -> pd.DataFrame:
 
 def serve_eta(model, baseline: pd.DataFrame, *, societe, line, direction, dep_time,
               current_seq: int, current_delay_min: float) -> pd.DataFrame:
-    """PRODUCTION ETA: given a bus's live state (where it is + how late it is now), roll the
-    next-stop model forward to predict delay -- and a clock ETA -- at every remaining stop.
+    """ETA DE PRODUCTION : étant donné l'état en direct d'un bus (où il est + son retard actuel),
+    fait avancer le modèle au prochain arrêt pour prédire le retard — et une ETA en heures —
+    à chaque arrêt restant.
 
-    Returns one row per downstream stop: seq, expected_min (baseline), pred_delay_min, eta.
+    Retourne une ligne par arrêt en aval : seq, expected_min (base de référence), pred_delay_min, eta.
     """
     b = baseline[(baseline["societe"] == societe) & (baseline["line"] == line)
                  & (baseline["dir"] == direction)].sort_values("seq")

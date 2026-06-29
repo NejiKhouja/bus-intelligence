@@ -1,0 +1,89 @@
+WiniCari — AI Layer for Tunisian Bus Operations
+================================================
+
+WHAT WE ARE DOING
+-----------------
+Adding an AI intelligence layer on top of the WiniCari bus-management platform
+used by Tunisian bus companies (S.R.T.K, S.R.T.N, S.T.S). The platform already
+stores GPS telemetry, ticketing records, and route definitions in MongoDB. We do
+not touch that system — we read from it, build a clean dataset, and train models
+on top.
+
+WHY
+---
+Tunisian bus operators have no real-time intelligence: they cannot predict when a
+bus will be late, they lose track of buses during GPS outages, they have no
+automated way to flag broken or suspicious trips, and dispatchers have no easy
+way to query fleet data in plain language. This project gives them all four
+capabilities without requiring any change to their existing software.
+
+THE DATA FOUNDATION
+-------------------
+Raw GPS pings and ticketing records are noisy and fragmented. Before any modeling
+we reconstruct clean trips: match GPS positions to known stops, compute elapsed
+times, dwell times at each stop, and distances. This produces a structured table
+of 168,481 stop-level rows covering 20,743 trips across 29 lines (Jan 2025 to
+Jun 2026). Everything downstream is built on this foundation.
+
+THE 4 MODULES AND THEIR FEATURES
+---------------------------------
+
+Module 1 — Delay Prediction
+  What: predicts how many minutes late a bus will be at every remaining stop,
+        updated in real time as the trip progresses.
+  Features used: current delay, elapsed time since departure, stop index,
+                 fraction of route completed, hour of day, day of week,
+                 weekend flag, line, direction.
+  Models: HistGBM (MAE ~2.7 min), LSTM (sequence of past stops), Prophet
+          (daily average delay forecast per line for planning).
+  Why: passengers and dispatchers can see accurate ETAs instead of fixed
+       timetables that rarely hold.
+
+Module 2 — GPS Fallback
+  What: estimates the bus position when the GPS signal drops (common in
+        tunnels, dense areas, or transponder faults).
+  Features used: last known position and speed, Kalman filter state
+                 (position + velocity + uncertainty), recent speed history.
+  Models: linear interpolation (short gaps), dead reckoning, Kalman filter,
+          LSTM correction on top of Kalman (learns route-specific bias).
+  Why: GPS outages currently create blind spots in the monitoring dashboard.
+       The fallback keeps the bus visible with a growing uncertainty band
+       until signal recovers.
+
+Module 3 — Anomaly Detection
+  What: automatically flags trips that look broken, unusual, or suspicious
+        without any human labelling (fully unsupervised).
+  Features used (trip-level): number of stops, GPS match rate, max and mean
+        dwell time at a stop, total trip duration, max snap distance.
+  Features used (sequence-level): dwell time, snap distance, and matched flag
+        at each stop in order.
+  Models: Isolation Forest (flags ~5% of trips at the trip level), LSTM
+          Autoencoder (flags trips whose stop-by-stop profile was never seen
+          during training — pinpoints where in the trip the anomaly occurred).
+  Why: manual inspection of 20,000+ trips per period is impossible. Automated
+       flagging lets staff investigate only the ~5% that look genuinely wrong
+       (parked layovers counted as trips, GPS drift causing false stops, etc.).
+
+Module 4 — RAG Chatbot
+  What: lets a dispatcher ask plain-language questions about the fleet and get
+        answers grounded in real data ("Which lines had the most anomalies last
+        month?", "What is the average delay on line 209?").
+  How it works: line summaries, company stats, and anomaly reports are embedded
+        with sentence-transformers and stored in ChromaDB. A question retrieves
+        the relevant documents and Llama 3 (via Groq) writes the answer.
+  Why: non-technical staff cannot write database queries. A chatbot removes
+       that barrier entirely.
+
+KNOWN LIMITATIONS AND OPEN QUESTIONS
+--------------------------------------
+- No actual scheduled timetables in the data — delay is measured against a
+  statistical baseline built from historical GPS data, not official schedules.
+- Lines with zero geocoded stops (likely terminal-to-terminal direct runs)
+  are not fully handled yet — need more analysis to decide if they count as
+  full trips or should be treated differently.
+- Weather, Ramadan, and summer seasonal features have not been added to the
+  delay model yet — would likely improve accuracy on predictable seasonal spikes.
+- The LSTM delay model trains on all lines together; a per-line bias correction
+  (as Kalman does) could further reduce error on specific routes.
+- Partial trips (bus starting mid-route, turning back early) and layovers
+  splitting trips need more careful definition and handling in the foundation.

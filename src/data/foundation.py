@@ -1,61 +1,66 @@
 
-"""GPS trip reconstruction — the shared foundation layer.
+"""Reconstruction de trajets GPS — la couche de fondation partagée.
 
-Turns raw GPS pings (`Historique_pos`) into reconstructed trips with a derived actual
-arrival time per stop. Used by Delay prediction (labels), Anomaly detection and GPS
-Fallback. This module is the single source of truth; the notebook and the batch CLI
-(`build_foundation.py`) both import from here.
+Transforme les pings GPS bruts (`Historique_pos`) en trajets reconstruits avec l'heure
+d'arrivée réelle dérivée à chaque arrêt. Utilisée par la prédiction de retard (labels),
+la détection d'anomalies et le repli GPS. Ce module est la source de vérité unique ;
+le notebook et le CLI batch (`build_foundation.py`) importent tous deux depuis ici.
 
-How the segmentation is made (the 4-step chain)
-------------------------------------------------
-1. CLEAN  (`clean_pings`)
-   Drop consecutive identical-coordinate pings (a parked bus still pings every ~5 s, ~10%
-   of rows), keeping the FIRST contact so arrival timing is preserved. Annotate the time
-   gap between pings and flag `signal_gap` where the bus went quiet.
+Comment la segmentation est réalisée (chaîne en 4 étapes)
+----------------------------------------------------------
+1. NETTOYAGE  (`clean_pings`)
+   Supprime les pings consécutifs aux coordonnées identiques (un bus stationné ping encore
+   toutes les ~5 s, ~10% des lignes), en gardant le PREMIER contact pour préserver
+   l'horodatage d'arrivée. Annote le délai entre les pings et signale `signal_gap`
+   quand le bus est passé en silence.
 
-2. MAP-MATCH  (`project_to_route`)
-   Project every ping onto the line's anchor polyline to get `s` = distance along the route
-   in metres (then smoothed). The match is *windowed-sequential* — each ping is matched only
-   near the previous ping's segment — which stops `s` from jumping backward when anchors are
-   sparse. This turns a messy lat/lon track into ONE clean number that rises as the bus
-   heads toward the far terminus and falls on the way back.
+2. CORRESPONDANCE CARTOGRAPHIQUE  (`project_to_route`)
+   Projette chaque ping sur la polyligne d'ancrage de la ligne pour obtenir `s` = distance
+   le long du trajet en mètres (puis lissée). La correspondance est *séquentielle-fenêtrée* —
+   chaque ping n'est mis en correspondance que près du segment du ping précédent — ce qui
+   empêche `s` de reculer quand les ancres sont clairsemées. Transforme un tracé lat/lon
+   désordonné en UN seul nombre propre qui monte vers le terminus éloigné et descend au retour.
 
-3. SEGMENT  (`segment_trips`) — watch `s` over time:
-   - A TURNAROUND = `s` reverses by more than a hysteresis threshold
-     (`reversal_frac * route_len`, so it scales: large for a 192 km line, small for a 6 km
-     loop). Each stretch between turnarounds is a trip; direction = ALLER if `s` rises,
-     RETOUR if it falls.
-   - A run is split ONLY at a *parked layover* (a long time-gap where `s` barely changed),
-     so a mid-route SIGNAL gap does not fake a new trip.
-   - Trips shorter than `min_span` / `min_trip_min` are dropped; each is tagged `full`
-     (spans both route ends) or PARTIAL (bus turned back early, or the day ended mid-run).
+3. SEGMENTATION  (`segment_trips`) — surveiller `s` dans le temps :
+   - UN DEMI-TOUR = `s` s'inverse de plus qu'un seuil d'hystérésis
+     (`reversal_frac * route_len`, donc adaptatif : grand pour une ligne de 192 km,
+     petit pour une boucle de 6 km). Chaque tronçon entre demi-tours est un trajet ;
+     direction = ALLER si `s` monte, RETOUR si elle descend.
+   - Une course est divisée UNIQUEMENT à une *pause stationnée* (long écart temporel
+     où `s` a à peine bougé), de sorte qu'une interruption de signal en milieu de route
+     ne crée pas un faux nouveau trajet.
+   - Les trajets plus courts que `min_span` / `min_trip_min` sont supprimés ; chacun est
+     étiqueté `full` (couvre les deux extrémités) ou PARTIEL (bus revenu prématurément
+     ou journée terminée en cours de route).
 
-4. ARRIVALS  (`derive_arrivals`)
-   For each trip, snap the stops in its covered range to the nearest ping, in travel order
-   with monotonically increasing times; `matched` flags whether the bus passed within
-   `arrival_thresh_m` (350 m). Match rate per line is the headline data-quality signal.
+4. ARRIVÉES  (`derive_arrivals`)
+   Pour chaque trajet, accroche les arrêts dans sa plage couverte au ping le plus proche,
+   dans l'ordre de voyage avec des temps strictement croissants ; `matched` indique si le
+   bus est passé dans un rayon `arrival_thresh_m` (350 m). Le taux de correspondance par
+   ligne est le signal principal de qualité des données.
 
-What this layer does and does NOT compute yet
----------------------------------------------
-DONE   - actual ARRIVAL time per stop (`arrival`), trip structure, signal gaps.
-DONE   - STOPPAGE / DWELL per stop (`departure`, `dwell_s`): arrival = first ping within
-         range, departure = last consecutive ping still within range before the bus moves
-         on, dwell_s = their gap. A long dwell is a strong anomaly signal (breakdown /
-         incident / unscheduled stop). NOTE: requires re-running build_foundation to appear
-         in the persisted dataset.
-TODO   - DELAY: delay = actual - scheduled arrival. We have `actual` but there are no
-         per-stop scheduled times — `ligne.horaires` only stores DEPARTURE times at the
-         origin, not a per-stop timetable. Built in 03_delay against a DATA-DRIVEN baseline
-         (median observed elapsed-to-stop) rather than an official schedule.
-This module is the prerequisite LAYER; delay (03_delay) is the next layer on top of it.
+Ce que cette couche fait et ne calcule PAS encore
+--------------------------------------------------
+FAIT   - heure d'ARRIVÉE réelle à chaque arrêt (`arrival`), structure du trajet, écarts de signal.
+FAIT   - STATIONNEMENT / IMMOBILISATION par arrêt (`departure`, `dwell_s`) : arrivée = premier
+         ping dans la zone, départ = dernier ping consécutif encore dans la zone avant que le bus
+         ne reparte, dwell_s = leur écart. Un long stationnement est un signal d'anomalie fort
+         (panne / incident / arrêt non prévu). NOTE : nécessite de ré-exécuter build_foundation
+         pour apparaître dans le jeu de données persisté.
+À FAIRE - RETARD : retard = arrivée réelle - arrivée prévue. Nous avons `réelle` mais il n'y a
+          pas d'horaires par arrêt — `ligne.horaires` ne stocke que les heures de DÉPART à
+          l'origine. Construit dans 03_delay sur une base de référence pilotée par les données
+          (médiane observée du temps écoulé jusqu'à l'arrêt) plutôt qu'un horaire officiel.
+Ce module est la COUCHE prérequise ; le retard (03_delay) est la couche suivante au-dessus.
 
-Assumptions / limits
+Hypothèses / limites
 ---------------------
-- Line geometry is the ordered `array_lat/lng_opendata` anchors with `0.0` placeholders
-  dropped; routes need >= `min_anchors` real anchors. With sparse anchors the polyline is
-  a coarse approximation of the road, which is why segmentation uses distance *swings*
-  with hysteresis rather than exact map-matching.
-- `code` is not unique across companies; always key by `(code, societe)`.
+- La géométrie de la ligne est constituée des ancres `array_lat/lng_opendata` ordonnées avec
+  les espaces réservés `0.0` supprimés ; les routes nécessitent >= `min_anchors` vraies ancres.
+  Avec des ancres clairsemées, la polyligne est une approximation grossière de la route,
+  c'est pourquoi la segmentation utilise des oscillations de distance avec hystérésis plutôt
+  qu'une correspondance cartographique exacte.
+- `code` n'est pas unique entre entreprises ; toujours clé par `(code, societe)`.
 """
 from __future__ import annotations
 
@@ -68,32 +73,32 @@ import pandas as pd
 from pymongo.database import Database
 
 
-# config
+# configuration
 @dataclass(frozen=True)
 class Config:
-    # geometry
-    min_anchors: int = 4              # min real anchor stops for a line to be usable
-    # candidate selection
-    min_pings: int = 300              # min pings for a (day, line, bus) to be worth running
-    first_usable_day: str = "d20220601"   # route-link (service.codeLigne) starts ~here
-    # cleaning
-    dedup_round: int = 6              # coord rounding for stationary-duplicate removal
-    signal_gap_s: int = 600           # annotate gaps larger than this
-    # projection (map-matching)
-    proj_window: int = 3              # sequential search window (segments) around last match
-    proj_gap_reset_s: int = 900       # after a gap larger than this, re-search globally
-    smooth_window: int = 15           # rolling-median window on distance-along-route
-    # segmentation (scale-invariant in route length)
-    reversal_frac: float = 0.15       # turnaround hysteresis as fraction of route length
+    # géométrie
+    min_anchors: int = 4              # nombre min d'ancres réelles pour qu'une ligne soit utilisable
+    # sélection des candidats
+    min_pings: int = 300              # pings min pour qu'un (jour, ligne, bus) vaille la peine d'être traité
+    first_usable_day: str = "d20220601"   # le lien de service (service.codeLigne) commence ~ici
+    # nettoyage
+    dedup_round: int = 6              # arrondi des coordonnées pour la suppression des doublons stationnaires
+    signal_gap_s: int = 600           # annoter les écarts supérieurs à ceci
+    # projection (correspondance cartographique)
+    proj_window: int = 3              # fenêtre de recherche séquentielle (segments) autour du dernier match
+    proj_gap_reset_s: int = 900       # après un écart supérieur à ceci, rechercher globalement
+    smooth_window: int = 15           # fenêtre de médiane glissante sur la distance le long de la route
+    # segmentation (invariante par rapport à la longueur de la route)
+    reversal_frac: float = 0.15       # hystérésis de demi-tour en fraction de la longueur de la route
     reversal_floor_m: float = 2000.0
-    min_span_frac: float = 0.06       # min trip length as fraction of route length
+    min_span_frac: float = 0.06       # longueur min du trajet en fraction de la longueur de la route
     min_span_floor_m: float = 1500.0
-    min_trip_min: float = 8.0         # min trip duration
-    layover_gap_s: int = 2400         # split a run only at gaps >= this ...
-    park_frac: float = 0.05           # ... and only if the bus barely moved across the gap
-    full_frac: float = 0.10           # trip is "full" if it spans both route ends within this band
-    # arrival snapping
-    arrival_thresh_m: float = 350.0   # max ping-to-stop distance to count as an arrival
+    min_trip_min: float = 8.0         # durée min du trajet
+    layover_gap_s: int = 2400         # diviser une course uniquement aux écarts >= ceci ...
+    park_frac: float = 0.05           # ... et seulement si le bus a à peine bougé pendant l'écart
+    full_frac: float = 0.10           # le trajet est "complet" s'il couvre les deux extrémités dans cette bande
+    # accrochage des arrivées
+    arrival_thresh_m: float = 350.0   # distance max ping-à-arrêt pour compter comme une arrivée
 
     @property
     def out_columns(self) -> list:
@@ -102,9 +107,9 @@ class Config:
                 "arrival", "departure", "dwell_s", "dist_m", "matched"]
 
 
-# geometry
+# géométrie
 def haversine(lat1, lon1, lat2, lon2):
-    """Great-circle distance in metres (scalars or numpy arrays)."""
+    """Distance orthodromique en mètres (scalaires ou tableaux numpy)."""
     R = 6371000.0
     p = np.pi / 180
     a = (np.sin((lat2 - lat1) * p / 2) ** 2
@@ -113,7 +118,7 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 def real_anchor_stops(ligne: dict) -> list:
-    """Geocoded stops only, in route order, keeping each stop's original route position."""
+    """Arrêts géocodés uniquement, dans l'ordre de la route, en conservant la position originale de chaque arrêt."""
     la = ligne.get("array_lat_opendata") or []
     lo = ligne.get("array_lng_opendata") or []
     names = ligne.get("stationnames") or []
@@ -123,7 +128,7 @@ def real_anchor_stops(ligne: dict) -> list:
             lat, lon = float(la[i]), float(lo[i])
         except (TypeError, ValueError):
             continue
-        if abs(lat) > 1 and abs(lon) > 1:                 # drop 0.0 placeholders
+        if abs(lat) > 1 and abs(lon) > 1:                 # supprimer les espaces réservés 0.0
             rows.append({"route_seq": i,
                          "name": names[i] if i < len(names) else f"stop{i}",
                          "lat": lat, "lon": lon})
@@ -131,7 +136,7 @@ def real_anchor_stops(ligne: dict) -> list:
 
 
 def stops_frame(ligne: dict) -> pd.DataFrame:
-    """Anchor stops with a compact `seq` and cumulative distance-along-route `s_m`."""
+    """Arrêts d'ancrage avec un `seq` compact et une distance cumulée le long de la route `s_m`."""
     rows = real_anchor_stops(ligne)
     st = pd.DataFrame(rows)
     seg = haversine(st["lat"].values[:-1], st["lon"].values[:-1],
@@ -146,7 +151,7 @@ def usable_geometry(ligne: dict, cfg: Config) -> bool:
 
 
 def build_usable_lines(db: Database, cfg: Config) -> dict:
-    """Map {(code, societe) -> stops_frame} for every usable line."""
+    """Table {(code, societe) -> stops_frame} pour chaque ligne utilisable."""
     out ={}
     for linge in db["ligne"].find({}):
         if usable_geometry(linge, cfg):
@@ -156,10 +161,11 @@ def build_usable_lines(db: Database, cfg: Config) -> dict:
 
 # pings
 def load_pings(gps_db: Database, day: str, line: str, bus) -> pd.DataFrame:
-    """One bus-day for one line. Filtered + projected query = memory-safe.
+    """Un bus-jour pour une ligne. Requête filtrée + projetée = économe en mémoire.
 
-    Speed: prefer top-level `speed`; fall back to `bus.vitesse` only when absent (in 2025+
-    data `bus.vitesse` is often a stale 0, so `speed` is authoritative when present).
+    Vitesse : préférer `speed` au niveau supérieur ; utiliser `bus.vitesse` en secours uniquement
+    quand absent (dans les données 2025+, `bus.vitesse` est souvent un 0 obsolète,
+    donc `speed` fait autorité quand présent).
     """
     cur = gps_db[day].find(
         {"service.codeLigne": line, "bus.code": bus},
@@ -181,8 +187,8 @@ def load_pings(gps_db: Database, day: str, line: str, bus) -> pd.DataFrame:
 
 
 def clean_pings(g: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """Drop consecutive identical-coordinate pings (stationary spam), keeping the first
-    contact so arrival timing is preserved; annotate `gap_s` and `signal_gap`."""
+    """Supprime les pings consécutifs aux coordonnées identiques (spam stationnaire), en gardant le premier
+    contact pour préserver l'horodatage d'arrivée ; annote `gap_s` et `signal_gap`."""
     if len(g) == 0:
         return g
     r = cfg.dedup_round
@@ -196,10 +202,11 @@ def clean_pings(g: pd.DataFrame, cfg: Config) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- projection
 def project_to_route(g: pd.DataFrame, stops: pd.DataFrame, cfg: Config):
-    """Sequential (windowed) map-match: distance-along-route `s` and off-route `off`.
+    """Correspondance cartographique séquentielle (fenêtrée) : distance le long de la route `s` et hors-route `off`.
 
-    Constraining each ping's matched segment to a small window around the previous match
-    keeps `s` physically smooth despite sparse anchors. Returns (g_with_s_off, route_len_m).
+    Contraindre le segment correspondant de chaque ping à une petite fenêtre autour du match
+    précédent maintient `s` physiquement lisse malgré des ancres clairsemées.
+    Retourne (g_with_s_off, route_len_m).
     """
     slat, slon = stops["lat"].values, stops["lon"].values
     cum = stops["s_m"].values
@@ -243,8 +250,9 @@ def project_to_route(g: pd.DataFrame, stops: pd.DataFrame, cfg: Config):
 
 # --------------------------------------------------------------------------- segmentation
 def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config) -> pd.DataFrame:
-    """Direction-swing segmentation. Captures full and partial trips; splits a run at a
-    gap only when the bus was parked across it (a real between-run layover)."""
+    """Segmentation par oscillation de direction. Capture les trajets complets et partiels ;
+    divise une course à un écart uniquement quand le bus était stationné pendant celui-ci
+    (une vraie pause entre courses)."""
     if len(g) < 5 or route_len <= 0:
         return pd.DataFrame()
     rev = max(cfg.reversal_floor_m, cfg.reversal_frac * route_len)
@@ -256,7 +264,7 @@ def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config) -> pd.DataFram
     gp = g["gap_s"].values
     N = len(g)
 
-    # zigzag pivots with hysteresis on distance-along-route
+    # pivots en zigzag avec hystérésis sur la distance le long de la route
     piv = [0]
     direction = 0
     ext = 0
@@ -279,7 +287,7 @@ def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config) -> pd.DataFram
 
     trips = []
     for a, b in zip(piv[:-1], piv[1:]):
-        # split a same-direction run only at parked layover gaps
+        # diviser une course dans la même direction uniquement aux pauses stationnées
         cuts = [a] + [i for i in range(a + 1, b + 1)
                       if gp[i] > cfg.layover_gap_s and abs(s_raw[i] - s_raw[i - 1]) < park] + [b]
         for sa, se in zip(sorted(set(cuts))[:-1], sorted(set(cuts))[1:]):
@@ -299,14 +307,15 @@ def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config) -> pd.DataFram
     return pd.DataFrame(trips).reset_index(drop=True)
 
 
-# --------------------------------------------------------------------------- arrivals
+# --------------------------------------------------------------------------- arrivées
 def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """Snap stops within the trip's covered range to pings, in travel order, enforcing
-    monotonic arrival times. Returns one row per covered stop (matched or not).
+    """Accroche les arrêts dans la plage couverte du trajet aux pings, dans l'ordre de voyage,
+    en imposant des temps d'arrivée monotones. Retourne une ligne par arrêt couvert (correspondant ou non).
 
-    Also derives STOPPAGE/DWELL: `arrival` = first ping within range, `departure` = last
-    consecutive ping still within range before the bus moves on, `dwell_s` = their gap. A
-    long dwell is a strong anomaly signal (breakdown / incident / unscheduled stop).
+    Dérive aussi le STATIONNEMENT/IMMOBILISATION : `arrival` = premier ping dans la zone,
+    `departure` = dernier ping consécutif encore dans la zone avant que le bus ne reparte,
+    `dwell_s` = leur écart. Un long stationnement est un signal d'anomalie fort
+    (panne / incident / arrêt non prévu).
     """
     seg = g[(g["t"] >= trip["start"]) & (g["t"] <= trip["end"])]
     if len(seg) == 0:
@@ -319,7 +328,7 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
     order = covered.sort_values("s_m", ascending=(trip["dir"] == "ALLER"))
 
     out = []
-    ptr = 0                                   # enforce monotonic arrivals along the trip
+    ptr = 0                                   # imposer des arrivées monotones le long du trajet
     for _, st in order.iterrows():
         if ptr >= len(seg):
             d_arr, j_local, matched = np.inf, None, False
@@ -331,7 +340,7 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
 
         departure, dwell_s = pd.NaT, None
         if matched:
-            # departure = last *consecutive* ping still within range of this stop
+            # départ = dernier ping *consécutif* encore dans la zone de cet arrêt
             d_fwd = haversine(lat[j_local:], lon[j_local:], st["lat"], st["lon"])
             within = d_fwd <= cfg.arrival_thresh_m
             last = 0
@@ -359,7 +368,7 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
 
 def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
                         stops: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """Full pipeline for one (day, line, societe, bus). Returns stop-arrival rows."""
+    """Pipeline complet pour un (jour, ligne, societe, bus). Retourne les lignes d'arrivée aux arrêts."""
     g = clean_pings(load_pings(gps_db, day, line, bus), cfg)
     if len(g) < 20:
         return pd.DataFrame()
@@ -379,9 +388,9 @@ def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-# --------------------------------------------------------------------------- candidates
+# --------------------------------------------------------------------------- candidats
 def candidates_for_day(gps_db: Database, day: str, usable: dict, cfg: Config) -> list:
-    """Distinct (day, line, societe, bus) active that day on usable-geometry lines."""
+    """Couples distincts (jour, ligne, societe, bus) actifs ce jour sur des lignes à géométrie utilisable."""
     pipe = [{"$group": {"_id": {"l": "$service.codeLigne", "s": "$service.societe",
                                 "b": "$bus.code"}, "n": {"$sum": 1}}}]
     out = []
@@ -393,6 +402,6 @@ def candidates_for_day(gps_db: Database, day: str, usable: dict, cfg: Config) ->
 
 
 def gps_days(gps_db: Database, cfg: Config) -> list:
-    """Sorted daily GPS collections from the first route-linked day onward."""
+    """Collections GPS journalières triées à partir du premier jour avec lien de service."""
     return sorted(x for x in gps_db.list_collection_names()
                   if re.fullmatch(r"d\d{8}", x) and x >= cfg.first_usable_day)

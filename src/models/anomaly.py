@@ -1,9 +1,9 @@
-"""Anomaly Detection module -- train, save, load, score.
+"""Module de détection d'anomalies — entraîner, sauvegarder, charger, scorer.
 
-Complete lifecycle for Module 3:
-  train()  -> Isolation Forest + LSTM Autoencoder -> saved to models/anomaly/
-  load()   -> loads artefacts from disk
-  score()  -> flags anomalous trips in new data with both models
+Cycle de vie complet pour le Module 3 :
+  train()  -> Isolation Forest + Autoencodeur LSTM -> sauvegardé dans models/anomaly/
+  load()   -> charge les artefacts depuis le disque
+  score()  -> signale les trajets anormaux dans de nouvelles données avec les deux modèles
 """
 from __future__ import annotations
 
@@ -19,20 +19,20 @@ SAVE_DIR = Path("models/anomaly")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Train
+# Entraînement
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train(foundation_path: str | Path,
           save_dir: str | Path = SAVE_DIR) -> dict:
-    """Train Isolation Forest + LSTM Autoencoder on the full foundation.
+    """Entraîne l'Isolation Forest + l'Autoencodeur LSTM sur la fondation complète.
 
-    Saves:
-      isolation_forest.joblib   -- IF model
-      if_scaler.npz             -- feature mean/std for scaling
-      lstm_ae.pt                -- LSTM Autoencoder state dict
-      lstm_ae_config.json       -- architecture params
-      lstm_ae_threshold.npy     -- 95th-percentile reconstruction error (train set)
-      trips_scored.parquet      -- all trips with IF anomaly scores/flags
+    Sauvegarde :
+      isolation_forest.joblib   -- modèle IF
+      if_scaler.npz             -- moyenne/écart-type des caractéristiques pour la normalisation
+      lstm_ae.pt                -- dictionnaire d'état de l'Autoencodeur LSTM
+      lstm_ae_config.json       -- paramètres d'architecture
+      lstm_ae_threshold.npy     -- erreur de reconstruction au 95e percentile (ensemble d'entraînement)
+      trips_scored.parquet      -- tous les trajets avec scores/flags d'anomalie IF
     """
     import joblib
     import torch
@@ -41,7 +41,7 @@ def train(foundation_path: str | Path,
     save_dir.mkdir(parents=True, exist_ok=True)
     cfg = _an.AnomalyConfig()
 
-    print("  Loading foundation...")
+    print("  Chargement de la fondation...")
     fa = pd.read_parquet(foundation_path)
     fa["arrival"] = pd.to_datetime(fa["arrival"])
     fa["trip_start"] = pd.to_datetime(fa["trip_start"])
@@ -50,30 +50,30 @@ def train(foundation_path: str | Path,
     fa["dwell_s"] = fa.get("dwell_s", pd.Series(0.0, index=fa.index)).fillna(0)
 
     # ── Isolation Forest ─────────────────────────────────────────────────────
-    print("  Training Isolation Forest...")
+    print("  Entraînement de l'Isolation Forest...")
     trips = _an.trip_features(fa, cfg)
-    print(f"    trips: {len(trips):,}")
+    print(f"    trajets : {len(trips):,}")
 
     if_model, if_mean, if_std = _an.train_isolation_forest(trips, cfg)
     trips_scored = _an.score_trips(if_model, if_mean, if_std, trips)
     n_if = int(trips_scored["anomaly"].sum())
-    print(f"    flagged: {n_if}/{len(trips)} ({100*n_if/len(trips):.1f}%)")
+    print(f"    signalés : {n_if}/{len(trips)} ({100*n_if/len(trips):.1f}%)")
 
     joblib.dump(if_model, save_dir / "isolation_forest.joblib")
     np.savez(save_dir / "if_scaler.npz", mean=if_mean, std=if_std)
 
-    # ── LSTM Autoencoder ─────────────────────────────────────────────────────
-    print("  Training LSTM Autoencoder...")
+    # ── Autoencodeur LSTM ────────────────────────────────────────────────────
+    print("  Entraînement de l'Autoencodeur LSTM...")
     X, _ = _an.build_sequences(fa, cfg)
-    print(f"    sequences: {X.shape}")
+    print(f"    séquences : {X.shape}")
 
     lstm_ae, train_errors = _an.train_lstm_autoencoder(X, cfg)
     threshold = float(np.percentile(train_errors, 95))
     lstm_scores = _an.lstm_anomaly_scores(lstm_ae, X)
     n_lstm = int((lstm_scores > threshold).sum())
-    print(f"    flagged: {n_lstm}/{len(X)} (threshold={threshold:.5f})")
+    print(f"    signalés : {n_lstm}/{len(X)} (seuil={threshold:.5f})")
 
-    # Attach LSTM scores to trips_scored (aligned by position; IF and LSTM trips share same order)
+    # Attacher les scores LSTM aux trips_scored (alignés par position ; trajets IF et LSTM dans le même ordre)
     n_pad = max(0, len(trips_scored) - len(lstm_scores))
     trips_scored["lstm_score"]   = np.concatenate([lstm_scores, np.zeros(n_pad)])[:len(trips_scored)]
     trips_scored["lstm_anomaly"] = trips_scored["lstm_score"] > threshold
@@ -86,7 +86,7 @@ def train(foundation_path: str | Path,
         json.dump({"hidden": cfg.lstm_hidden, "seq_pad": cfg.seq_pad,
                    "n_feats": X.shape[2]}, f)
 
-    print(f"  -> Anomaly artefacts saved to {save_dir}")
+    print(f"  -> Artefacts d'anomalie sauvegardés dans {save_dir}")
     return {
         "if_model": if_model, "lstm_ae": lstm_ae, "trips": trips_scored,
         "n_if": n_if, "n_lstm": n_lstm, "threshold": threshold,
@@ -94,13 +94,13 @@ def train(foundation_path: str | Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load
+# Chargement
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load(save_dir: str | Path = SAVE_DIR) -> dict:
-    """Load trained anomaly models from save_dir.
+    """Charge les modèles d'anomalie entraînés depuis save_dir.
 
-    Returns dict: if_model, if_mean, if_std, lstm_ae, threshold, trips.
+    Retourne dict : if_model, if_mean, if_std, lstm_ae, threshold, trips.
     """
     import joblib
     import torch
@@ -122,7 +122,7 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     threshold = float(np.load(save_dir / "lstm_ae_threshold.npy"))
     trips = pd.read_parquet(save_dir / "trips_scored.parquet")
 
-    print(f"Anomaly models loaded (IF + LSTM AE, threshold={threshold:.5f})")
+    print(f"Modèles d'anomalie chargés (IF + LSTM AE, seuil={threshold:.5f})")
     return {
         "if_model": if_model, "if_mean": scaler["mean"], "if_std": scaler["std"],
         "lstm_ae": lstm_ae, "threshold": threshold, "trips": trips,
@@ -130,18 +130,18 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Serve
+# Service
 # ─────────────────────────────────────────────────────────────────────────────
 
 def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
-    """Score trips in new data with both models.
+    """Score les trajets dans de nouvelles données avec les deux modèles.
 
-    Returns trips DataFrame with columns:
-      anomaly        -- IF flag
-      if_score       -- IF raw score (more negative = more anomalous)
-      lstm_score     -- LSTM reconstruction error
-      lstm_anomaly   -- LSTM flag (score > threshold)
-      dual_anomaly   -- flagged by both models
+    Retourne le DataFrame de trajets avec les colonnes :
+      anomaly        -- flag IF
+      if_score       -- score IF brut (plus négatif = plus anormal)
+      lstm_score     -- erreur de reconstruction LSTM
+      lstm_anomaly   -- flag LSTM (score > seuil)
+      dual_anomaly   -- signalé par les deux modèles
     """
     cfg = _an.AnomalyConfig()
     fa = fa.copy()
@@ -154,7 +154,7 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
     X, _ = _an.build_sequences(fa, cfg)
     if len(X) > 0:
         lstm_scores = _an.lstm_anomaly_scores(models["lstm_ae"], X)
-        # align: sequences may cover fewer trips than trip_features (min_trip_stops filter)
+        # aligner : les séquences peuvent couvrir moins de trajets que trip_features (filtre min_trip_stops)
         trips["lstm_score"] = np.pad(lstm_scores, (0, max(0, len(trips) - len(lstm_scores))))[:len(trips)]
         trips["lstm_anomaly"] = trips["lstm_score"] > models["threshold"]
     else:

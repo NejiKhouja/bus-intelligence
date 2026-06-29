@@ -1,25 +1,25 @@
-"""Anomaly detection layer — scores trips and stops as normal or anomalous.
+"""Couche de détection d'anomalies — évalue les trajets et les arrêts comme normaux ou anormaux.
 
-Two complementary models
-------------------------
+Deux modèles complémentaires
+-----------------------------
 Isolation Forest (scikit-learn)
-    Trained on per-trip feature vectors. Assigns an anomaly score to each trip
-    (-1 = anomalous, 1 = normal). Fast, no labels needed, interpretable features.
-    Good for flagging whole trips: "this run was unusual overall."
+    Entraîné sur des vecteurs de caractéristiques par trajet. Attribue un score d'anomalie
+    à chaque trajet (-1 = anormal, 1 = normal). Rapide, sans labels, caractéristiques
+    interprétables. Bon pour signaler des trajets entiers : « cette course était inhabituellement ».
 
-Autoencoder LSTM (PyTorch)
-    Trained on stop-level sequences (dwell, dist_m, matched) to learn what a
-    normal trip progression looks like. Reconstruction error = anomaly score.
-    Good for pinpointing *where* in a trip something went wrong.
+Autoencodeur LSTM (PyTorch)
+    Entraîné sur des séquences au niveau des arrêts (dwell, dist_m, matched) pour apprendre
+    à quoi ressemble une progression normale d'un trajet. L'erreur de reconstruction = score
+    d'anomalie. Bon pour localiser *où* dans un trajet quelque chose s'est mal passé.
 
-Anomaly signals used
---------------------
-- max_dwell_s   : longest stop dwell in the trip (breakdown / incident signal)
-- mean_dwell_s  : average stop dwell
-- n_stops       : how many stops were matched (low -> GPS or geometry problem)
-- match_rate    : fraction of stops with a GPS arrival (low -> bus deviated)
-- total_elapsed : total trip time in minutes (far from baseline -> suspect)
-- dist_m_max    : worst snap distance across stops (far off route)
+Signaux d'anomalie utilisés
+----------------------------
+- max_dwell_s   : immobilisation maximale à un arrêt dans le trajet (signal de panne / incident)
+- mean_dwell_s  : immobilisation moyenne aux arrêts
+- n_stops       : nombre d'arrêts correspondants (faible -> problème GPS ou de géométrie)
+- match_rate    : fraction des arrêts avec une arrivée GPS (faible -> bus dévié)
+- total_elapsed : durée totale du trajet en minutes (loin de la base de référence -> suspect)
+- dist_m_max    : pire distance d'accrochage entre tous les arrêts (loin de la route)
 """
 from __future__ import annotations
 
@@ -33,22 +33,22 @@ TRIP_KEYS = ["day", "line", "societe", "bus", "trip_id"]
 
 @dataclass(frozen=True)
 class AnomalyConfig:
-    if_contamination: float = 0.05   # expected fraction of anomalous trips
+    if_contamination: float = 0.05   # fraction attendue de trajets anormaux
     if_n_estimators: int = 200
     lstm_hidden: int = 32
     lstm_epochs: int = 30
     lstm_lr: float = 1e-3
     lstm_batch: int = 64
-    seq_pad: int = 30               # pad/truncate sequences to this many stops
+    seq_pad: int = 30               # rembourrer/tronquer les séquences à ce nombre d'arrêts
     min_trip_stops: int = 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature engineering
+# Ingénierie des caractéristiques
 # ─────────────────────────────────────────────────────────────────────────────
 
 def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
-    """One row per trip: aggregate dwell/match/elapsed into a feature vector."""
+    """Une ligne par trajet : agrège immobilisation/correspondance/durée en vecteur de caractéristiques."""
     fa = fa.copy()
     fa["elapsed_min"] = (fa["arrival"] - fa["trip_start"]).dt.total_seconds() / 60
 
@@ -76,7 +76,7 @@ FEATURES = ["n_stops", "match_rate", "max_dwell_s", "mean_dwell_s",
 
 
 def _scale(X: np.ndarray, mean: np.ndarray = None, std: np.ndarray = None):
-    """Standard-scale X; return (X_scaled, mean, std)."""
+    """Normalise X (z-score) ; retourne (X_normalisé, mean, std)."""
     if mean is None:
         mean = X.mean(axis=0)
         std = X.std(axis=0) + 1e-8
@@ -84,11 +84,11 @@ def _scale(X: np.ndarray, mean: np.ndarray = None, std: np.ndarray = None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model 1 — Isolation Forest
+# Modèle 1 — Isolation Forest
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train_isolation_forest(trips: pd.DataFrame, cfg: AnomalyConfig):
-    """Fit Isolation Forest on trip feature matrix. Returns (model, scaler_mean, scaler_std)."""
+    """Entraîne l'Isolation Forest sur la matrice de caractéristiques des trajets. Retourne (modèle, scaler_mean, scaler_std)."""
     from sklearn.ensemble import IsolationForest
     X = trips[FEATURES].values.astype(float)
     X_s, mean, std = _scale(X)
@@ -104,29 +104,29 @@ def train_isolation_forest(trips: pd.DataFrame, cfg: AnomalyConfig):
 
 def score_trips(model, mean: np.ndarray, std: np.ndarray,
                 trips: pd.DataFrame) -> pd.DataFrame:
-    """Add `if_score` (raw, higher = more normal) and `anomaly` (bool) to trips."""
+    """Ajoute `if_score` (brut, plus élevé = plus normal) et `anomaly` (bool) aux trajets."""
     X = trips[FEATURES].values.astype(float)
     X_s, _, _ = _scale(X, mean, std)
     trips = trips.copy()
-    trips["if_score"] = model.score_samples(X_s)   # negative; more negative = more anomalous
+    trips["if_score"] = model.score_samples(X_s)   # négatif ; plus négatif = plus anormal
     trips["anomaly"] = model.predict(X_s) == -1
     return trips
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model 2 — Autoencoder LSTM (PyTorch)
+# Modèle 2 — Autoencodeur LSTM (PyTorch)
 # ─────────────────────────────────────────────────────────────────────────────
 
 SEQ_FEATURES = ["dwell_s", "dist_m", "matched"]
 
 
 def build_sequences(fa: pd.DataFrame, cfg: AnomalyConfig) -> tuple[np.ndarray, list]:
-    """Convert per-stop data into fixed-length padded sequences for LSTM.
+    """Convertit les données par arrêt en séquences rembourrées de longueur fixe pour le LSTM.
 
-    Returns (X, trip_ids) where X has shape (n_trips, seq_pad, n_seq_features).
+    Retourne (X, trip_ids) où X a la forme (n_trajets, seq_pad, n_seq_features).
     """
     fa = fa.sort_values(TRIP_KEYS + ["seq"]).copy()
-    fa["dwell_s"] = fa["dwell_s"].fillna(0).clip(0, 3600) / 3600   # normalise 0-1h
+    fa["dwell_s"] = fa["dwell_s"].fillna(0).clip(0, 3600) / 3600   # normaliser 0-1h
     fa["dist_m"] = fa["dist_m"].fillna(0).clip(0, 5000) / 5000
     fa["matched"] = fa["matched"].astype(float)
 
@@ -135,7 +135,7 @@ def build_sequences(fa: pd.DataFrame, cfg: AnomalyConfig) -> tuple[np.ndarray, l
         if len(grp) < cfg.min_trip_stops:
             continue
         arr = grp[SEQ_FEATURES].values.astype(np.float32)
-        # pad or truncate to seq_pad
+        # rembourrer ou tronquer à seq_pad
         T = cfg.seq_pad
         if len(arr) >= T:
             arr = arr[:T]
@@ -148,7 +148,7 @@ def build_sequences(fa: pd.DataFrame, cfg: AnomalyConfig) -> tuple[np.ndarray, l
 
 
 def _make_lstm_autoencoder(seq_len: int, n_feat: int, hidden: int):
-    """Build a simple LSTM autoencoder in PyTorch."""
+    """Construit un autoencodeur LSTM simple en PyTorch."""
     import torch
     import torch.nn as nn
 
@@ -161,7 +161,7 @@ def _make_lstm_autoencoder(seq_len: int, n_feat: int, hidden: int):
 
         def forward(self, x):
             _, (h, _) = self.encoder(x)
-            # repeat the hidden state as decoder input
+            # répéter l'état caché comme entrée du décodeur
             dec_in = h.permute(1, 0, 2).expand(-1, seq_len, -1)
             out, _ = self.decoder(dec_in)
             return self.output(out)
@@ -170,7 +170,7 @@ def _make_lstm_autoencoder(seq_len: int, n_feat: int, hidden: int):
 
 
 def train_lstm_autoencoder(X: np.ndarray, cfg: AnomalyConfig):
-    """Train LSTM autoencoder; returns (model, per-sample recon errors on training set)."""
+    """Entraîne l'autoencodeur LSTM ; retourne (modèle, erreurs de reconstruction par échantillon sur l'ensemble d'entraînement)."""
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -193,7 +193,7 @@ def train_lstm_autoencoder(X: np.ndarray, cfg: AnomalyConfig):
             opt.step()
             total += loss.item() * len(batch)
         if (ep + 1) % 10 == 0:
-            print(f"  epoch {ep+1}/{cfg.lstm_epochs}  loss={total/len(X):.5f}")
+            print(f"  époque {ep+1}/{cfg.lstm_epochs}  perte={total/len(X):.5f}")
 
     model.eval()
     with torch.no_grad():
@@ -203,7 +203,7 @@ def train_lstm_autoencoder(X: np.ndarray, cfg: AnomalyConfig):
 
 
 def lstm_anomaly_scores(model, X: np.ndarray) -> np.ndarray:
-    """Return per-trip reconstruction errors for a trained LSTM autoencoder."""
+    """Retourne les erreurs de reconstruction par trajet pour un autoencodeur LSTM entraîné."""
     import torch
     device = next(model.parameters()).device
     with torch.no_grad():

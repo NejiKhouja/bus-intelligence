@@ -1,9 +1,9 @@
-"""RAG Chatbot module -- build, load, ask.
+"""Module chatbot RAG — construire, charger, interroger.
 
-Complete lifecycle for Module 4:
-  build()  -> embeds documents and persists ChromaDB index
-  load()   -> loads existing ChromaDB index from disk
-  ask()    -> full RAG pipeline: retrieve -> generate with Llama 3 via Groq
+Cycle de vie complet pour le Module 4 :
+  build()  -> encapsule les documents et persiste l'index ChromaDB
+  load()   -> charge l'index ChromaDB existant depuis le disque
+  ask()    -> pipeline RAG complet : récupérer -> générer avec Llama 3 via Groq
 """
 from __future__ import annotations
 
@@ -18,26 +18,26 @@ CHROMA_DIR = Path("data/processed/chroma_kb")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Build
+# Construction
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build(foundation_path: str | Path,
           line_distances_path: str | Path,
           anomaly_trips_path: str | Path | None = None,
           chroma_dir: str | Path = CHROMA_DIR) -> dict:
-    """Build the ChromaDB knowledge base from foundation + anomaly artefacts.
+    """Construit la base de connaissances ChromaDB à partir de la fondation + artefacts d'anomalies.
 
-    Documents generated:
-      - One per (societe, line): geometry, coverage, distance
-      - One per company: trips, service days, match rate
-      - One per anomalous trip (if anomaly_trips_path provided)
+    Documents générés :
+      - Un par (societe, line) : géométrie, couverture, distance
+      - Un par entreprise : trajets, jours de service, taux de correspondance
+      - Un par trajet anormal (si anomaly_trips_path est fourni)
 
-    Overwrites any existing collection. Call again to refresh after a data rebuild.
+    Écrase toute collection existante. Relancer pour rafraîchir après une reconstruction des données.
     """
     chroma_dir = Path(chroma_dir)
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    print("  Loading data for knowledge base...")
+    print("  Chargement des données pour la base de connaissances...")
     fa = pd.read_parquet(foundation_path)
     fa["arrival"] = pd.to_datetime(fa["arrival"])
     fa["trip_start"] = pd.to_datetime(fa["trip_start"])
@@ -57,37 +57,37 @@ def build(foundation_path: str | Path,
                                          str(chroma_dir), _rag.DEFAULT_EMBED_MODEL)
 
     n_anomaly = sum(1 for m in metas if m["type"] == "anomaly")
-    print(f"  -> Knowledge base built: {col.count()} docs "
-          f"({len(ids)-n_anomaly} factual + {n_anomaly} anomaly)")
+    print(f"  -> Base de connaissances construite : {col.count()} docs "
+          f"({len(ids)-n_anomaly} factuels + {n_anomaly} anomalies)")
     return {"col": col, "embed_model": embed_model}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load
+# Chargement
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load(chroma_dir: str | Path = CHROMA_DIR) -> dict:
-    """Load an existing ChromaDB knowledge base from disk.
+    """Charge une base de connaissances ChromaDB existante depuis le disque.
 
-    Returns dict: col, embed_model.
+    Retourne dict : col, embed_model.
     """
     col, embed_model = _rag.load_chroma(str(chroma_dir), _rag.DEFAULT_EMBED_MODEL)
-    print(f"Knowledge base loaded: {col.count()} documents")
+    print(f"Base de connaissances chargée : {col.count()} documents")
     return {"col": col, "embed_model": embed_model}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Serve
+# Service
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ask(models: dict, query: str,
         *,
         api_key: str | None = None,
         k: int = 5) -> dict:
-    """Full RAG pipeline: retrieve context -> generate answer with Llama 3.
+    """Pipeline RAG complet : récupérer le contexte -> générer la réponse avec Llama 3.
 
-    api_key: Groq API key. Falls back to GROQ_API_KEY env var.
-    Returns dict: answer (str), context (list[str]), tokens_used (int).
+    api_key : clé API Groq. Retombe sur la variable d'environnement GROQ_API_KEY.
+    Retourne dict : answer (str), context (list[str]), tokens_used (int).
     """
     api_key = api_key or os.getenv("GROQ_API_KEY")
     return _rag.ask(

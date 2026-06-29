@@ -1,24 +1,24 @@
-"""RAG Chatbot layer — operators query the network in plain language.
+"""Couche chatbot RAG — les opérateurs interrogent le réseau en langage naturel.
 
 Architecture
 ------------
-1. Knowledge base (ChromaDB)
-   Text documents are generated from the foundation + anomaly results:
-   - One document per line: geometry, coverage, distance, typical delay
-   - One document per flagged anomaly: date, company, what happened
-   - Company summaries: service days, match rate, coverage quality
+1. Base de connaissances (ChromaDB)
+   Des documents texte sont générés à partir des résultats de fondation + anomalies :
+   - Un document par ligne : géométrie, couverture, distance, retard typique
+   - Un document par anomalie signalée : date, entreprise, ce qui s'est passé
+   - Résumés par entreprise : jours de service, taux de correspondance, qualité de couverture
 
-2. Retrieval (sentence-transformers)
-   Query is embedded with the same model used to embed the knowledge base.
-   ChromaDB returns the top-k most relevant documents.
+2. Récupération (sentence-transformers)
+   La requête est encapsulée avec le même modèle utilisé pour encapsuler la base de connaissances.
+   ChromaDB retourne les k documents les plus pertinents.
 
-3. Generation (Groq / Llama 3)
-   The retrieved context + the user's question are sent to Llama 3.
-   The model answers in plain language, grounded in the retrieved facts.
+3. Génération (Groq / Llama 3)
+   Le contexte récupéré + la question de l'utilisateur sont envoyés à Llama 3.
+   Le modèle répond en langage naturel, fondé sur les faits récupérés.
 
-Key design decision: keep the knowledge base small and factual (no raw GPS
-rows). Documents are aggregated summaries — this keeps retrieval fast and
-prevents hallucination from irrelevant context.
+Décision de conception clé : garder la base de connaissances petite et factuelle (pas de lignes
+GPS brutes). Les documents sont des résumés agrégés — cela maintient la récupération rapide
+et empêche les hallucinations à partir d'un contexte non pertinent.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ COLLECTION_NAME     = "winicari_kb"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Document generation — turn structured data into searchable text
+# Génération de documents — transformer les données structurées en texte consultable
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _line_doc(row: pd.Series) -> str:
@@ -43,21 +43,21 @@ def _line_doc(row: pd.Series) -> str:
     geo = row.get("geocoded_stops", 0)
     tot = row.get("total_stops", 0)
     return (
-        f"Line {row['line']} operated by {row['societe']}. "
-        f"Route length: {km:.1f} km. "
-        f"Stop coverage: {cov} ({geo}/{tot} stops geocoded). "
-        f"Country: {row.get('country', 'Tunisia')}."
+        f"Ligne {row['line']} exploitée par {row['societe']}. "
+        f"Longueur de route : {km:.1f} km. "
+        f"Couverture des arrêts : {cov} ({geo}/{tot} arrêts géocodés). "
+        f"Pays : {row.get('country', 'Tunisie')}."
     )
 
 
 def _trip_doc(row: pd.Series) -> str:
     dwell = row.get("max_dwell_s", 0)
     return (
-        f"Anomalous trip detected: line {row['line']} ({row['societe']}), "
+        f"Trajet anormal détecté : ligne {row['line']} ({row['societe']}), "
         f"direction {row['dir']}, date {row['day']}, bus {row['bus']}. "
-        f"Max stop dwell: {dwell:.0f} s ({dwell/60:.1f} min). "
-        f"Match rate: {100*row['match_rate']:.0f}%. "
-        f"Trip duration: {row['total_elapsed']:.0f} min."
+        f"Immobilisation max à un arrêt : {dwell:.0f} s ({dwell/60:.1f} min). "
+        f"Taux de correspondance : {100*row['match_rate']:.0f}%. "
+        f"Durée du trajet : {row['total_elapsed']:.0f} min."
     )
 
 
@@ -68,9 +68,9 @@ def _company_doc(societe: str, fa: pd.DataFrame) -> str:
     match = 100 * sub["matched"].mean()
     trips = sub.groupby(["day", "line", "bus", "trip_id"]).ngroups
     return (
-        f"Company {societe}: operates {lines} lines in the foundation dataset. "
-        f"{days} service days, {trips} trips reconstructed. "
-        f"Average GPS stop match rate: {match:.0f}%."
+        f"Entreprise {societe} : exploite {lines} lignes dans le jeu de données de fondation. "
+        f"{days} jours de service, {trips} trajets reconstruits. "
+        f"Taux de correspondance GPS moyen : {match:.0f}%."
     )
 
 
@@ -78,10 +78,10 @@ def build_knowledge_base(fa: pd.DataFrame,
                          line_dist: pd.DataFrame,
                          anomalies: pd.DataFrame | None = None
                          ) -> tuple[list[str], list[str], list[dict]]:
-    """Return (documents, ids, metadatas) ready for ChromaDB ingestion."""
+    """Retourne (documents, ids, métadonnées) prêts pour l'ingestion dans ChromaDB."""
     docs, ids, metas = [], [], []
 
-    # Line geometry documents (deduplicate on (societe, line) first)
+    # Documents de géométrie de ligne (dédupliquer sur (societe, line) d'abord)
     seen_lines = set()
     for _, row in line_dist.iterrows():
         key = (str(row["societe"]), str(row["line"]))
@@ -94,14 +94,14 @@ def build_knowledge_base(fa: pd.DataFrame,
         metas.append({"type": "line", "societe": str(row["societe"]),
                       "line": str(row["line"])})
 
-    # Company summary documents
+    # Documents de résumé par entreprise
     for soc in fa["societe"].unique():
         doc = _company_doc(soc, fa)
         did = f"company_{soc}"
         docs.append(doc); ids.append(did)
         metas.append({"type": "company", "societe": str(soc)})
 
-    # Anomaly documents (if supplied)
+    # Documents d'anomalies (si fournis)
     if anomalies is not None:
         for i, row in anomalies.iterrows():
             doc = _trip_doc(row)
@@ -114,13 +114,13 @@ def build_knowledge_base(fa: pd.DataFrame,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ChromaDB — build / load the vector store
+# ChromaDB — construire / charger le magasin de vecteurs
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_chroma(docs: list[str], ids: list[str], metas: list[dict],
                  persist_dir: str | Path,
                  embed_model: str = DEFAULT_EMBED_MODEL):
-    """Embed documents and persist to ChromaDB. Overwrites any existing collection."""
+    """Encapsule les documents et persiste dans ChromaDB. Écrase toute collection existante."""
     import chromadb
     from sentence_transformers import SentenceTransformer
 
@@ -136,13 +136,13 @@ def build_chroma(docs: list[str], ids: list[str], metas: list[dict],
     model = SentenceTransformer(embed_model)
     embeddings = model.encode(docs, show_progress_bar=True, batch_size=64).tolist()
     col.add(documents=docs, embeddings=embeddings, ids=ids, metadatas=metas)
-    print(f"ChromaDB: {col.count()} documents indexed at {persist_dir}")
+    print(f"ChromaDB : {col.count()} documents indexés dans {persist_dir}")
     return col, model
 
 
 def load_chroma(persist_dir: str | Path,
                 embed_model: str = DEFAULT_EMBED_MODEL):
-    """Load an existing ChromaDB collection."""
+    """Charge une collection ChromaDB existante."""
     import chromadb
     from sentence_transformers import SentenceTransformer
 
@@ -153,41 +153,43 @@ def load_chroma(persist_dir: str | Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Retrieval
+# Récupération
 # ─────────────────────────────────────────────────────────────────────────────
 
 def retrieve(query: str, col, model, k: int = 5) -> list[str]:
-    """Return the top-k most relevant document texts for the query."""
+    """Retourne les textes des k documents les plus pertinents pour la requête."""
     q_emb = model.encode([query]).tolist()
     res = col.query(query_embeddings=q_emb, n_results=k)
     return res["documents"][0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Generation — Groq / Llama 3
+# Génération — Groq / Llama 3
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an intelligent assistant for WiniCari, a Tunisian public transport \
-management platform. You answer questions from bus company operators and managers about \
-their network — delays, anomalies, GPS coverage, line distances, company performance, etc.
+SYSTEM_PROMPT = """Vous êtes un assistant intelligent pour WiniCari, une plateforme tunisienne \
+de gestion des transports publics. Vous répondez aux questions des opérateurs et gestionnaires \
+de compagnies de bus sur leur réseau — retards, anomalies, couverture GPS, distances de lignes, \
+performances des entreprises, etc.
 
-Answer ONLY from the provided context. If the context does not contain enough information, \
-say so clearly. Be concise and factual. Use numbers when available."""
+Répondez UNIQUEMENT à partir du contexte fourni. Si le contexte ne contient pas assez \
+d'informations, dites-le clairement. Soyez concis et factuel. Utilisez des chiffres quand \
+ils sont disponibles."""
 
 
 def ask(query: str, col, embed_model, *,
         k: int = 5,
         llm_model: str = DEFAULT_LLM_MODEL,
         api_key: str | None = None) -> dict:
-    """Full RAG pipeline: retrieve context, generate answer.
+    """Pipeline RAG complet : récupérer le contexte, générer la réponse.
 
-    Returns dict with keys: answer, context (list of retrieved docs).
+    Retourne un dict avec les clés : answer, context (liste de docs récupérés).
     """
     from groq import Groq
 
     api_key = api_key or os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("GROQ_API_KEY not set — add it to .env or pass api_key=")
+        raise ValueError("GROQ_API_KEY non défini — ajoutez-le à .env ou passez api_key=")
 
     context_docs = retrieve(query, col, embed_model, k=k)
     context_text = "\n\n".join(f"[{i+1}] {d}" for i, d in enumerate(context_docs))
@@ -197,7 +199,7 @@ def ask(query: str, col, embed_model, *,
         model=llm_model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": f"Context:\n{context_text}\n\nQuestion: {query}"},
+            {"role": "user",   "content": f"Contexte :\n{context_text}\n\nQuestion : {query}"},
         ],
         temperature=0.2,
         max_tokens=512,

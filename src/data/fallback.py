@@ -1,31 +1,31 @@
-"""GPS Fallback layer — position estimates during signal gaps.
+"""Couche de repli GPS — estimations de position pendant les interruptions de signal.
 
-When a bus loses GPS for > signal_gap_s seconds the operator dashboard shows
-the bus as 'disappeared'. This layer fills the gap with a position estimate
-derived from the route geometry.
+Quand un bus perd le GPS pendant plus de `signal_gap_s` secondes, le tableau de bord
+opérateur affiche le bus comme « disparu ». Cette couche comble l'écart avec une
+estimation de position dérivée de la géométrie de la route.
 
-Baseline methods
+Méthodes de base
 ----------------
-linear_interp   Interpolate s (route distance, metres) linearly between the
-                last known ping before the gap and the first ping after.
+linear_interp   Interpole s (distance le long de la route, en mètres) linéairement entre
+                le dernier ping connu avant l'écart et le premier ping après.
 
-dead_reckoning  Project forward from the last ping using its reported speed.
-                Useful when no recovery ping exists yet (bus is currently dark).
+dead_reckoning  Projette en avant depuis le dernier ping en utilisant sa vitesse rapportée.
+                Utile quand aucun ping de récupération n'existe encore (bus actuellement dark).
 
-Upgraded methods
-----------------
-Kalman filter   Tracks state [s, velocity] along the route. Each GPS ping is
-                a noisy measurement; during a gap only the predict step runs,
-                giving a principled uncertainty estimate (covariance grows).
-                Implemented with filterpy.KalmanFilter.
+Méthodes améliorées
+-------------------
+Filtre de Kalman  Suit l'état [s, vitesse] le long de la route. Chaque ping GPS est une
+                  mesure bruitée ; pendant un écart seule l'étape de prédiction s'exécute,
+                  donnant une estimation d'incertitude rigoureuse (la covariance croît).
+                  Implémenté avec filterpy.KalmanFilter.
 
-LSTM correction After the Kalman predict, an LSTM trained on historical pings
-                corrects the estimate using learned traffic patterns (speed
-                profiles, stop behaviour). Reduces systematic bias the linear
-                Kalman model cannot capture.
+Correction LSTM   Après la prédiction Kalman, un LSTM entraîné sur des pings historiques
+                  corrige l'estimation en utilisant les schémas de trafic appris (profils de
+                  vitesse, comportement aux arrêts). Réduit le biais systématique que le
+                  modèle Kalman linéaire ne peut pas capturer.
 
-`kalman_filter_track` runs the full Kalman filter on a projected ping sequence.
-`kalman_fallback` queries the filtered track at any timestamp inside a gap.
+`kalman_filter_track` exécute le filtre de Kalman complet sur une séquence de pings projetés.
+`kalman_fallback` interroge la piste filtrée à n'importe quel horodatage dans un écart.
 """
 from __future__ import annotations
 
@@ -34,11 +34,11 @@ import pandas as pd
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Route geometry helpers
+# Assistants de géométrie de route
 # ─────────────────────────────────────────────────────────────────────────────
 
 def s_to_latlon(s_query: float, stops: pd.DataFrame) -> tuple[float, float]:
-    """Convert a route distance (metres) back to (lat, lon) via anchor polyline."""
+    """Convertit une distance de route (mètres) en (lat, lon) via la polyligne d'ancrage."""
     s_arr = stops["s_m"].values
     lat_arr = stops["lat"].values
     lon_arr = stops["lon"].values
@@ -53,7 +53,7 @@ def s_to_latlon(s_query: float, stops: pd.DataFrame) -> tuple[float, float]:
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in metres between two (lat, lon) points."""
+    """Distance orthodromique en mètres entre deux points (lat, lon)."""
     R = 6_371_000.0
     p = np.pi / 180
     a = (np.sin((lat2 - lat1) * p / 2) ** 2
@@ -63,13 +63,13 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gap extraction
+# Extraction des écarts
 # ─────────────────────────────────────────────────────────────────────────────
 
 def gap_table(g: pd.DataFrame) -> pd.DataFrame:
-    """One row per signal gap with before/after route context.
+    """Une ligne par écart de signal avec le contexte de route avant/après.
 
-    Input: projected ping DataFrame (output of foundation.project_to_route).
+    Entrée : DataFrame de pings projetés (sortie de foundation.project_to_route).
     """
     g = g.reset_index(drop=True)
     rows = []
@@ -92,13 +92,13 @@ def gap_table(g: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Estimation methods
+# Méthodes d'estimation
 # ─────────────────────────────────────────────────────────────────────────────
 
 def interp_position(t_query: pd.Timestamp, t0: pd.Timestamp, s0: float,
                     t1: pd.Timestamp, s1: float,
                     stops: pd.DataFrame) -> tuple[float, float, float]:
-    """Linear interpolation of route distance during a gap → (lat, lon, s_m)."""
+    """Interpolation linéaire de la distance de route pendant un écart → (lat, lon, s_m)."""
     total = (t1 - t0).total_seconds()
     frac = (t_query - t0).total_seconds() / total if total > 0 else 0.0
     frac = float(np.clip(frac, 0.0, 1.0))
@@ -110,9 +110,9 @@ def interp_position(t_query: pd.Timestamp, t0: pd.Timestamp, s0: float,
 def dead_reckon_position(t_query: pd.Timestamp, t0: pd.Timestamp, s0: float,
                          speed_kph: float, direction: int,
                          stops: pd.DataFrame) -> tuple[float, float, float]:
-    """Project forward from last known speed → (lat, lon, s_m).
+    """Projette en avant depuis la dernière vitesse connue → (lat, lon, s_m).
 
-    direction: +1 for ALLER (s increasing), -1 for RETOUR.
+    direction : +1 pour ALLER (s croissant), -1 pour RETOUR.
     """
     dt = (t_query - t0).total_seconds()
     s_est = s0 + direction * (speed_kph / 3.6) * dt
@@ -123,19 +123,19 @@ def dead_reckon_position(t_query: pd.Timestamp, t0: pd.Timestamp, s0: float,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Production: best estimate for any query time
+# Production : meilleure estimation pour tout horodatage de requête
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fallback_position(g: pd.DataFrame, t_query: pd.Timestamp,
                       stops: pd.DataFrame) -> dict | None:
-    """Best position estimate for a query timestamp that falls inside a gap.
+    """Meilleure estimation de position pour un horodatage de requête qui tombe dans un écart.
 
-    Returns None if t_query is not inside any gap.
-    Returns a dict with keys:
-        lat_interp, lon_interp, s_interp   — linear interpolation (if recovery ping known)
-        lat_dr, lon_dr, s_dr               — dead reckoning from last known speed
-        gap_s                              — gap duration in seconds
-        method                             — 'interp' | 'dead_reckon' (recommended one)
+    Retourne None si t_query n'est pas dans un écart.
+    Retourne un dict avec les clés :
+        lat_interp, lon_interp, s_interp   — interpolation linéaire (si ping de récupération connu)
+        lat_dr, lon_dr, s_dr               — navigation à l'estime depuis la dernière vitesse connue
+        gap_s                              — durée de l'écart en secondes
+        method                             — 'interp' | 'dead_reckon' (recommandée)
     """
     g = g.reset_index(drop=True)
     t_arr = pd.to_datetime(g["t"])
@@ -148,7 +148,7 @@ def fallback_position(g: pd.DataFrame, t_query: pd.Timestamp,
 
     after = g.iloc[i0 + 1]
     if not bool(after["signal_gap"]):
-        return None  # not in a gap
+        return None  # pas dans un écart
 
     before = g.iloc[i0]
     t0 = pd.Timestamp(before["t"])
@@ -164,25 +164,25 @@ def fallback_position(g: pd.DataFrame, t_query: pd.Timestamp,
         "lat_interp": lat_i, "lon_interp": lon_i, "s_interp": round(s_i / 1000, 2),
         "lat_dr": lat_d, "lon_dr": lon_d, "s_dr": round(s_d / 1000, 2),
         "gap_s": float(after["gap_s"]),
-        "method": "interp",  # prefer interp when recovery ping is known
+        "method": "interp",  # préférer interp quand le ping de récupération est connu
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Evaluation: synthetic masking
+# Évaluation : masquage synthétique
 # ─────────────────────────────────────────────────────────────────────────────
 
 def eval_fallback(g: pd.DataFrame, stops: pd.DataFrame,
                   mask_min: float = 3.0, n_samples: int = 200,
                   rng: np.random.Generator | None = None) -> pd.DataFrame:
-    """Evaluate both methods by synthetically masking mask_min minutes of pings.
+    """Évalue les deux méthodes en masquant synthétiquement mask_min minutes de pings.
 
-    For each of n_samples random windows:
-      1. Pretend the bus was dark for mask_min minutes starting at a random ping.
-      2. Estimate position at the gap midpoint with both methods.
-      3. Measure error (metres) against true GPS position.
+    Pour chacun des n_samples fenêtres aléatoires :
+      1. Faire semblant que le bus était dark pendant mask_min minutes à partir d'un ping aléatoire.
+      2. Estimer la position au milieu de l'écart avec les deux méthodes.
+      3. Mesurer l'erreur (mètres) par rapport à la vraie position GPS.
 
-    Returns a DataFrame with columns: err_interp_m, err_dr_m, gap_s, dt_into_gap_s.
+    Retourne un DataFrame avec les colonnes : err_interp_m, err_dr_m, gap_s, dt_into_gap_s.
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -233,20 +233,20 @@ def eval_fallback(g: pd.DataFrame, stops: pd.DataFrame,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Kalman filter tracker
+# Traceur du filtre de Kalman
 # ─────────────────────────────────────────────────────────────────────────────
 
 def kalman_filter_track(g: pd.DataFrame, route_len: float) -> pd.DataFrame:
-    """Run a Kalman filter over a projected ping sequence.
+    """Exécute un filtre de Kalman sur une séquence de pings projetés.
 
-    State vector: [s (metres along route), v (m/s)]
-    Process:      s_{t+1} = s_t + v*dt,  v_{t+1} = v_t   (constant velocity)
-    Measurement:  z = s  (GPS projection, noise ~ R)
+    Vecteur d'état : [s (mètres le long de la route), v (m/s)]
+    Processus :      s_{t+1} = s_t + v*dt,  v_{t+1} = v_t   (vitesse constante)
+    Mesure :         z = s  (projection GPS, bruit ~ R)
 
-    Returns the input DataFrame with extra columns:
-        ks  -- Kalman-smoothed route distance (m)
-        kv  -- Kalman-estimated velocity (m/s)
-        kp  -- position uncertainty std dev (m)
+    Retourne le DataFrame d'entrée avec des colonnes supplémentaires :
+        ks  -- distance de route lissée par Kalman (m)
+        kv  -- vitesse estimée par Kalman (m/s)
+        kp  -- écart-type d'incertitude de position (m)
     """
     from filterpy.kalman import KalmanFilter
 
@@ -254,8 +254,8 @@ def kalman_filter_track(g: pd.DataFrame, route_len: float) -> pd.DataFrame:
     n = len(g)
     t_sec = (pd.to_datetime(g["t"]).astype(np.int64) // 10 ** 9).values.astype(float)
 
-    R_std = 100.0   # GPS projection noise ~100 m std
-    Q_v   = 0.5     # velocity process noise (m/s per sqrt-second)
+    R_std = 100.0   # bruit de projection GPS ~100 m écart-type
+    Q_v   = 0.5     # bruit de processus de vitesse (m/s par sqrt-seconde)
 
     kf = KalmanFilter(dim_x=2, dim_z=1)
     kf.x  = np.array([[float(g["s"].iloc[0])],
@@ -291,10 +291,10 @@ def kalman_filter_track(g: pd.DataFrame, route_len: float) -> pd.DataFrame:
 
 def kalman_fallback(g_filtered: pd.DataFrame, t_query: pd.Timestamp,
                     stops: pd.DataFrame) -> dict | None:
-    """Position estimate during a gap using the Kalman filtered track.
+    """Estimation de position pendant un écart en utilisant la piste filtrée par Kalman.
 
-    Propagates the last filtered [s, v] state forward to t_query.
-    Returns dict: lat, lon, s_m (km), uncertainty_m, method.
+    Propage le dernier état filtré [s, v] en avant jusqu'à t_query.
+    Retourne dict : lat, lon, s_m (km), uncertainty_m, method.
     """
     t_arr = pd.to_datetime(g_filtered["t"])
     before = g_filtered[t_arr <= t_query]
@@ -312,18 +312,18 @@ def kalman_fallback(g_filtered: pd.DataFrame, t_query: pd.Timestamp,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LSTM correction of Kalman estimates
+# Correction LSTM des estimations Kalman
 # ─────────────────────────────────────────────────────────────────────────────
 
 _LSTM_CORR_FEATS = ["ks", "kv", "kp", "speed"]
 
 
 def train_lstm_correction(g_filtered: pd.DataFrame, window: int = 10):
-    """Train an LSTM that corrects Kalman s-estimates using recent history.
+    """Entraîne un LSTM qui corrige les estimations s de Kalman en utilisant l'historique récent.
 
-    Input:  last `window` steps of [ks, kv, kp, speed]
-    Target: true GPS s (route distance from projection)
-    Returns (model, mean, std) — mean/std used for normalisation at inference.
+    Entrée :  `window` derniers pas de [ks, kv, kp, speed]
+    Cible :   vraie distance de route GPS (projection)
+    Retourne (modèle, mean, std) — mean/std utilisés pour la normalisation à l'inférence.
     """
     import torch
     import torch.nn as nn
@@ -371,7 +371,7 @@ def train_lstm_correction(g_filtered: pd.DataFrame, window: int = 10):
 def kalman_lstm_fallback(g_filtered: pd.DataFrame, t_query: pd.Timestamp,
                          stops: pd.DataFrame, lstm_model, mean: np.ndarray,
                          std: np.ndarray, window: int = 10) -> dict | None:
-    """Kalman + LSTM correction: recent filtered history corrects the position estimate."""
+    """Kalman + correction LSTM : l'historique filtré récent corrige l'estimation de position."""
     import torch
 
     t_arr = pd.to_datetime(g_filtered["t"])

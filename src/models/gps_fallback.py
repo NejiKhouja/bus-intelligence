@@ -1,44 +1,44 @@
-"""GPS Fallback module -- train, save, load, serve.
+"""Module de repli GPS — entraîner, sauvegarder, charger, servir.
 
-Complete lifecycle for Module 2:
-  train()            -> LSTM correction model -> saved to models/fallback/
-  load()             -> loads artefacts from disk
-  predict_position() -> best position estimate during a GPS gap
+Cycle de vie complet pour le Module 2 :
+  train()            -> modèle de correction LSTM -> sauvegardé dans models/fallback/
+  load()             -> charge les artefacts depuis le disque
+  predict_position() -> meilleure estimation de position pendant un écart GPS
 
-ML engineering notes
---------------------
-The Kalman filter has NO learnable parameters -- it is an online estimator
-that runs at inference time on each bus's live ping stream. No training needed.
+Notes d'ingénierie ML
+----------------------
+Le filtre de Kalman n'a PAS de paramètres apprenables — c'est un estimateur en ligne
+qui s'exécute à l'inférence sur le flux de pings en direct de chaque bus. Pas d'entraînement nécessaire.
 
-LSTM correction
-    The LSTM learns to correct the Kalman s-estimate using the PATTERN of
-    recent [ks, kv, kp, speed] values. A bus approaching a terminal dwell,
-    or climbing a hill at reduced speed, follows a characteristic profile that
-    a linear Kalman model cannot capture.
+Correction LSTM
+    Le LSTM apprend à corriger l'estimation s de Kalman en utilisant le SCHÉMA des
+    valeurs récentes [ks, kv, kp, speed]. Un bus qui s'approche d'un stationnement en terminus,
+    ou qui monte une pente à vitesse réduite, suit un profil caractéristique qu'un modèle
+    Kalman linéaire ne peut pas capturer.
 
-Train data strategy
-    We train on GPS pings from MULTIPLE bus-days pulled directly from MongoDB.
-    Using a single trip gives a model that overfits that trip's specific
-    route geometry and traffic patterns. More trips = better generalisation
-    across different days, times, and buses on the same line.
+Stratégie des données d'entraînement
+    On s'entraîne sur des pings GPS de PLUSIEURS bus-jours extraits directement de MongoDB.
+    Utiliser un seul trajet donne un modèle qui sur-ajuste la géométrie spécifique de ce trajet
+    et les schémas de trafic. Plus de trajets = meilleure généralisation à travers différents
+    jours, heures et bus sur la même ligne.
 
-    Concretely: we load all buses for a given line across several calendar days,
-    project them onto the route, run the Kalman filter, and pool all non-gap
-    windows into a single training set.
+    Concrètement : on charge tous les bus pour une ligne donnée sur plusieurs jours du calendrier,
+    on les projette sur la route, on exécute le filtre de Kalman, et on regroupe toutes les
+    fenêtres sans écart en un seul ensemble d'entraînement.
 
-Feature normalisation
-    Features [ks, kv, kp, speed] are normalised with mean/std fitted on the
-    training pings only (no leakage). The same stats are saved and applied at
-    inference.
+Normalisation des caractéristiques
+    Les caractéristiques [ks, kv, kp, speed] sont normalisées avec moyenne/écart-type ajustés
+    sur les pings d'entraînement uniquement (pas de fuite). Les mêmes statistiques sont
+    sauvegardées et appliquées à l'inférence.
 
-Train/test split
-    Not applied here: the LSTM correction is a regression helper for the Kalman
-    filter (it corrects estimates using recent history) and is evaluated via the
-    synthetic-gap experiment in the notebook, not a held-out labelled set.
-    If labelled gap-error pairs were available, a day-based split would apply.
+Division entraînement/test
+    Non appliquée ici : la correction LSTM est un assistant de régression pour le filtre de
+    Kalman (elle corrige les estimations à partir de l'historique récent) et est évaluée via
+    l'expérience de gap synthétique dans le notebook, pas un ensemble étiqueté séparé.
+    Si des paires erreur-gap étiquetées étaient disponibles, une division par jour s'appliquerait.
 
-SMOTE / class balancing
-    Not applicable -- regression task, no class labels.
+SMOTE / équilibrage des classes
+    Non applicable — tâche de régression, pas d'étiquettes de classe.
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ _HIDDEN  = 32
 
 
 def _make_corr_lstm(n_feats: int = _N_FEATS, hidden: int = _HIDDEN):
-    """Small LSTM that reads recent Kalman history and outputs a corrected s-value."""
+    """Petit LSTM qui lit l'historique Kalman récent et produit une valeur s corrigée."""
     import torch.nn as nn
 
     class CorrLSTM(nn.Module):
@@ -75,7 +75,7 @@ def _make_corr_lstm(n_feats: int = _N_FEATS, hidden: int = _HIDDEN):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Train
+# Entraînement
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train(save_dir: str | Path = SAVE_DIR,
@@ -85,17 +85,17 @@ def train(save_dir: str | Path = SAVE_DIR,
           n_days: int = 5,
           window: int = 10,
           epochs: int = 30) -> dict:
-    """Train LSTM correction on multiple bus-days for better generalisation.
+    """Entraîne la correction LSTM sur plusieurs bus-jours pour une meilleure généralisation.
 
-    Pulls raw GPS pings from MongoDB for the most recent `n_days` available
-    calendar days for the given line, projects them, runs Kalman, and trains
-    the LSTM on the pooled non-gap windows.
+    Extrait les pings GPS bruts de MongoDB pour les `n_days` jours du calendrier les plus
+    récents disponibles pour la ligne donnée, les projette, exécute Kalman, et entraîne
+    le LSTM sur les fenêtres sans écart regroupées.
 
-    Parameters
+    Paramètres
     ----------
-    n_days  : number of bus-days to collect training data from
-    window  : look-back window fed to the LSTM (number of recent pings)
-    epochs  : training epochs (more = better but slower; 30 is a safe default)
+    n_days  : nombre de bus-jours à partir desquels collecter des données d'entraînement
+    window  : fenêtre de regard en arrière fournie au LSTM (nombre de pings récents)
+    epochs  : époques d'entraînement (plus = meilleur mais plus lent ; 30 est une valeur sûre)
     """
     import torch
     import torch.nn as nn
@@ -111,20 +111,20 @@ def train(save_dir: str | Path = SAVE_DIR,
     usable      = _fdn.build_usable_lines(db_winicari, cfg)
     stops       = usable[(line, societe)]
 
-    # Discover available bus-days in MongoDB (collection names = 'd{YYYYMMDD}')
+    # Découvrir les bus-jours disponibles dans MongoDB (noms de collection = 'd{YYYYMMDD}')
     all_day_cols = sorted(db_gps.list_collection_names(), reverse=True)
     day_cols = [d for d in all_day_cols if d.startswith("d")][:n_days]
-    print(f"  Collecting pings from {len(day_cols)} bus-days: {day_cols}")
+    print(f"  Collecte de pings depuis {len(day_cols)} bus-jours : {day_cols}")
 
     all_feats, all_targets = [], []
 
     for day in day_cols:
-        # Discover bus codes that ran on this line+day (field names match foundation.load_pings)
+        # Découvrir les codes de bus qui ont circulé sur cette ligne+jour
         sample = db_gps[day].distinct("bus.code",
                                       {"service.codeLigne": line})
         if not sample:
             continue
-        for bus_id in sample[:3]:          # cap at 3 buses per day to stay fast
+        for bus_id in sample[:3]:          # limiter à 3 bus par jour pour rester rapide
             try:
                 raw = _fdn.load_pings(db_gps, day, line, int(bus_id))
                 if len(raw) < 50:
@@ -133,12 +133,12 @@ def train(save_dir: str | Path = SAVE_DIR,
                     _fdn.clean_pings(raw, cfg), stops, cfg)
                 g_kf = _fb.kalman_filter_track(g, route_len)
 
-                # Non-gap pings only.
-                # Target is the RESIDUAL (s_true - ks), not absolute s.
-                # WHY: raw s spans 0..192,000 m; predicting absolute values from
-                # normalised features causes a ~10^11 m2 loss (model predicts
-                # route midpoint). The Kalman estimate ks is already close to s_true;
-                # the LSTM only needs to learn the small correction term (+/-500 m).
+                # Pings sans écart uniquement.
+                # La cible est le RÉSIDU (s_true - ks), pas s absolu.
+                # POURQUOI : s brut s'étend sur 0..192 000 m ; prédire des valeurs absolues depuis
+                # des caractéristiques normalisées cause une perte de ~10^11 m2 (le modèle prédit
+                # le milieu de route). L'estimation Kalman ks est déjà proche de s_true ;
+                # le LSTM n'a qu'à apprendre le petit terme de correction (+/-500 m).
                 non_gap = g_kf[~g_kf["signal_gap"]].reset_index(drop=True)
                 feats   = non_gap[_fb._LSTM_CORR_FEATS].values.astype(np.float32)
                 targets = (non_gap["s"] - non_gap["ks"]).values.astype(np.float32)
@@ -148,30 +148,30 @@ def train(save_dir: str | Path = SAVE_DIR,
                 continue
 
     if not all_feats:
-        raise RuntimeError("No usable pings found -- check line/societe or MongoDB.")
+        raise RuntimeError("Aucun ping utilisable trouvé — vérifier la ligne/societe ou MongoDB.")
 
     feats   = np.concatenate(all_feats,   axis=0)
     targets = np.concatenate(all_targets, axis=0)
-    print(f"  Total non-gap pings pooled: {len(feats):,}")
-    print(f"  Residual (s_true - ks): mean={targets.mean():.1f} m  "
-          f"std={targets.std():.1f} m")
+    print(f"  Total de pings sans écart regroupés : {len(feats):,}")
+    print(f"  Résidu (s_true - ks) : moyenne={targets.mean():.1f} m  "
+          f"écart-type={targets.std():.1f} m")
 
-    # Feature normalisation -- fit on ALL collected training pings
+    # Normalisation des caractéristiques — ajuster sur TOUS les pings d'entraînement collectés
     mean = feats.mean(axis=0).astype(np.float32)
     std  = (feats.std(axis=0) + 1e-6).astype(np.float32)
     feats_n = (feats - mean) / std
 
-    # Build sliding-window sequences
+    # Construire des séquences à fenêtre glissante
     xs, ys = [], []
     for i in range(window, len(feats_n)):
         xs.append(feats_n[i - window:i])
         ys.append(targets[i])
     if not xs:
-        raise RuntimeError("Not enough pings to build sequences.")
+        raise RuntimeError("Pas assez de pings pour construire des séquences.")
 
     X = np.stack(xs).astype(np.float32)
     Y = np.array(ys, dtype=np.float32)
-    print(f"  Training sequences: {len(X):,}  window={window}")
+    print(f"  Séquences d'entraînement : {len(X):,}  fenêtre={window}")
 
     loader = DataLoader(TensorDataset(torch.tensor(X), torch.tensor(Y)),
                         batch_size=128, shuffle=True)
@@ -189,7 +189,7 @@ def train(save_dir: str | Path = SAVE_DIR,
             opt.step()
             total += loss_fn(model(xb), yb).item() * len(xb)
         if (ep + 1) % 10 == 0:
-            print(f"    epoch {ep+1}/{epochs}  loss={total/len(X):.2f} m²")
+            print(f"    époque {ep+1}/{epochs}  perte={total/len(X):.2f} m²")
 
     model.eval()
     torch.save(model.state_dict(), save_dir / "lstm_corr.pt")
@@ -198,18 +198,18 @@ def train(save_dir: str | Path = SAVE_DIR,
         json.dump({"window": window, "n_feats": _N_FEATS, "hidden": _HIDDEN,
                    "n_days": n_days, "n_pings": int(len(feats))}, f)
 
-    print(f"  -> Fallback artefacts saved to {save_dir}")
+    print(f"  -> Artefacts de repli sauvegardés dans {save_dir}")
     return {"model": model, "mean": mean, "std": std, "window": window}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load
+# Chargement
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load(save_dir: str | Path = SAVE_DIR) -> dict:
-    """Load trained LSTM correction model.
+    """Charge le modèle de correction LSTM entraîné.
 
-    Returns dict: model, mean, std, window.
+    Retourne dict : model, mean, std, window.
     """
     import torch
 
@@ -223,20 +223,20 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     model.eval()
 
     stats = np.load(save_dir / "lstm_corr_stats.npz")
-    print(f"GPS Fallback LSTM correction loaded  "
-          f"(window={cfg['window']}, trained on {cfg.get('n_pings',0):,} pings)")
+    print(f"Correction LSTM de repli GPS chargée  "
+          f"(fenêtre={cfg['window']}, entraîné sur {cfg.get('n_pings',0):,} pings)")
     return {"model": model, "mean": stats["mean"], "std": stats["std"],
             "window": cfg["window"]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Serve
+# Service
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_kalman(g: pd.DataFrame, route_len: float) -> pd.DataFrame:
-    """Apply Kalman filter to a projected ping DataFrame.
+    """Applique le filtre de Kalman à un DataFrame de pings projetés.
 
-    Must be called before predict_position to populate ks/kv/kp columns.
+    Doit être appelé avant predict_position pour remplir les colonnes ks/kv/kp.
     """
     return _fb.kalman_filter_track(g, route_len)
 
@@ -245,13 +245,13 @@ def predict_position(models: dict,
                      g_filtered: pd.DataFrame,
                      t_query: pd.Timestamp,
                      stops: pd.DataFrame) -> dict | None:
-    """Best position estimate (Kalman + LSTM correction) during a GPS gap.
+    """Meilleure estimation de position (Kalman + correction LSTM) pendant un écart GPS.
 
-    The LSTM predicts a residual correction (s_true - ks). We add it back to
-    the Kalman estimate to get the final position: s_final = ks + lstm_correction.
+    Le LSTM prédit une correction résiduelle (s_true - ks). On l'ajoute à l'estimation
+    Kalman pour obtenir la position finale : s_final = ks + correction_lstm.
 
-    g_filtered must be the output of run_kalman().
-    Returns dict: lat, lon, s_m (km), uncertainty_m, method -- or None if not in a gap.
+    g_filtered doit être la sortie de run_kalman().
+    Retourne dict : lat, lon, s_m (km), uncertainty_m, method — ou None si pas dans un écart.
     """
     import torch
     from src.data.fallback import s_to_latlon, _LSTM_CORR_FEATS
@@ -259,7 +259,7 @@ def predict_position(models: dict,
     t_arr = pd.to_datetime(g_filtered["t"])
     before = g_filtered[t_arr <= t_query]
     if len(before) < models["window"]:
-        # Not enough history -- fall back to pure Kalman
+        # Pas assez d'historique — retomber sur le Kalman pur
         return _fb.kalman_fallback(g_filtered, t_query, stops)
 
     recent = before.iloc[-models["window"]:][_LSTM_CORR_FEATS].values.astype("float32")
@@ -268,7 +268,7 @@ def predict_position(models: dict,
     with torch.no_grad():
         correction = float(models["model"](torch.tensor(recent_n[None]))[0])
 
-    # Kalman estimate at t_query (propagated from last filtered state)
+    # Estimation Kalman à t_query (propagée depuis le dernier état filtré)
     last_row = before.iloc[-1]
     dt = (t_query - pd.Timestamp(last_row["t"])).total_seconds()
     ks_at_query = float(last_row["ks"] + last_row["kv"] * dt)
