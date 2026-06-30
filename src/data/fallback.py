@@ -236,12 +236,22 @@ def eval_fallback(g: pd.DataFrame, stops: pd.DataFrame,
 # Traceur du filtre de Kalman
 # ─────────────────────────────────────────────────────────────────────────────
 
-def kalman_filter_track(g: pd.DataFrame, route_len: float) -> pd.DataFrame:
+def kalman_filter_track(g: pd.DataFrame, route_len: float,
+                        r_std: float = 100.0, q_v: float = 0.5) -> pd.DataFrame:
     """Exécute un filtre de Kalman sur une séquence de pings projetés.
 
     Vecteur d'état : [s (mètres le long de la route), v (m/s)]
     Processus :      s_{t+1} = s_t + v*dt,  v_{t+1} = v_t   (vitesse constante)
     Mesure :         z = s  (projection GPS, bruit ~ R)
+
+    Paramètres
+    ----------
+    r_std : écart-type du bruit de mesure GPS (m). Plus petit -> fait davantage confiance
+            au GPS ; plus grand -> lisse davantage.
+    q_v   : bruit de processus sur la vitesse (m/s par sqrt-seconde). Plus grand -> la vitesse
+            peut changer plus vite (suit mieux les accélérations, propage moins loin dans un écart).
+    Ces deux valeurs sont réglées par recherche aléatoire dans 02_gps_fallback.ipynb ; les
+    valeurs par défaut sont quasi optimales sur la ligne 209.
 
     Retourne le DataFrame d'entrée avec des colonnes supplémentaires :
         ks  -- distance de route lissée par Kalman (m)
@@ -254,8 +264,8 @@ def kalman_filter_track(g: pd.DataFrame, route_len: float) -> pd.DataFrame:
     n = len(g)
     t_sec = (pd.to_datetime(g["t"]).astype(np.int64) // 10 ** 9).values.astype(float)
 
-    R_std = 100.0   # bruit de projection GPS ~100 m écart-type
-    Q_v   = 0.5     # bruit de processus de vitesse (m/s par sqrt-seconde)
+    R_std = float(r_std)   # bruit de projection GPS (m écart-type)
+    Q_v   = float(q_v)     # bruit de processus de vitesse (m/s par sqrt-seconde)
 
     kf = KalmanFilter(dim_x=2, dim_z=1)
     kf.x  = np.array([[float(g["s"].iloc[0])],

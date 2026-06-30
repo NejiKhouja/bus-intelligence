@@ -1,0 +1,21 @@
+this should be a demo of the ai features on the app cause we dont have current data we pretend that 2 days from last recorded day as it today
+
+for gps fallback it needs to be clear it need to demonstrate how the user will use the app ,this tab will take the actaul time now but apply it tthe calander of 2 days ago,
+there should be a button where i can demonstrate a real case from the history of the poision where a bus lost connection ,there is a detectioon of that loss and the model kicks in to detect
+the where abouts of the bus so it almost an event driven hook or somthing like this ,and once the bus looeses signal the ai or the system should notify the user that the bus lost signla and
+keep warning him if it stays without signal for too long ,this examples are taken from history and palyed out in real time but the solution should also be production ready to be plugged in
+where it takes the bus location and keeps track of what bus lost connection and if it did wherabout approximatly is it in
+
+
+for live eta the users needs to choose his whereabouts the line that he picks and the line should clrealy show all the stops so he can choose the line that he want so it would be like a table 
+that he chooses from,you can go with the approriate design that you see fit ,and then the predicted time it takes the bus to come to him also i want to show the bus moving in real time towards him
+using the pgs pings + the kalman filter or somthing approriate durning the time between one ping and another 
+
+the anomaly detection is not properly function, i think we trained the model on the right stuff but i want a explainablty layer if  possible so the user/admin is notified 
+for example ,the bus is abnormaly late ,the bus is stationary for too long the bus took too much time at one stop etc etc ,i want to be able to ananlyze patterns 
+lines that are always abnormal etc etc like the ones we did in the anomaly.ipynb
+
+overall improve on the app and find bugs
+
+
+

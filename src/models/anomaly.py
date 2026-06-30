@@ -151,11 +151,16 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
     trips = _an.score_trips(models["if_model"], models["if_mean"],
                             models["if_std"], trips)
 
-    X, _ = _an.build_sequences(fa, cfg)
+    X, ids = _an.build_sequences(fa, cfg)
     if len(X) > 0:
         lstm_scores = _an.lstm_anomaly_scores(models["lstm_ae"], X)
-        # aligner : les séquences peuvent couvrir moins de trajets que trip_features (filtre min_trip_stops)
-        trips["lstm_score"] = np.pad(lstm_scores, (0, max(0, len(trips) - len(lstm_scores))))[:len(trips)]
+        # ALIGNER PAR CLÉ DE TRAJET — pas par position. trip_features (filtre `matched`)
+        # et build_sequences (toutes les lignes) peuvent produire des sous-ensembles/ordres
+        # différents ; une fusion positionnelle attribuait les scores LSTM aux mauvais trajets.
+        lstm_df = pd.DataFrame(ids, columns=_an.TRIP_KEYS)
+        lstm_df["lstm_score"] = lstm_scores
+        trips = trips.merge(lstm_df, on=_an.TRIP_KEYS, how="left")
+        trips["lstm_score"] = trips["lstm_score"].fillna(0.0)
         trips["lstm_anomaly"] = trips["lstm_score"] > models["threshold"]
     else:
         trips["lstm_score"] = 0.0
@@ -163,3 +168,61 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
 
     trips["dual_anomaly"] = trips["anomaly"] & trips["lstm_anomaly"]
     return trips
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Explicabilité — pourquoi un trajet est-il anormal ?
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pour chaque caractéristique : (direction « mauvaise », constructeur de phrase lisible).
+# direction "high" -> une valeur élevée est anormale ; "low" -> une valeur faible est anormale.
+_REASON_BUILDERS = {
+    "max_dwell_s":   ("high", lambda v: f"Stationary too long at a stop (~{v/60:.0f} min motionless)"),
+    "total_elapsed": ("high", lambda v: f"Abnormally late — trip ran ~{v:.0f} min end-to-end"),
+    "mean_dwell_s":  ("high", lambda v: f"Long dwell at stops (~{v/60:.1f} min avg)"),
+    "dist_m_max":    ("high", lambda v: f"Strayed far from the route (~{v:.0f} m off-path)"),
+    "match_rate":    ("low",  lambda v: f"Weak GPS / off-route — only {v*100:.0f}% of stops tracked"),
+    "n_stops":       ("low",  lambda v: f"Served unusually few stops ({int(v)})"),
+}
+
+
+def explain_trips(models: dict, scored: pd.DataFrame, *,
+                  z_thresh: float = 1.5, max_reasons: int = 3) -> pd.DataFrame:
+    """Ajoute des colonnes d'explicabilité à un DataFrame issu de `score`.
+
+    Pour chaque trajet, calcule le z-score de chaque caractéristique par rapport à la
+    population d'entraînement (`if_mean`/`if_std`) et traduit les déviations les plus fortes
+    (dans la « mauvaise » direction) en raisons lisibles.
+
+    Colonnes ajoutées :
+      reasons       -- list[str] phrases lisibles (vide si aucune déviation forte)
+      top_feature   -- caractéristique la plus déviante (ou None)
+      severity      -- 'high' (deux modèles), 'medium' (IF seul) ou 'low'
+      anomaly_strength -- magnitude (-if_score ; plus grand = plus anormal)
+    """
+    feats = _an.FEATURES
+    mean = np.asarray(models["if_mean"], dtype=float)
+    std = np.asarray(models["if_std"], dtype=float)
+
+    out = scored.copy()
+    reasons_col, top_col = [], []
+    for _, row in out.iterrows():
+        vals = row[feats].values.astype(float)
+        z = (vals - mean) / std
+        scored_feats = []
+        for i, f in enumerate(feats):
+            direction, _builder = _REASON_BUILDERS[f]
+            signed = z[i] if direction == "high" else -z[i]
+            if signed >= z_thresh:
+                scored_feats.append((signed, f, row[f]))
+        scored_feats.sort(reverse=True)
+        reasons = [_REASON_BUILDERS[f][1](v) for _, f, v in scored_feats[:max_reasons]]
+        reasons_col.append(reasons)
+        top_col.append(scored_feats[0][1] if scored_feats else None)
+
+    out["reasons"] = reasons_col
+    out["top_feature"] = top_col
+    out["anomaly_strength"] = (-out["if_score"]).round(3)
+    out["severity"] = np.where(out.get("dual_anomaly", False), "high",
+                       np.where(out.get("anomaly", False), "medium", "low"))
+    return out

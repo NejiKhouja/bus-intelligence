@@ -1,0 +1,46 @@
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: winicari-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: winicari-api
+    ports:
+      - "8000:8000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - MONGO_URL=mongodb://mongodb:27017
+      - DB_MAIN=${DB_MAIN:-winicari}
+      - DB_POS_BUS=${DB_POS_BUS:-Historique_pos}
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./.env:/app/.env
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: winicari-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:

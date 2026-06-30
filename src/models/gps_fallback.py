@@ -233,53 +233,47 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
 # Service
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _kalman_params() -> dict:
+    """Charge les paramètres Kalman réglés (r_std, q_v) si présents, sinon défauts.
+
+    Écrits par la recherche aléatoire dans 02_gps_fallback.ipynb.
+    """
+    p = SAVE_DIR / "kalman_params.json"
+    if p.exists():
+        try:
+            with open(p) as f:
+                cfg = json.load(f)
+            return {"r_std": float(cfg.get("r_std", 100.0)),
+                    "q_v": float(cfg.get("q_v", 0.5))}
+        except Exception:
+            pass
+    return {"r_std": 100.0, "q_v": 0.5}
+
+
 def run_kalman(g: pd.DataFrame, route_len: float) -> pd.DataFrame:
     """Applique le filtre de Kalman à un DataFrame de pings projetés.
 
     Doit être appelé avant predict_position pour remplir les colonnes ks/kv/kp.
+    Utilise les paramètres réglés par recherche aléatoire s'ils sont disponibles.
     """
-    return _fb.kalman_filter_track(g, route_len)
+    p = _kalman_params()
+    return _fb.kalman_filter_track(g, route_len, r_std=p["r_std"], q_v=p["q_v"])
 
 
 def predict_position(models: dict,
                      g_filtered: pd.DataFrame,
                      t_query: pd.Timestamp,
                      stops: pd.DataFrame) -> dict | None:
-    """Meilleure estimation de position (Kalman + correction LSTM) pendant un écart GPS.
+    """Meilleure estimation de position pendant un écart GPS — **Kalman pur**.
 
-    Le LSTM prédit une correction résiduelle (s_true - ks). On l'ajoute à l'estimation
-    Kalman pour obtenir la position finale : s_final = ks + correction_lstm.
+    Décision pilotée par les données : sur une évaluation par masquage synthétique
+    (notebook 02_gps_fallback), la correction LSTM n'améliorait PAS l'estimation
+    Kalman (erreur médiane quasi identique, ~573 m vs 579 m sur la ligne 209), pour
+    un coût et une complexité supplémentaires. On utilise donc le filtre de Kalman
+    seul : il propage le dernier état filtré [s, v] jusqu'à t_query et fournit une
+    incertitude croissante rigoureuse.
 
     g_filtered doit être la sortie de run_kalman().
-    Retourne dict : lat, lon, s_m (km), uncertainty_m, method — ou None si pas dans un écart.
+    Retourne dict : lat, lon, s_m (km), uncertainty_m, method — ou None.
     """
-    import torch
-    from src.data.fallback import s_to_latlon, _LSTM_CORR_FEATS
-
-    t_arr = pd.to_datetime(g_filtered["t"])
-    before = g_filtered[t_arr <= t_query]
-    if len(before) < models["window"]:
-        # Pas assez d'historique — retomber sur le Kalman pur
-        return _fb.kalman_fallback(g_filtered, t_query, stops)
-
-    recent = before.iloc[-models["window"]:][_LSTM_CORR_FEATS].values.astype("float32")
-    recent_n = (recent - models["mean"]) / models["std"]
-
-    with torch.no_grad():
-        correction = float(models["model"](torch.tensor(recent_n[None]))[0])
-
-    # Estimation Kalman à t_query (propagée depuis le dernier état filtré)
-    last_row = before.iloc[-1]
-    dt = (t_query - pd.Timestamp(last_row["t"])).total_seconds()
-    ks_at_query = float(last_row["ks"] + last_row["kv"] * dt)
-
-    s_final = float(np.clip(ks_at_query + correction, 0.0, g_filtered["ks"].max()))
-    lat, lon = s_to_latlon(s_final, stops)
-
-    return {
-        "lat": lat, "lon": lon, "s_m": round(s_final / 1000, 2),
-        "uncertainty_m": round(float(last_row["kp"]), 0),
-        "method": "kalman+lstm",
-        "ks_m": round(ks_at_query / 1000, 2),
-        "correction_m": round(correction, 1),
-    }
+    return _fb.kalman_fallback(g_filtered, t_query, stops)

@@ -61,6 +61,8 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
         dist_m_max=("dist_m", "max"),
         dir=("dir", "first"),
         full=("full", "first"),
+        trip_start=("trip_start", "first"),
+        trip_end=("trip_end", "first"),
     ).reset_index())
 
     trips = trips[trips["n_stops"] >= cfg.min_trip_stops].copy()

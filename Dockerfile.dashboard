@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Streamlit specifically
+RUN pip install --no-cache-dir streamlit plotly requests pandas numpy python-dotenv
+
+# Copy dashboard and source code
+COPY dashboard/ ./dashboard/
+COPY src/ ./src/
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
