@@ -19,3 +19,6 @@ overall improve on the app and find bugs
 
 
 
+------------------------
+
+need to add external features to improve the quality of predctions

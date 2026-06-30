@@ -105,6 +105,15 @@ def get_eta_to_stop(company, line, bus, day, target_seq, query_time, model_type)
     return _get("/api/eta-to-stop", societe=company, line=line, bus=bus, day=day,
                 target_seq=target_seq, query_time=query_time, model_type=model_type)
 
+@st.cache_data(ttl=300)
+def get_buses_for_line(company, line):
+    d = _get("/api/buses-for-line", societe=company, line=line)
+    return d.get("buses", []) if d else []
+
+@st.cache_data(ttl=300)
+def get_trip_detail(company, line, bus, day, trip_id):
+    return _get("/api/trip-detail", societe=company, line=line, bus=bus, day=day, trip_id=trip_id)
+
 @st.cache_data(ttl=60)
 def get_anomaly_history(company, line=None, limit=50):
     return _get("/api/anomaly-history", societe=company, line=line, limit=limit)
@@ -505,6 +514,10 @@ elif selected == "Détection d'anomalies":
     SEV_COLOR = {"high": "🔴", "medium": "🟠", "low": "🟡"}
     SEV_FR = {"high": "Élevée", "medium": "Moyenne", "low": "Faible"}
 
+    def _fmt_duration(minutes):
+        h, m = int(minutes) // 60, int(minutes) % 60
+        return f"{h}h{m:02d}" if h else f"{m} min"
+
     def render_alert_cards(anomalies):
         for a in anomalies:
             icon = SEV_COLOR.get(a["severity"], "🟡")
@@ -512,7 +525,8 @@ elif selected == "Détection d'anomalies":
                 top = st.columns([3, 1, 1])
                 top[0].markdown(f"**{icon} Bus {a['bus']} · Ligne {a['line']} · {a['dir']}** — {fmt_day(a['day'])}")
                 top[1].metric("Gravité", SEV_FR.get(a["severity"], a["severity"]))
-                top[2].metric("Retard total", f"{a['total_elapsed_min']:.0f} min")
+                dur = a.get("trip_duration_min") or a.get("total_elapsed_min", 0)
+                top[2].metric("Durée trajet", _fmt_duration(dur))
                 if a["reasons"]:
                     for reason in a["reasons"]:
                         st.markdown(f"&nbsp;&nbsp;• {reason}")
@@ -520,16 +534,23 @@ elif selected == "Détection d'anomalies":
                     st.caption("Signalé par le score du modèle (pas de cause unique dominante).")
                 ps = a.get("problem_stops") or {}
                 chips = []
-                if ps.get("longest_stop"):
-                    chips.append(f"🛑 Arrêt le plus long : **{ps['longest_stop']['stop']}** "
-                                 f"({ps['longest_stop']['dwell_min']:.0f} min)")
+                # Genuine dwell anomaly at a named stop
+                if ps.get("longest_stop") and ps["longest_stop"]["dwell_min"] >= 5:
+                    chips.append(f"🛑 Immobilisation réelle : **{ps['longest_stop']['stop']}** "
+                                 f"({ps['longest_stop']['dwell_min']:.0f} min sans mouvement GPS)")
+                # Signal loss at a named stop (separate from dwell)
+                if ps.get("signal_loss_stop"):
+                    sl = ps["signal_loss_stop"]
+                    chips.append(f"📡 Perte de signal : **{sl['stop']}** (~{sl['dark_min']:.0f} min sans ping)")
+                # Matched stops that were still far off expected position (GPS drift / detour)
                 if ps.get("farthest_stop"):
-                    chips.append(f"📍 Hors itinéraire près de **{ps['farthest_stop']['stop']}** "
-                                 f"(~{ps['farthest_stop']['dist_m']:.0f} m)")
+                    chips.append(f"📍 Arrêt suivi mais décalé : **{ps['farthest_stop']['stop']}** "
+                                 f"(~{ps['farthest_stop']['dist_m']:.0f} m de la position attendue)")
+                # Unmatched stops — bus never passed within range
                 if ps.get("off_route_stops"):
-                    chips.append(f"🚧 Arrêts non suivis : {', '.join(ps['off_route_stops'])}"
-                                 + (f" (+{ps['off_route_count']-len(ps['off_route_stops'])} autres)"
-                                    if ps.get('off_route_count', 0) > len(ps['off_route_stops']) else ""))
+                    others = ps.get('off_route_count', len(ps['off_route_stops'])) - len(ps['off_route_stops'])
+                    suffix = f" (+{others} autres)" if others > 0 else ""
+                    chips.append(f"🚧 Arrêts non desservis : {', '.join(ps['off_route_stops'])}{suffix}")
                 for c in chips:
                     st.caption(c)
 
@@ -545,7 +566,8 @@ elif selected == "Détection d'anomalies":
             m = st.columns(3)
             m[0].metric("Jour d'exploitation", fmt_day(data["date"]))
             m[1].metric("Trajets ce jour", data["total_trips"])
-            m[2].metric("Signalés", data["anomaly_count"])
+            pct = 100 * data["anomaly_count"] / data["total_trips"] if data["total_trips"] else 0
+            m[2].metric("Signalés", f"{data['anomaly_count']}  ({pct:.1f} %)")
             if data["anomalies"]:
                 st.markdown("#### Trajets signalés ce jour")
                 render_alert_cards(data["anomalies"])
@@ -562,43 +584,229 @@ elif selected == "Détection d'anomalies":
             st.info("Aucune anomalie historique pour ce périmètre.")
 
     with tab_explain:
-        col = st.columns(4)
+        # ── Filtres ──────────────────────────────────────────────────────────
+        col = st.columns(5)
         company = col[0].selectbox("Opérateur", companies, key="an_ex_co")
         lines = get_lines(company)
         line = col[1].selectbox("Ligne", lines, key="an_ex_line") if lines else None
-        days = ["Tous les jours"] + (get_days_for_line(company, line) if line else [])
-        day_sel = col[2].selectbox("Jour", days, key="an_ex_day")
-        first_day = days[1] if len(days) > 1 else None
-        bus_list = get_buses_for_day(company, line, first_day) if first_day else []
-        bus = col[3].selectbox("Bus", bus_list, key="an_ex_bus") if bus_list else None
 
-        if bus and st.button("Expliquer", type="primary"):
-            day_param = None if day_sel == "Tous les jours" else day_sel
+        # Bus is optional — "Tous les bus" analyses the whole line
+        bus_opts = ["Tous les bus"] + [str(b) for b in (get_buses_for_line(company, line) if line else [])]
+        bus_label = col[2].selectbox("Bus", bus_opts, key="an_ex_bus")
+        bus = None if bus_label == "Tous les bus" else int(bus_label)
+
+        days = ["Tous les jours"] + (get_days_for_line(company, line) if line else [])
+        day_sel = col[3].selectbox("Jour", days, key="an_ex_day")
+        day_param = None if day_sel == "Tous les jours" else day_sel
+
+        if line and col[4].button("Analyser", type="primary", use_container_width=True):
             res = get_anomaly_explain(company, line, bus, day_param)
+            st.session_state["an_ex_res"] = res
+            st.session_state["an_ex_ctx"] = (company, line, bus, day_param)
+
+        res = st.session_state.get("an_ex_res")
+        ctx = st.session_state.get("an_ex_ctx")
+
+        if res and ctx == (company, line, bus, day_param):
             if not res:
                 st.error("Impossible de récupérer l'explication.")
             elif res["anomaly_count"] == 0:
-                st.success(f"Bus {bus} sur la ligne {line} : aucun trajet anormal — tout est normal.")
+                scope = f"Bus {bus} · Ligne {line}" if bus else f"Ligne {line}"
+                st.success(f"{scope} : aucun trajet anormal détecté — tout est dans la normale.")
             else:
-                st.markdown(f"#### Bus {bus} : {res['anomaly_count']} trajet(s) anormal(aux)")
+                scope = f"Bus {bus} · Ligne {line}" if bus else f"Ligne {line}"
+                st.markdown(f"#### {scope} — analyse des anomalies")
+
+                # ── Métriques générales (avec explications) ──────────────────
+                mc = st.columns(3)
+                ex_pct = 100 * res["anomaly_count"] / res["total_trips"] if res["total_trips"] else 0
+                mc[0].metric("Trajets analysés", f"{res['total_trips']}")
+                mc[0].caption("Nombre total de trajets dans la période sélectionnée pour ce périmètre.")
+                mc[1].metric("Trajets anormaux", f"{res['anomaly_count']}  ({ex_pct:.1f} %)")
+                mc[1].caption("Trajets signalés comme anormaux par le modèle de détection (Isolation Forest + LSTM).")
+                if res.get("avg_duration_min"):
+                    mc[2].metric("Durée normale (médiane)", _fmt_duration(res["avg_duration_min"]))
+                    mc[2].caption("Durée médiane d'un trajet non anormal sur cette ligne — sert de référence pour juger si un trajet est trop long ou trop court.")
+
+                st.markdown("---")
+                # ── Cartes d'alerte ──────────────────────────────────────────
+                st.markdown("##### Trajets signalés")
                 render_alert_cards(res["anomalies"])
-                if res.get("sequence"):
-                    wt = res.get("worst_trip") or {}
-                    st.markdown(f"##### Pire trajet — immobilisation arrêt par arrêt  ({fmt_day(wt.get('day',''))})")
-                    seq = pd.DataFrame(res["sequence"])
+
+                # ── Détail par trajet ─────────────────────────────────────────
+                st.markdown("---")
+                st.markdown("##### Analyse détaillée d'un trajet")
+                st.caption("Sélectionnez un trajet ci-dessous pour voir la carte de ses arrêts, le graphique d'immobilisation et le tableau complet arrêt par arrêt.")
+
+                trip_labels = [
+                    f"Bus {a['bus']} · {fmt_day(a['day'])} · {a['dir']} · score {a['anomaly_strength']:.2f}"
+                    for a in res["anomalies"]
+                ]
+                sel_idx = st.selectbox(
+                    "Trajet à analyser :", range(len(trip_labels)),
+                    format_func=lambda i: trip_labels[i],
+                    key="an_ex_trip_sel",
+                )
+                sel = res["anomalies"][sel_idx]
+
+                # Fetch per-trip sequence on demand (cached)
+                detail = get_trip_detail(company, line, sel["bus"], sel["day"], sel["trip_id"])
+                seq_list = (detail or {}).get("sequence", [])
+
+                if seq_list:
+                    seq = pd.DataFrame(seq_list)
+                    if "dark_min" not in seq.columns:
+                        seq["dark_min"] = 0.0
+
+                    # ── Métriques du trajet sélectionné ──────────────────────
+                    tc = st.columns(4)
+                    tc[0].metric("Durée trajet", _fmt_duration(sel["trip_duration_min"]))
+                    tc[0].caption("Durée réelle du trajet du premier au dernier arrêt enregistré.")
+                    if res.get("avg_duration_min"):
+                        delta_min = sel["trip_duration_min"] - res["avg_duration_min"]
+                        sign = "+" if delta_min > 0 else ""
+                        tc[1].metric("Écart vs normal", f"{sign}{_fmt_duration(abs(delta_min))}")
+                        tc[1].caption("Différence entre ce trajet et la durée normale de la ligne. Un écart positif signifie un trajet plus long que d'habitude.")
+                    tc[2].metric("Arrêts desservis", f"{int(seq['matched'].sum())} / {len(seq)}")
+                    tc[2].caption("Nombre d'arrêts où le bus a été détecté dans la zone GPS (suivi) sur le total d'arrêts prévus sur la ligne.")
+                    tc[3].metric("Score anomalie", f"{sel['anomaly_strength']:.2f}")
+                    tc[3].caption("Score calculé par le modèle Isolation Forest. Plus il est élevé, plus le comportement du bus s'écarte de la normale.")
+
+                    # ── Carte des arrêts ──────────────────────────────────────
+                    map_rows = [s for s in seq_list if s.get("lat") and s.get("lon")]
+                    if map_rows:
+                        st.markdown("###### Carte du trajet")
+                        st.caption(
+                            "Chaque cercle représente un arrêt. La taille reflète la durée d'immobilisation + perte de signal. "
+                            "🟢 Normal · 🔵 Immobilisation longue (≥10 min) · 🟡 Perte de signal (≥5 min) · 🔴 Arrêt non desservi (bus jamais passé)"
+                        )
+                        mdf = pd.DataFrame(map_rows)
+
+                        def _scolor(row):
+                            if not row["matched"]: return "#ef4444"
+                            if row.get("dark_min", 0) >= 5: return "#f59e0b"
+                            if row.get("dwell_min", 0) >= 10: return "#2563eb"
+                            return "#22c55e"
+
+                        mdf["color"] = mdf.apply(_scolor, axis=1)
+                        mdf["msize"] = (mdf["dwell_min"] + mdf.get("dark_min", 0)).clip(8, 28)
+                        mdf["hover"] = (
+                            "<b>" + mdf["seq"].astype(str) + " : " + mdf["stop"] + "</b><br>" +
+                            "Immobilisation réelle : " + mdf["dwell_min"].apply(lambda v: f"{v:.1f} min") + "<br>" +
+                            "Signal perdu : " + mdf["dark_min"].apply(lambda v: f"{v:.1f} min") + "<br>" +
+                            "Distance de l'arrêt attendu : " + mdf["dist_m"].apply(lambda v: f"{v:.0f} m") + "<br>" +
+                            "Suivi GPS : " + mdf["matched"].map({True: "Oui", False: "Non"})
+                        )
+
+                        fig_map = go.Figure()
+                        fig_map.add_trace(go.Scattermapbox(
+                            lat=mdf["lat"].tolist(), lon=mdf["lon"].tolist(),
+                            mode="lines", line=dict(width=3, color="#94a3b8"),
+                            name="Itinéraire prévu", hoverinfo="skip",
+                        ))
+                        for color, label in [
+                            ("#22c55e", "Arrêt normal"),
+                            ("#2563eb", "Immobilisation longue"),
+                            ("#f59e0b", "Perte de signal GPS"),
+                            ("#ef4444", "Arrêt non desservi"),
+                        ]:
+                            sub = mdf[mdf["color"] == color]
+                            if sub.empty:
+                                continue
+                            fig_map.add_trace(go.Scattermapbox(
+                                lat=sub["lat"].tolist(), lon=sub["lon"].tolist(),
+                                mode="markers",
+                                marker=dict(size=sub["msize"].tolist(), color=color),
+                                name=label,
+                                text=sub["hover"].tolist(),
+                                hovertemplate="%{text}<extra></extra>",
+                            ))
+                        fig_map.update_layout(
+                            mapbox=dict(
+                                style="open-street-map",
+                                center=dict(lat=float(mdf["lat"].mean()), lon=float(mdf["lon"].mean())),
+                                zoom=10,
+                            ),
+                            margin=dict(l=0, r=0, t=0, b=0), height=500,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        )
+                        st.plotly_chart(fig_map, use_container_width=True)
+                    else:
+                        st.info("Coordonnées GPS non disponibles pour les arrêts de cette ligne.")
+
+                    # ── Graphique immobilisation par arrêt ────────────────────
+                    st.markdown("###### Immobilisation et perte de signal par arrêt")
+                    st.caption(
+                        "Les barres bleues montrent le temps réel où le bus était à l'arrêt avec GPS actif. "
+                        "Les barres jaunes montrent les périodes sans ping GPS à cet arrêt (signal perdu). "
+                        "Les barres rouges correspondent aux arrêts non desservis."
+                    )
                     seq["label"] = seq["seq"].astype(str) + " · " + seq["stop"]
-                    fig = px.bar(seq, x="label", y="dwell_min",
-                                 color="matched", color_discrete_map={True: "#2563eb", False: "#dc2626"},
-                                 labels={"label": "Arrêt", "dwell_min": "Immobilisation (min)", "matched": "Suivi GPS"},
-                                 hover_data=["stop", "dist_m"])
-                    fig.update_layout(template="plotly_white", height=360,
-                                      margin=dict(l=10, r=10, t=10, b=10),
-                                      xaxis_tickangle=-40)
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.caption("Chaque barre est un arrêt (nommé sur l'axe). Les barres **rouges** = longs arrêts "
-                               "faits hors de l'itinéraire suivi — exactement là où l'anomalie a été détectée.")
+                    bar_colors = ["#2563eb" if m else "#dc2626" for m in seq["matched"]]
+                    fig_bar = go.Figure()
+                    fig_bar.add_trace(go.Bar(
+                        x=seq["label"], y=seq["dwell_min"], name="Immobilisation réelle (GPS actif)",
+                        marker_color=bar_colors,
+                        hovertemplate="<b>%{x}</b><br>Immob. réelle : %{y:.1f} min<extra></extra>",
+                    ))
+                    fig_bar.add_trace(go.Bar(
+                        x=seq["label"], y=seq["dark_min"], name="Signal perdu (sans ping)",
+                        marker_color="rgba(234,179,8,0.85)",
+                        hovertemplate="<b>%{x}</b><br>Signal perdu : %{y:.1f} min<extra></extra>",
+                    ))
+                    fig_bar.update_layout(
+                        barmode="stack", template="plotly_white", height=360,
+                        margin=dict(l=10, r=10, t=10, b=10), xaxis_tickangle=-40,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        yaxis_title="Minutes",
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                    # ── Tableau détaillé arrêt par arrêt ─────────────────────
+                    st.markdown("###### Tableau arrêt par arrêt")
+                    st.caption(
+                        "**Suivi GPS** : le bus est passé dans la zone de l'arrêt et a été détecté. "
+                        "**Immob. réelle** : temps d'arrêt avec GPS actif. "
+                        "**Signal perdu** : durée sans ping GPS à cet arrêt (non comptée comme arrêt). "
+                        "**Distance arrêt** : écart entre la position GPS du bus et la position théorique de l'arrêt."
+                    )
+                    tbl = seq[["stop", "matched", "dwell_min", "dark_min", "dist_m"]].copy()
+                    tbl["matched"] = tbl["matched"].map({True: "✅ Suivi", False: "❌ Non desservi"})
+                    tbl["dist_m"] = tbl["dist_m"].apply(lambda v: f"{v:.0f} m" if v > 0 else "—")
+                    tbl["dwell_min"] = tbl["dwell_min"].apply(lambda v: f"{v:.1f} min" if v > 0 else "—")
+                    tbl["dark_min"] = tbl["dark_min"].apply(lambda v: f"{v:.1f} min" if v > 0 else "—")
+                    tbl.columns = ["Arrêt", "Suivi GPS", "Immob. réelle", "Signal perdu", "Distance arrêt"]
+                    st.dataframe(tbl, hide_index=True, use_container_width=True)
+                else:
+                    st.info("Aucune donnée de séquence disponible pour ce trajet.")
 
     with tab_patterns:
+        # ── Comparaison inter-opérateurs ──────────────────────────────────────
+        st.markdown("##### Taux d'anomalie par opérateur (toutes lignes)")
+        all_pats = {co: get_anomaly_patterns(co) for co in companies}
+        cmp_rows = [
+            {"Opérateur": co, "Trajets": p["total_trips"],
+             "Anomalies": p["total_anomalies"], "Taux (%)": round(p["overall_rate"]*100, 1)}
+            for co, p in all_pats.items() if p and p["total_trips"] > 0
+        ]
+        if cmp_rows:
+            cmp_df = pd.DataFrame(cmp_rows).sort_values("Taux (%)", ascending=False)
+            fig_cmp = px.bar(cmp_df, x="Opérateur", y="Taux (%)",
+                             color="Taux (%)", color_continuous_scale="Reds",
+                             text="Taux (%)", labels={"Taux (%)": "Taux d'anomalie (%)"})
+            fig_cmp.update_traces(texttemplate="%{text:.1f} %", textposition="outside")
+            fig_cmp.update_layout(template="plotly_white", height=280,
+                                  margin=dict(l=10, r=10, t=10, b=10),
+                                  coloraxis_showscale=False, yaxis_title="Taux d'anomalie (%)")
+            st.plotly_chart(fig_cmp, use_container_width=True)
+            st.dataframe(cmp_df, hide_index=True, use_container_width=True)
+            st.caption(
+                "Taux calculé par le modèle Isolation Forest **par opérateur** (chaque opérateur est comparé à lui-même, "
+                "pas aux autres). Un taux élevé ne signifie pas que cet opérateur est pire — cela signifie que ses "
+                "trajets varient davantage par rapport à sa propre normale."
+            )
+        st.markdown("---")
+
         col = st.columns([1, 3])
         company = col[0].selectbox("Opérateur", companies, key="an_pat_co")
         pat = get_anomaly_patterns(company)

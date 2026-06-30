@@ -104,7 +104,8 @@ class Config:
     def out_columns(self) -> list:
         return ["day", "line", "societe", "bus", "trip_id", "dir", "full",
                 "trip_start", "trip_end", "seq", "route_seq", "stop",
-                "arrival", "departure", "dwell_s", "dist_m", "matched"]
+                "arrival", "departure", "dwell_s", "dark_s", "had_gap",
+                "dist_m", "matched"]
 
 
 # géométrie
@@ -150,12 +151,96 @@ def usable_geometry(ligne: dict, cfg: Config) -> bool:
     return len(real_anchor_stops(ligne)) >= cfg.min_anchors
 
 
+# Per-company stop-list collections and their matching societe names in `ligne`.
+_STOP_COL_MAP: dict[str, str] = {
+    "S.R.T.K":       "STOPS.R.T.K",
+    "S.R.T.M":       "STOPS.R.T.M",
+    "S.R.T.BIZERTE": "STOPS.R.T.BIZERTE",
+    "S.R.T.SELIANA": "STOPS.R.T.SELIANA",
+    "TCV":           "STOPTCV",
+    "SORETRAS":      "STOPSORETRAS",
+    "SRT.ELGOUAFEL": "STOPSRT.ELGOUAFEL",
+    "S.T.C.I":       "STOPS.T.C.I",
+    "S.T.S":         "STOPS.T.S",
+    "EPE-TVE":       "STOPEPE-TVE",
+}
+
+
+def _stop_station_frame(db: Database, code, societe: str) -> Optional[pd.DataFrame]:
+    """Build a stops_frame from STOP<societe> (ordered) + station (coords).
+
+    Returns None when the collection doesn't exist, the line isn't in it, or
+    fewer than 4 geocoded stops are found — caller falls back to ligne anchors.
+    """
+    col_name = _STOP_COL_MAP.get(str(societe) if societe else "")
+    if col_name is None:
+        return None
+    try:
+        route_nr = int(code)
+    except (TypeError, ValueError):
+        return None
+
+    stops_raw = list(db[col_name].find(
+        {"ROUTENR": route_nr, "NAMENRnew": {"$exists": True}},
+        {"STOPNR": 1, "NAMENRnew": 1, "_id": 0},
+    ))
+    if not stops_raw:
+        return None
+
+    stop_ids = [str(d["NAMENRnew"]) for d in stops_raw]
+    station_docs = list(db["station"].find(
+        {"stop_id": {"$in": stop_ids}, "societe": societe},
+        {"stop_id": 1, "stop_lat": 1, "stop_lon": 1, "stop_name_fr": 1, "_id": 0},
+    ))
+    station_map: dict[str, tuple] = {}
+    for s in station_docs:
+        try:
+            lat, lon = float(s["stop_lat"]), float(s["stop_lon"])
+        except (TypeError, ValueError):
+            continue
+        if abs(lat) > 1 and abs(lon) > 1:
+            station_map[str(s["stop_id"])] = (lat, lon, s.get("stop_name_fr") or "")
+
+    rows = []
+    for d in stops_raw:
+        sid = str(d["NAMENRnew"])
+        if sid not in station_map:
+            continue
+        lat, lon, name = station_map[sid]
+        try:
+            seq_n = int(str(d["STOPNR"]))
+        except (TypeError, ValueError):
+            continue
+        rows.append({"route_seq": seq_n, "name": name or sid, "lat": lat, "lon": lon})
+
+    if len(rows) < 4:
+        return None
+
+    rows.sort(key=lambda r: r["route_seq"])
+    st = pd.DataFrame(rows)
+    seg = haversine(st["lat"].values[:-1], st["lon"].values[:-1],
+                    st["lat"].values[1:], st["lon"].values[1:])
+    st["s_m"] = np.concatenate([[0.0], np.cumsum(seg)])
+    st.insert(0, "seq", range(len(st)))
+    return st
+
+
 def build_usable_lines(db: Database, cfg: Config) -> dict:
-    """Table {(code, societe) -> stops_frame} pour chaque ligne utilisable."""
-    out ={}
+    """Table {(code, societe) -> stops_frame} pour chaque ligne utilisable.
+
+    Tries STOP<societe>+station first (ordered, named stops with real coords);
+    falls back to ligne.array_lat_opendata anchors where that coverage is absent.
+    """
+    out: dict = {}
     for linge in db["ligne"].find({}):
-        if usable_geometry(linge, cfg):
-            out[(str(linge["code"]), linge.get("societe"))] = stops_frame(linge)
+        code = linge["code"]
+        soc = linge.get("societe")
+        sf = _stop_station_frame(db, code, soc)
+        if sf is None:
+            if not usable_geometry(linge, cfg):
+                continue
+            sf = stops_frame(linge)
+        out[(str(code), soc)] = sf
     return out
 
 
@@ -169,20 +254,22 @@ def load_pings(gps_db: Database, day: str, line: str, bus) -> pd.DataFrame:
     """
     cur = gps_db[day].find(
         {"service.codeLigne": line, "bus.code": bus},
-        {"date": 1, "localisation": 1, "speed": 1, "bus.vitesse": 1, "_id": 0},
+        {"date": 1, "localisation": 1, "speed": 1, "bus.vitesse": 1, "service.voyage": 1, "_id": 0},
     )
     rows = []
     for d in cur:
         loc = d.get("localisation") or {}
         b = d.get("bus") or {}
+        svc = d.get("service") or {}
         speed = d.get("speed")
         if speed is None:
             speed = b.get("vitesse")
         rows.append({"t": d.get("date"), "lat": loc.get("x"),
-                     "lon": loc.get("y"), "speed": speed})
+                     "lon": loc.get("y"), "speed": speed,
+                     "voyage": svc.get("voyage")})
     g = pd.DataFrame(rows)
     if len(g) == 0 or "t" not in g:
-        return pd.DataFrame(columns=["t", "lat", "lon", "speed", "gap_s", "signal_gap"])
+        return pd.DataFrame(columns=["t", "lat", "lon", "speed", "gap_s", "signal_gap", "voyage"])
     return g.dropna(subset=["t", "lat", "lon"]).sort_values("t").reset_index(drop=True)
 
 
@@ -323,6 +410,8 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
     lat = seg["lat"].values
     lon = seg["lon"].values
     t = seg["t"].values
+    gap_flag = seg["signal_gap"].values                    # True = dark period before this ping
+    gap_arr  = seg["gap_s"].fillna(0).values               # seconds of that dark period
     margin = cfg.arrival_thresh_m
     covered = stops[(stops["s_m"] >= trip["s_lo"] - margin) & (stops["s_m"] <= trip["s_hi"] + margin)]
     order = covered.sort_values("s_m", ascending=(trip["dir"] == "ALLER"))
@@ -338,13 +427,19 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
             d_arr = float(d.min())
             matched = d_arr <= cfg.arrival_thresh_m
 
-        departure, dwell_s = pd.NaT, None
+        departure, dwell_s, dark_s, had_gap = pd.NaT, None, 0.0, False
         if matched:
-            # départ = dernier ping *consécutif* encore dans la zone de cet arrêt
+            # départ = dernier ping *consécutif* encore dans la zone, sans franchir un écart de signal.
+            # Un écart de signal fait partie de `gap_flag`; on s'arrête avant lui pour ne pas
+            # compter la durée de l'écart comme immobilisation (ce qui déclencherait des anomalies).
             d_fwd = haversine(lat[j_local:], lon[j_local:], st["lat"], st["lon"])
             within = d_fwd <= cfg.arrival_thresh_m
             last = 0
             for k in range(len(within)):
+                if k > 0 and gap_flag[j_local + k]:   # signal perdu avant ce ping → s'arrêter
+                    had_gap = True
+                    dark_s = float(gap_arr[j_local + k])
+                    break
                 if within[k]:
                     last = k
                 else:
@@ -360,10 +455,36 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
             "arrival": pd.Timestamp(t[j_local]) if matched else pd.NaT,
             "departure": departure,
             "dwell_s": dwell_s,
+            "dark_s": dark_s,
+            "had_gap": had_gap,
             "dist_m": int(d_arr) if np.isfinite(d_arr) else None,
             "matched": bool(matched),
         })
     return pd.DataFrame(out)
+
+
+def correct_direction_from_voyage(trips: pd.DataFrame, g: pd.DataFrame) -> pd.DataFrame:
+    """Override geometric ALLER/RETOUR using per-ping service.voyage parity.
+
+    voyage even → ALLER, odd → RETOUR.  Falls back to geometric direction when
+    voyage is absent (older GPS eras) or tied.
+    """
+    if "voyage" not in g.columns or g["voyage"].isna().all():
+        return trips
+    trips = trips.copy()
+    for i, tr in trips.iterrows():
+        seg_v = g[(g["t"] >= tr["start"]) & (g["t"] <= tr["end"])]["voyage"].dropna()
+        if len(seg_v) == 0:
+            continue
+        seg_v = seg_v.astype(int)
+        n_aller  = int((seg_v % 2 == 0).sum())
+        n_retour = int((seg_v % 2 == 1).sum())
+        if n_aller > n_retour:
+            trips.at[i, "dir"] = "ALLER"
+        elif n_retour > n_aller:
+            trips.at[i, "dir"] = "RETOUR"
+        # tie → keep geometric guess
+    return trips
 
 
 def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
@@ -374,6 +495,7 @@ def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
         return pd.DataFrame()
     g, route_len = project_to_route(g, stops, cfg)
     trips = segment_trips(g, route_len, cfg)
+    trips = correct_direction_from_voyage(trips, g)
     frames = []
     for tid, tr in trips.iterrows():
         a = derive_arrivals(g, tr, stops, cfg)

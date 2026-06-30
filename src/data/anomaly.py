@@ -33,7 +33,7 @@ TRIP_KEYS = ["day", "line", "societe", "bus", "trip_id"]
 
 @dataclass(frozen=True)
 class AnomalyConfig:
-    if_contamination: float = 0.05   # fraction attendue de trajets anormaux
+    if_contamination: str | float = "auto"  # 'auto' = seuil naturel IF à -0.5
     if_n_estimators: int = 200
     lstm_hidden: int = 32
     lstm_epochs: int = 30
@@ -52,7 +52,7 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
     fa = fa.copy()
     fa["elapsed_min"] = (fa["arrival"] - fa["trip_start"]).dt.total_seconds() / 60
 
-    trips = (fa[fa["matched"]].groupby(TRIP_KEYS).agg(
+    agg_dict: dict = dict(
         n_stops=("seq", "count"),
         match_rate=("matched", "mean"),
         max_dwell_s=("dwell_s", "max"),
@@ -63,18 +63,34 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
         full=("full", "first"),
         trip_start=("trip_start", "first"),
         trip_end=("trip_end", "first"),
-    ).reset_index())
+    )
+    if "dark_s" in fa.columns:
+        agg_dict["max_dark_s"] = ("dark_s", "max")
+
+    matched = fa[fa["matched"]].copy()
+    trips = matched.groupby(TRIP_KEYS).agg(**agg_dict).reset_index()
+
+    # name of the stop with the worst dwell (for explanation)
+    if "dwell_s" in matched.columns and "stop" in matched.columns:
+        worst_stop = (matched.sort_values("dwell_s", ascending=False)
+                      .groupby(TRIP_KEYS)["stop"].first()
+                      .reset_index()
+                      .rename(columns={"stop": "worst_dwell_stop"}))
+        trips = trips.merge(worst_stop, on=TRIP_KEYS, how="left")
 
     trips = trips[trips["n_stops"] >= cfg.min_trip_stops].copy()
     trips["max_dwell_s"] = trips["max_dwell_s"].fillna(0)
     trips["mean_dwell_s"] = trips["mean_dwell_s"].fillna(0)
     trips["dist_m_max"] = trips["dist_m_max"].fillna(0)
     trips["total_elapsed"] = trips["total_elapsed"].fillna(0)
+    if "max_dark_s" not in trips.columns:
+        trips["max_dark_s"] = 0.0
+    trips["max_dark_s"] = trips["max_dark_s"].fillna(0)
     return trips.reset_index(drop=True)
 
 
 FEATURES = ["n_stops", "match_rate", "max_dwell_s", "mean_dwell_s",
-            "total_elapsed", "dist_m_max"]
+            "total_elapsed", "dist_m_max", "max_dark_s"]
 
 
 def _scale(X: np.ndarray, mean: np.ndarray = None, std: np.ndarray = None):

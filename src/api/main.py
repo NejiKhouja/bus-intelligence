@@ -65,6 +65,7 @@ class ModelManager:
     _models = {}
     _foundation_data = None
     _stops_data = {}
+    _stop_coords = {}   # f"{societe}_{line}" -> {stop_name: (lat, lon)}
     _latest_day = None
 
     def __new__(cls):
@@ -92,6 +93,21 @@ class ModelManager:
                         self._stops_data[key] = stops_data.to_dict('records')
                 
                 print(f"  ✓ Stops mapping built for {len(self._stops_data)} lines")
+
+                # Build stop lat/lon from MongoDB (used for map view)
+                try:
+                    wi_db = get_db("winicari")
+                    usable = fdn.build_usable_lines(wi_db, fdn.Config())
+                    for (line_code, soc), sf in usable.items():
+                        key = f"{soc}_{line_code}"
+                        self._stop_coords[key] = {
+                            str(row["name"]): (float(row["lat"]), float(row["lon"]))
+                            for _, row in sf.iterrows()
+                            if pd.notna(row.get("lat")) and pd.notna(row.get("lon"))
+                        }
+                    print(f"  ✓ Stop coordinates loaded for {len(self._stop_coords)} lines")
+                except Exception as e:
+                    print(f"  ! Stop coordinates not available: {e}")
 
                 # Demo clock: "today" = the most recent day with real data.
                 self._latest_day = str(self._foundation_data["day"].max())
@@ -128,6 +144,10 @@ class ModelManager:
     def get_stops(self, societe: str, line: str) -> List[Dict]:
         key = f"{societe}_{line}"
         return self._stops_data.get(key, [])
+
+    def get_stop_coords(self, societe: str, line: str) -> dict:
+        """Maps stop_name -> (lat, lon) for a given line."""
+        return self._stop_coords.get(f"{societe}_{line}", {})
 
     def get_latest_day(self) -> Optional[str]:
         """Demo 'today' — most recent day present in the foundation data."""
@@ -304,6 +324,17 @@ async def get_days(
     
     days = sorted(df_filtered["day"].unique().tolist(), reverse=True)
     return {"days": days[:30]}
+
+@app.get("/api/buses-for-line")
+async def get_buses_for_line(societe: str, line: str):
+    """All unique buses that have ever run on a given line (across all days in the foundation)."""
+    df = model_manager.get_foundation_data()
+    if df is None:
+        return {"buses": []}
+    sub = df[(df["societe"] == societe) & (df["line"] == line)]
+    buses = sorted(int(b) for b in sub["bus"].unique())
+    return {"buses": buses}
+
 
 @app.get("/api/buses-for-day")
 async def get_buses_for_day(
@@ -538,7 +569,10 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
             "anomaly_strength": float(r["anomaly_strength"]),
             "reasons": list(r["reasons"]),
             "max_dwell_min": round(float(r["max_dwell_s"]) / 60, 1),
-            "total_elapsed_min": round(float(r["total_elapsed"]), 1),
+            "max_dark_min": round(float(r.get("max_dark_s", 0) or 0) / 60, 1),
+            "worst_dwell_stop": r.get("worst_dwell_stop"),
+            "trip_duration_min": round(float(r["total_elapsed"]), 1),
+            "total_elapsed_min": round(float(r["total_elapsed"]), 1),  # kept for back-compat
             "n_stops": int(r["n_stops"]),
             "trip_start": r["trip_start"].isoformat() if pd.notna(r["trip_start"]) else None,
             "trip_end": r["trip_end"].isoformat() if pd.notna(r["trip_end"]) else None,
@@ -624,19 +658,28 @@ async def get_current_anomalies(
 
 
 def _trip_sequence(df, societe, line, bus, day, trip_id):
-    """Per-stop sequence rows for one trip."""
+    """Per-stop sequence rows for one trip, with lat/lon for map rendering."""
     seqdf = df[
         (df["societe"] == societe) & (df["line"] == line) & (df["bus"] == bus) &
         (df["day"] == day) & (df["trip_id"] == trip_id)
     ].sort_values("seq")
+    coord_map = model_manager.get_stop_coords(societe, line)
     seq = []
     for _, s in seqdf.iterrows():
-        dwell = float(s["dwell_s"]) if pd.notna(s["dwell_s"]) else 0.0
-        dist = float(s["dist_m"]) if pd.notna(s["dist_m"]) else 0.0
+        dwell = float(s["dwell_s"]) if pd.notna(s.get("dwell_s")) else 0.0
+        dark  = float(s["dark_s"])  if pd.notna(s.get("dark_s"))  else 0.0
+        dist  = float(s["dist_m"])  if pd.notna(s.get("dist_m"))  else 0.0
+        stop_name = s["stop"]
+        lat, lon = coord_map.get(stop_name, (None, None))
         seq.append({
-            "seq": int(s["seq"]), "stop": s["stop"],
-            "dwell_min": round(dwell / 60, 1), "dist_m": round(dist, 0),
+            "seq": int(s["seq"]), "stop": stop_name,
+            "dwell_min": round(dwell / 60, 1),
+            "dark_min":  round(dark  / 60, 1),
+            "had_gap":   bool(s.get("had_gap", False)),
+            "dist_m": round(dist, 0),
             "matched": bool(s["matched"]),
+            "lat": lat,
+            "lon": lon,
         })
     return seq
 
@@ -650,11 +693,20 @@ def _problem_stops(seq):
     if worst_dwell["dwell_min"] >= 5:
         out["longest_stop"] = {"stop": worst_dwell["stop"],
                                "dwell_min": worst_dwell["dwell_min"]}
+    # signal-loss stops: stops where a GPS gap interrupted the dwell scan
+    gap_stops = [s for s in seq if s.get("had_gap") and s.get("dark_min", 0) >= 5]
+    if gap_stops:
+        worst_gap = max(gap_stops, key=lambda s: s["dark_min"])
+        out["signal_loss_stop"] = {"stop": worst_gap["stop"],
+                                   "dark_min": worst_gap["dark_min"]}
+        out["signal_loss_count"] = len(gap_stops)
     offroute = [s["stop"] for s in seq if not s["matched"]]
     if offroute:
         out["off_route_stops"] = offroute[:5]
         out["off_route_count"] = len(offroute)
-    far = [s for s in seq if s["dist_m"] >= 800]
+    # Only flag matched stops that were still far — unmatched stops trivially have large dist_m
+    # (they were simply never reached), and that info is already in off_route_stops.
+    far = [s for s in seq if s["matched"] and s["dist_m"] >= 800]
     if far:
         worst_far = max(far, key=lambda s: s["dist_m"])
         out["farthest_stop"] = {"stop": worst_far["stop"], "dist_m": worst_far["dist_m"]}
@@ -665,7 +717,7 @@ def _problem_stops(seq):
 async def anomaly_explain(
     societe: str,
     line: str,
-    bus: int,
+    bus: Optional[int] = None,
     day: Optional[str] = None
 ):
     """Per-trip explanations + WHERE (which stops) the anomaly happened."""
@@ -676,17 +728,33 @@ async def anomaly_explain(
         anomalous = [r for r in rows if r["severity"] != "low"]
 
         # Attach stop-level detail to each anomalous trip
+        # Use the bus from each row (needed when bus=None means "all buses")
         if df is not None:
             for a in anomalous:
-                seq = _trip_sequence(df, societe, line, bus, a["day"], a["trip_id"])
+                seq = _trip_sequence(df, societe, line, int(a["bus"]), a["day"], a["trip_id"])
                 a["problem_stops"] = _problem_stops(seq)
 
         worst_trip, sequence = None, []
         if anomalous and df is not None:
             worst = max(anomalous, key=lambda r: r["anomaly_strength"])
             worst_trip = worst
-            sequence = _trip_sequence(df, societe, line, bus,
+            sequence = _trip_sequence(df, societe, line, int(worst["bus"]),
                                       worst["day"], worst["trip_id"])
+
+        # Median trip duration for normal trips on this line (baseline for comparison)
+        avg_duration_min = None
+        try:
+            all_scored = models["trips"]
+            line_normal = all_scored[
+                (all_scored["societe"] == societe) &
+                (all_scored["line"] == line) &
+                (~all_scored["anomaly"])
+            ]
+            if len(line_normal) >= 3:
+                avg_duration_min = round(float(line_normal["total_elapsed"].median()), 1)
+        except Exception:
+            pass
+
         return {
             "societe": societe, "line": line, "bus": bus, "day": day,
             "trips": rows,
@@ -695,11 +763,27 @@ async def anomaly_explain(
             "sequence": sequence,
             "total_trips": len(rows),
             "anomaly_count": len(anomalous),
+            "avg_duration_min": avg_duration_min,
         }
     except KeyError:
         raise HTTPException(status_code=503, detail="Anomaly models not loaded")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error explaining anomalies: {str(e)}")
+
+
+@app.get("/api/trip-detail")
+async def trip_detail(
+    societe: str, line: str, bus: int, day: str, trip_id: int
+):
+    """Sequence + problem stops for one specific trip (used for per-trip map/chart)."""
+    df = model_manager.get_foundation_data()
+    if df is None:
+        raise HTTPException(status_code=503, detail="Foundation data not loaded")
+    seq = _trip_sequence(df, societe, line, bus, day, trip_id)
+    return {
+        "sequence": seq,
+        "problem_stops": _problem_stops(seq),
+    }
 
 
 @app.get("/api/anomaly-patterns")
