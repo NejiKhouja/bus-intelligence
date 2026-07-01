@@ -1,5 +1,22 @@
-"""
-FastAPI endpoints for WiniCari AI - Complete Production Version
+"""FastAPI serving layer for WiniCari AI — the HTTP interface the dashboard talks to.
+
+Loads all four trained modules once at startup (`ModelManager.load_all`) and exposes
+them as REST endpoints, grouped as:
+
+  Metadata / fleet state  GET /health, /api/options, /api/lines*, /api/directions,
+                          /api/buses*, /api/days*, /api/stops, /api/route-info,
+                          /api/active-buses
+  Delay / ETA             GET /api/prophet-lines, /api/eta-to-stop
+                          POST /api/predict/delay/{auto,manual,forecast}
+  GPS fallback            GET /api/bus-status, /api/gps-track, /api/gps-gaps,
+                          /api/gps-gap-examples
+                          POST /api/predict/gps-fallback
+  Anomaly detection       GET /api/anomaly-history, /api/bus-anomaly-check,
+                          /api/current-anomalies, /api/anomaly-explain,
+                          /api/trip-detail, /api/anomaly-patterns
+  RAG chatbot             POST /api/chatbot/ask
+
+See `src/models/*.py` for the underlying train/load/predict logic each endpoint wraps.
 """
 from __future__ import annotations
 

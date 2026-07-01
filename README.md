@@ -126,11 +126,17 @@ winicari/
 │   │   ├── gps_fallback.py     # train / load / predict_position
 │   │   ├── anomaly.py          # train / load / score
 │   │   └── chatbot.py          # build / load / ask
-│   ├── api/main.py             # FastAPI serving layer (stub)
-│   ├── dashboard/app.py        # Streamlit dashboard (stub)
+│   ├── api/main.py             # FastAPI serving layer — health, options, ETA,
+│   │                           # GPS fallback, anomaly, RAG chat endpoints
+│   ├── dashboard/
+│   │   ├── app.py              # Streamlit dashboard — delay/ETA, GPS fallback,
+│   │   │                       # anomaly, chatbot and admin tabs
+│   │   └── realtime.py         # map/replay helpers used by app.py
 │   └── train_pipeline.py       # single entry point to train all 4 modules
 │
-├── docs/GLOSSARY.md
+├── docs/
+│   ├── GLOSSARY.md
+│   └── notes/                  # working notes / roadmap (not user docs)
 ├── requirements.txt
 └── docker-compose.yml
 ```
@@ -511,7 +517,6 @@ stop-sequence patterns.
 | IF / LSTM AE agreement | Only 6% overlap between model flags | Collect operator labels to determine which model is right; use ensemble with voting |
 | RAG answer quality | Not formally evaluated | Manual spot-check of 50+ queries; consider retrieval precision@k metric |
 | No live retraining | Models go stale as new data arrives | Schedule monthly `python -m src.train_pipeline` via cron or Airflow |
-| No serving layer | No API or dashboard deployed | `src/api/main.py` (FastAPI stub) and `src/dashboard/app.py` (Streamlit stub) exist but are not yet implemented |
 
 ### Key data insights discovered during EDA
 

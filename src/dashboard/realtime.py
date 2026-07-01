@@ -19,18 +19,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from src.data.fallback import haversine_m
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Geometry
 # ─────────────────────────────────────────────────────────────────────────────
-
-def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6_371_000.0
-    p = np.pi / 180
-    a = (np.sin((lat2 - lat1) * p / 2) ** 2
-         + np.cos(lat1 * p) * np.cos(lat2 * p) * np.sin((lon2 - lon1) * p / 2) ** 2)
-    return float(2 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1))))
-
 
 def s_to_latlon(s_km: float, route: List[Dict]) -> tuple[float, float]:
     """Distance along route (km) -> (lat, lon) via the stop polyline. Mirrors backend."""
