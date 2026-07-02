@@ -1,3 +1,5 @@
+[Superseded by docs/DATA_PIPELINE_REPORT.md — kept as raw working notes, not deleted.]
+
 WiniCari — AI Layer for Tunisian Bus Operations
 ================================================
 

@@ -48,13 +48,25 @@ class AnomalyConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
-    """Une ligne par trajet : agrège immobilisation/correspondance/durée en vecteur de caractéristiques."""
+    """Une ligne par trajet : agrège immobilisation/correspondance/durée en vecteur de caractéristiques.
+
+    BUG CORRIGÉ (2026-07-02) : `match_rate` doit être calculé sur TOUS les arrêts de la fenêtre
+    du trajet (correspondus ou non) -- calculer la moyenne de `matched` APRÈS avoir filtré aux
+    seuls arrêts correspondus donne 1.0 par construction, quel que soit le trajet. Ce bug
+    préexistant rendait `match_rate` constant dans les données d'entraînement du modèle
+    d'anomalie déployé : la caractéristique contribuait un vecteur nul à l'Isolation Forest,
+    et la couche d'explication ne pouvait jamais citer un mauvais suivi GPS comme raison,
+    malgré un message dédié dans `_REASON_BUILDERS`. Les stats de stationnement/distance
+    restent, elles, calculées uniquement sur les arrêts correspondus (dwell_s/dist_m n'ont pas
+    de sens pour un arrêt non atteint -- même principe que le bug dist_m du notebook 10).
+    """
     fa = fa.copy()
     fa["elapsed_min"] = (fa["arrival"] - fa["trip_start"]).dt.total_seconds() / 60
 
+    match_rate = fa.groupby(TRIP_KEYS)["matched"].mean().rename("match_rate")
+
     agg_dict: dict = dict(
         n_stops=("seq", "count"),
-        match_rate=("matched", "mean"),
         max_dwell_s=("dwell_s", "max"),
         mean_dwell_s=("dwell_s", "mean"),
         total_elapsed=("elapsed_min", "max"),
@@ -69,6 +81,7 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
 
     matched = fa[fa["matched"]].copy()
     trips = matched.groupby(TRIP_KEYS).agg(**agg_dict).reset_index()
+    trips = trips.merge(match_rate, on=TRIP_KEYS, how="left")
 
     # name of the stop with the worst dwell (for explanation)
     if "dwell_s" in matched.columns and "stop" in matched.columns:

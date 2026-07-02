@@ -22,3 +22,16 @@ overall improve on the app and find bugs
 ------------------------
 
 need to add external features to improve the quality of predctions
+
+
+-------------------------
+the data is really scattedered you i dont know if you came to this conlusion or not 
+but the most important thing is stations_new cause it sums up the rest of the stations_new
+not only the same staion can have multiple names and codes and line pos across diffrent companies
+so you need to thread carfully the source of trruth is scattered the db they they have is really
+messup
+
+
+
+----
+i want to store all of these finding in a txt file under notes from the numbers to the bugs to the 

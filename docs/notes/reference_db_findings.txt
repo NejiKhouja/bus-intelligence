@@ -1,0 +1,846 @@
+[Superseded by docs/DATA_PIPELINE_REPORT.md — kept as raw working notes, not deleted.]
+
+findings from building the clean reference DB (data/reference/winicari_reference.db)
+session 2026-07-01/02 -- station enrichment + companies/lines/stops tables
+
+====================================================================
+NUMBERS -- station enrichment (before touching the SQL reference DB)
+====================================================================
+
+baseline (before any enrichment):
+- 143 usable lines, 287 unique mapped stop names, 2067 mapped stop-rows
+- 266 of 402 ligne docs dropped for <4 geocoded anchors
+
+after ticket-order + OpenData enrichment (notebooks 08/09/10):
+- usable lines 143 -> 187 (+44, +31%)
+- mapped stop-rows 2067 -> 2383 (+316)
+- 41 of the 44 recovered lines belong to companies with ACTIVE recent GPS
+  (S.T.S 21, SRT.ELGOUAFEL 16, S.R.T.SELIANA 3, S.R.T.K 1) -- real, not moot
+- measured on real 30-day pipeline run (d20260523-d20260621):
+  319 candidates tested, 9838 arrival rows produced, 60.5% from recovered lines
+  937 trips reconstructed, 511 (55%) newly exploitable thanks to enrichment
+  196/305 bus-days newly exploitable
+- quality check (matched stops only):
+  match_rate: 58.7% (pre-existing lines) vs 54.6% (recovered) -- comparable
+  dist_m median: 37m (existing) vs 21m (recovered) -- recovered lines TIGHTER
+  dist_m p90: 171m (existing) vs 61m (recovered) -- also tighter
+  (first pass of this stat was wrong -- mixed in unmatched-row dist_m which is
+  unbounded by construction, gave a nonsense 104km p90 -- fixed by filtering to
+  matched==True first)
+
+OpenData dictionary: 3358 unique name->coord entries across 4 collections
+(Station, Station2, Station_new, Station_sts)
+Historique_Tickets: 5.4M tickets, 2019-2026, covers 14 company-name variants
+(11 real companies once canonicalized)
+
+====================================================================
+STATS -- the new SQL reference DB (data/reference/winicari_reference.db)
+====================================================================
+
+companies table: 12 canonical companies
+- EPE-TVE, S.R.T.BIZERTE, S.R.T.K, S.R.T.M, S.R.T.SELIANA, S.T.C.I, S.T.S,
+  SORETRAS, SRT.ELGOUAFEL, TCV, TUS, Winicari
+- Winicari + winicari merged into one (user confirmed same entity despite very
+  different volumes: 9 lines/5 tickets vs 29 lines/138 tickets)
+- S.R.T.K0 merged as alias of S.R.T.K (same device serials BS-18-000x, same
+  lines -- ticket-system artifact, not a real company)
+- has_gps = active in last 30 days, checked EXHAUSTIVELY (not sampled --
+  sampling missed S.T.S's real but sparse recent activity, 1 day out of 10)
+- gps_first_seen/gps_last_seen/gps_days_sampled = full 2022-2026 history,
+  sampled every 3rd day. found 3 companies with REAL historical GPS that a
+  10-day-only check completely missed:
+    S.R.T.BIZERTE: 103 sampled days, May 2022 -> Apr 2023 (~11 months)
+    TUS: 14 sampled days, Nov 2023 -> Jun 2024 (~7 months)
+    EPE-TVE: 2 sampled days, ~3 weeks Nov 2022
+  S.R.T.M, S.T.C.I, SORETRAS confirmed to have NEVER had GPS (0/535 sampled days)
+
+lines table: 402 rows
+- union of ligne (388, most reliable), ticket_only (12, real lines never in
+  ligne), gps_only (2)
+- ALL lines kept (nothing silently dropped) -- low-confidence ones flagged in
+  a notes column instead: codes matching 9xx range flagged as likely
+  admin/special-service, not real numbered routes; single-ticket entries
+  flagged as possible noise
+- 6 duplicate (societe, code) raw ligne docs (mostly S.R.T.SELIANA) were empty
+  stubs, collapsed automatically via UNIQUE(company_id, line_code), no data lost
+
+stops table: 2991 rows (as of this session)
+- built by clustering ~8683 raw coordinate points by physical PROXIMITY
+  (DBSCAN, haversine, eps=150m) instead of matching by name -- this is the
+  core fix for the scattered-names problem
+- primary_name chosen by majority vote across DISTINCT SOURCE COLLECTIONS,
+  not raw row count (ligne can contribute 30+ near-duplicate rows for one
+  lazy name like "TUNIS" for a terminal, which would wrongly outvote
+  OpenData's few but more specific/accurate names if counted naively)
+- confidence tiers: verifie (>=2 independent sources agree), inferee (1
+  source only), non_nomme (only anonymous ligne stopN placeholders, no real
+  name known)
+- clustering surfaced a real bug in source ligne data: some stationnames
+  arrays mislabel a Tunis-side terminal with the destination city's name
+  (e.g. S.R.T.K/201 labels a Tunis terminal "KASSERINE") -- majority vote
+  across sources self-corrects this, wrong label kept as a visible alias only
+
+triangulated stops (ticket-time x GPS ping matching), final state:
+- HOP.SAHLOUL: confidence=triangule_verifie_utilisateur, coord
+  (35.83224, 10.62294) -- user manually confirmed correct after the
+  algorithm's own pick (35.8435, 10.5965) was proven wrong
+- SBIKHA (S.R.T.SELIANA), BEN GARDANE (S.R.T.K): confidence=
+  triangule_non_verifie -- not confirmed right or wrong, but their ticket
+  sequences show real linear intercity progression, structurally unlike
+  S.T.S's oscillating pattern (reassuring, not proof)
+- 12 more S.T.S entries: confidence=triangule_nom_incertain -- kept on
+  purpose per user's call. the GPS coordinate is a real physical place
+  (where the bus actually idles) but the NAME is probably wrong. each has a
+  notes field explaining why (see bugs section below)
+
+====================================================================
+BUGS FOUND AND FIXED THIS SESSION
+====================================================================
+
+1. station name collision (OpenData dictionary)
+   generic names like "STADE MUNICIPALE" or "MEUBLATEX" denote physically
+   DIFFERENT real stops 100+ km apart in different cities. 210 of 2109
+   duplicate-name entries were genuine >1km conflicts. a naive first-source-
+   wins name->coord dict would silently pick the wrong location for ~10% of
+   duplicated names.
+   fix: keep ALL candidates per name, disambiguate using route-sequence
+   geography (unique-name stops on a line anchor it; ambiguous stops take
+   whichever candidate is nearest the closest anchor)
+
+2. triangulation year-sampling bias
+   triangulate_stop originally pulled tickets recent-year-first. for a
+   high-volume stop (HOP.SAHLOUL: 1.78 MILLION tickets), 2025-2026 alone
+   blows past the 150-ticket quota, so 2022-2024 (when S.T.S actually had
+   good GPS coverage) never got sampled at all. GPS-coverage direction isn't
+   universal across companies: S.R.T.K improved over time (bus 6039: zero
+   pings before Nov 2025, so recent=better), but S.T.S's recent coverage is
+   nearly zero while 2022-2024 was dense (recent=worse for this company)
+   fix: sample a FIXED QUOTA PER YEAR, not greedy-recent-first
+
+3. naive centroid rejection in triangulation
+   original logic averaged ALL matched GPS positions and rejected the whole
+   result if any point was >800m from that average. wrongly rejected a
+   clean 10-of-18-point majority cluster just because 5 outlier points
+   existed ~1.2km away.
+   fix: find the largest internally-tight sub-cluster instead of trusting
+   the global mean
+
+4. largest-cluster is not always the correct stop (found via user ground truth)
+   even after fix #3, the "largest cluster" heuristic itself is not
+   reliable. for HOP.SAHLOUL, the algorithm's chosen 10-point cluster was
+   confirmed WRONG by the user -- the correct location was a 4-point
+   cluster (below the min_used=5 threshold!) about 1.2km away.
+   root cause: S.T.S line 219 (and its other lines) is a high-frequency
+   URBAN SHUTTLE that loops repeatedly through a small area. confirmed via
+   one-bus-one-day ticket trace: SOUSSE -> HOP.SAHLOUL -> SOUSSE ->
+   HOP.SAHLOUL -> SOUSSE, oscillating within one morning, with real
+   sensible timestamps (not a batch-sync artifact). the bus almost
+   certainly idles at a depot/terminal between shuttle legs (user confirmed
+   STEG SAHLOUL's triangulated coord is literally the S.T.S terminal), and
+   that idle point generates far more GPS pings than any brief real stop --
+   creating a "gravity well" that pulls the majority-cluster triangulation
+   toward it regardless of which stop name the ticket actually claims.
+   13 of 15 "successful" triangulations in the top-50 test batch were S.T.S
+   -- consistent with this being a company/line-pattern-specific issue, not
+   random noise. of the 9 non-S.T.S candidates in that batch, 2 succeeded
+   (22%) vs 13 of 41 S.T.S (32%) -- similar raw yield, the STS-heavy result
+   count is because S.T.S dominates ticket volume (urban shuttles generate
+   way more tickets than 1-2-trip intercity routes), not because STS has a
+   uniquely different base success rate. only the CORRECTNESS is worse for
+   S.T.S, confirmed by the one ground-truth check available.
+   resolution: kept as real coordinates with a visible "name probably wrong"
+   flag (confidence=triangule_nom_incertain) rather than deleted -- the
+   physical GPS discovery is real and useful even if mislabeled.
+
+5. GPS presence check was misleading on a 10-day window
+   checking only the last 10 days for "has this company ever had GPS"
+   wrongly reported S.R.T.BIZERTE, TUS, and EPE-TVE as never having GPS --
+   they had substantial historical coverage (11mo, 7mo, 3wk respectively)
+   that was later discontinued. a recent-window boolean can't distinguish
+   "never had GPS" from "had it, then it was pulled."
+   fix: sample the FULL 2022-2026 archive (every 3rd day) for historical
+   first_seen/last_seen, plus a separate EXHAUSTIVE (non-sampled) scan of
+   just the last 30 days for current status -- exhaustive mattered because
+   S.T.S's recent activity is itself sparse (1 active day in the last 10),
+   so even light sampling on the recent window could miss it (and initially
+   did, until fixed)
+
+====================================================================
+line_stops table -- session continued, companies + line_stops build
+====================================================================
+
+companies enriched further: added nom_complet/gouvernorat/active_plateforme
+from winicari.societe -- a real admin registry (10 docs) missed the first
+time around. has an authoritative "active" platform-account flag, distinct
+from but consistent with the GPS-history findings (S.R.T.BIZERTE/TUS/EPE-TVE
+are active=False here AND had a since-discontinued GPS window -- matches).
+SORETRAS and S.T.C.I are missing from winicari.societe entirely despite
+real activity elsewhere -- flagged via new notes column, not hidden.
+
+before building line_stops: sampled EVERY winicari collection per user's
+explicit request to be very careful. found several new direct-ID-join paths
+plus ruled out a bunch of red herrings:
+
+useful (confirmed with real hit-rate tests):
+- ligne.stations[i] -> winicari.station.stop_id  (10/10 hit rate)
+- ligne.station_opendata[i] -> OpenData.*.code_station  (10/10 hit rate,
+  but coverage is a strict SUBSET of array_lat_opendata lines -- adds
+  nothing new, not worth a dedicated tier)
+- STOP<societe>.NAMENR -> OpenData.*.code_station  (20/20 for
+  S.R.T.BIZERTE/S.T.S/TCV, 0/20 for SRT.ELGOUAFEL/EPE-TVE -- company
+  dependent numbering, must verify per company)
+- STOP<societe>.NAMENRnew -> winicari.Names.Code (same societe) -> NomFr
+  -- confirmed equivalent (Names.Code=47 -> 'TUNIS' == STOP.NAMENRnew=47
+  for S.R.T.BIZERTE). Names is a COMPANY-WIDE station registry, different
+  numbering than ticket origine codes (which are PER-LINE sequential).
+  this became the single biggest resolution tier (81 lines) -- the fix
+  that unlocked SRT.ELGOUAFEL specifically.
+
+ruled out (checked, not useful):
+- winicari.stop: 7 empty test placeholder docs, no real data
+- winicari.historiqueStation: mostly junk/test entries, a changelog not
+  a source table
+- winicari.demande_ligne: customer feature requests for NEW routes
+  (literal "aaa"/"aaaa" test values in some docs), not existing routes
+- winicari.NamesConv: DRIVER/CONDUCTOR contact registry (phone numbers),
+  not station names at all despite similar collection name
+- winicari.klm: looked like it might extend STOP<societe> (same
+  Société/Routenr/StopNr/nbkm shape) but returned 0 rows for a direct
+  test case -- likely redundant or legacy, not used
+- winicari.position: a second, differently-shaped (stringified nested
+  dicts instead of real BSON subdocs), unclear-purpose duplicate of
+  Historique_pos -- not investigated further, not needed
+- winicari.centre: depot/office code->name map (e.g. "Parc Central") --
+  not a stop source itself, but explains WHY some triangulated points
+  land at depot locations (same mechanism as the S.T.S gravity well bug)
+
+line_stops built: 6-tier resolver, most reliable first, each line takes
+the first tier that resolves >=4 stops. result: 217/402 lines (54%)
+resolved, 2446 line_stops rows.
+
+tier breakdown:
+  1. STOP<societe> + winicari.station (direct coord join)        59 lines
+  2. STOP<societe>.NAMENR -> OpenData.code_station (direct code)  20 lines
+  3. STOP<societe>.NAMENRnew -> Names.Code -> name -> stops       81 lines
+     (biggest tier, new discovery this session)
+  4. ligne.stations -> winicari.station.stop_id                    3 lines
+  5. ligne.array_lat_opendata raw anchors -> nearest canonical    38 lines
+  6. ticket order (reused validated stations.py disambiguation)  16 lines
+     unresolved                                                 185 lines
+
+note: an earlier stricter version of tier 6 (exact alias match, single
+candidate only, no fuzzy/disambiguation) only got 22 lines -- switched to
+directly reuse stations.build_enriched_stops (the same proven logic from
+the notebooks, +44 lines validated there) instead of reinventing a weaker
+version. lesson: don't rebuild logic that's already validated elsewhere,
+call it.
+
+remaining 185 unresolved lines -- understood, not a bug:
+dominated by S.R.T.SELIANA (41 lines, 12% resolved) and Winicari (33
+lines, 9%). traced one S.R.T.SELIANA line directly: STOP<societe>+Names
+correctly resolves real town names (SILIANA, ELKANTRA, WESLATIA, etc.)
+but most have ZERO candidates in the canonical stops table -- genuine
+OpenData coverage gap for smaller villages in the Siliana governorate,
+not a resolution bug. only the governorate capital (SILIANA itself)
+reliably has OpenData coverage. same mechanism likely explains Winicari.
+not pursued further this session -- ticket-triangulation is the only
+remaining lever, and its risk profile (S.T.S gravity well bug) means it
+needs per-line verification before trusting, not a blind batch run.
+
+====================================================================
+MONGODB ANOMALIES -- things that are just wrong in the source DB design
+====================================================================
+(not data-quality noise, actual structural/schema mistakes. numbered so
+they're easy to reference. re-verified against the actual DB, not from
+memory.)
+
+1. no canonical company table used as a real reference. `societe` is a
+   free-text string COPIED into every collection (ligne, tickets, GPS
+   pings, STOP<societe>, station, sav, details...) instead of a foreign
+   key into one authoritative company table. result: the same real
+   company ends up spelled differently in different places (S.R.T.K vs
+   S.R.T.K0, Winicari vs winicari) with nothing in the DB enforcing or
+   even detecting the drift.
+
+2. the ONE collection that looks like it's meant to be that authoritative
+   company table (winicari.societe, 10 docs, has nomComplet/Gouvernorat/
+   active) is itself INCOMPLETE -- SORETRAS and S.T.C.I are entirely
+   missing from it despite being real, active operators with real lines,
+   tickets, and sav records elsewhere in the same database.
+
+3. station/stop identity has SIX incompatible ID schemes for the same
+   real-world physical place, none of which reliably cross-reference each
+   other:
+     - OpenData.*.code_station (a structured code, e.g. "42590001")
+     - winicari.station.stop_id (a small integer as string)
+     - STOP<societe>.NAMENRnew (an integer)
+     - STOP<societe>.NAMENR (an integer, but different meaning per company
+       -- see #4)
+     - winicari.Names.Code (an integer, company-wide registry)
+     - ticket origine/Distination codes (an integer, but PER-LINE local
+       sequence, resets to 01 on every route -- NOT the same numbering as
+       Names.Code even though both are small integers on the same station)
+   nothing in the schema documents which of these is "the" ID, or how
+   they relate. we had to empirically test each pairing one at a time to
+   figure out what joins to what.
+
+4. worse: the SAME field name (NAMENR) means DIFFERENT things depending on
+   which company's STOP<societe> collection you're looking at. for
+   S.R.T.BIZERTE/S.T.S/TCV, NAMENR happens to equal an OpenData
+   code_station value (direct join works, 20/20 tested). for
+   SRT.ELGOUAFEL/EPE-TVE, NAMENR is just a small sequential integer with
+   NO relationship to OpenData at all (0/20). same field, same
+   collection-family, silently different semantics per company -- would
+   have produced wrong joins with false confidence if we hadn't tested
+   per company before trusting it.
+
+5. station names collide across physically distant real places under the
+   EXACT same string with no dedup/validation ever enforced. "STADE
+   MUNICIPALE", "MEUBLATEX" etc. -- 210 confirmed conflicts >1km apart
+   among 2109 duplicate names across the OpenData collections. nothing in
+   the data-entry pipeline ever checked "does this name already exist
+   somewhere else" before creating a new station.
+
+6. four parallel, overlapping OpenData station collections (Station,
+   Station2, Station_new, Station_sts) that all look like sequential
+   exports/migrations layered on top of each other rather than one
+   collection maintained over time. entries added to newer ones were
+   never merged back or used to clean up older ones -- same station can
+   appear 2-4 times with slightly different coordinates depending which
+   collection happened to record it.
+
+7. `ligne.stationnames` contains at least one confirmed data-entry error
+   baked directly into a route definition: S.R.T.K line 201's Tunis-side
+   terminal is labeled "KASSERINE" (the city the route departs FROM, not
+   the actual name of that Tunis stop). this kind of error is
+   undetectable without cross-referencing an independent name source --
+   trusting `ligne` alone would silently mislabel a real stop.
+
+8. `code` (line number) is explicitly not unique across companies -- the
+   same numeric code means a totally different route depending on which
+   company you're looking at, with no compound key enforced anywhere
+   except by convention (already known, restating here since it's a
+   structural anomaly like the others).
+
+9. no referential integrity anywhere, by construction (MongoDB has no FK
+   constraints). STOP<societe>.NAMENRnew can point at a winicari.station
+   stop_id or Names.Code that doesn't exist; ligne.societe can contain a
+   spelling that matches none of the canonical company strings; nothing
+   in the system would ever flag this. every join we built had to be
+   manually verified with real hit-rate tests before trusting it, because
+   nothing guarantees it holds.
+
+10. dead/test collections left sitting in what looks like a production
+    database: `stop` (7 empty docs, literally just a Java class-name
+    placeholder `com.example.test11.Model.Stop`, no real fields at all),
+    `historiqueStation` (mostly junk entries like `['tt','nn']`),
+    `demande_ligne` (contains literal test values "aaa"/"aaaa" stored as
+    real field data), `klm` (looks like a superseded/legacy predecessor to
+    STOP<societe>, incomplete/inconsistent). these aren't documented as
+    deprecated anywhere -- we had to sample and test each one to find out
+    it was dead, and easily could have wasted time building on top of one
+    before realizing.
+
+11. GPS ping schema drifted substantially over ~4.5 years with zero
+    versioning or migration markers: the `speed` field moved from nested
+    `bus.vitesse` to top-level `speed` around 2025; `service.codeLigne`
+    (the line link) only exists on pings from ~mid-2022 onward; ping
+    density per bus jumped roughly 12x with no field marking when/why.
+    anyone querying older data without already knowing this will silently
+    get wrong or incomplete results.
+
+12. GPS equipment status (does a company currently have working trackers)
+    is not an explicit field anywhere -- it has to be INFERRED by scanning
+    raw ping history over time, and even then a naive recent-window check
+    is misleading (see companies.has_gps note above -- S.R.T.BIZERTE/TUS/
+    EPE-TVE all had real GPS windows that were later silently discontinued,
+    with nothing marking that transition anywhere in the data).
+
+13. winicari.station (the coordinate table STOP<societe> depends on for
+    its most reliable join) only has entries for 5 of the 12 real
+    companies (S.R.T.BIZERTE, S.R.T.K, S.R.T.M, SORETRAS, Winicari) --
+    an incomplete reference table for something that logically should
+    cover every operator using the STOP<societe> pattern.
+
+14. duplicate near-identical (societe, code) line documents exist inside
+    `ligne` itself -- 6 found (mostly S.R.T.SELIANA), empty stub docs with
+    zero stationnames, essentially dead rows with no uniqueness
+    constraint stopping them from being created.
+
+====================================================================
+COMPARISON -- notebook approach (08/09/10) vs reference-DB approach
+====================================================================
+(figures pulled directly from the actual executed notebook outputs, not
+from memory, to keep this honest)
+
+what the notebook approach (08_station_eda / 09_station_matching /
+10_foundation_before_after) actually did and got:
+- scope: stop COORDINATES only. no company/line canonical tables, no
+  persistent schema -- results live in notebook cell outputs plus two
+  parquet caches (ticket_stop_index.parquet, a raw name->coord dict).
+- method: name-match a station name against a flat OpenData dictionary
+  (3358 names), with sequential geographic disambiguation as the safety
+  net for name collisions, PLUS ticket-time x GPS-ping triangulation for
+  names with no OpenData match at all.
+- result: baseline 143 usable lines -> 187 after enrichment (+44, +31%),
+  2067 -> 2383 mapped stop-rows (+316). recovery rate on the 258 dropped
+  lines: 44/258 (17%).
+- triangulation in the notebook phase: 0/7 on line 500's residual gaps
+  (later, in THIS session's reference-db work, refined to 15/50 (30%)
+  after fixing two real bugs, then rolled back to 3/15 kept after
+  discovering the S.T.S "gravity well" issue -- the notebook phase never
+  caught this because its triangulation sample (7 stops) was too small
+  and too narrow to surface a company-specific systematic bias).
+- no audit trail: nothing records WHICH source resolved a given stop, no
+  confidence tiering, no way to ask "how was this coordinate obtained"
+  after the fact without re-reading notebook cells.
+
+what the reference-DB approach (this session) did and got:
+- scope: full relational schema -- companies (12, enriched with the
+  winicari.societe admin registry), stops (2991, built by CLUSTERING
+  ~8683 raw coordinate points by physical proximity instead of matching
+  by name -- solves the name-collision problem by construction, not by a
+  disambiguation heuristic bolted on after the fact), lines (402, union
+  of ligne/ticket/gps sources, nothing silently dropped), line_stops
+  (2446 rows, 217/402 lines = 54% resolved).
+- method: line_stops uses a 6-TIER resolver, direct ID joins tried FIRST
+  (STOP<societe>+winicari.station, STOP<societe>.NAMENR->OpenData.code_
+  station, STOP<societe>.NAMENRnew->winicari.Names->name) before falling
+  back to the SAME anchor-nearest and ticket-order+disambiguation methods
+  the notebooks used -- reused directly (stations.build_enriched_stops,
+  stations._disambiguate_sequential), not reimplemented.
+- result: of the 217 resolved lines, 160 (59/217+20/217+81/217) came from
+  a DIRECT structural join needing no name-matching or probability at
+  all -- these three tiers (STOP<societe>+station, NAMENR->OpenData,
+  NAMENRnew->Names) were discovered THIS session and didn't exist in the
+  notebook approach at all. only 57 of 217 (38+16+3) came from the
+  weaker anchor/ticket-fallback tiers the notebooks already used.
+- persistent, queryable, versioned: one SQLite file with real foreign
+  keys, confidence tiers (verifie/inferee/non_nomme/triangule_*), notes
+  columns for every caveat, and a tier label recording exactly which
+  method resolved each line -- any future module reads this directly
+  instead of re-deriving matches from scratch.
+- bug discovery: the broader, more systematic testing this approach
+  demanded (top-50 batches, per-company hit-rate checks, ground-truth
+  spot-checks) surfaced 2 additional triangulation bugs (year-sampling
+  bias, naive-centroid rejection) AND the S.T.S gravity-well problem --
+  none of which were visible in the notebooks' narrower 0/7 test. the
+  notebook approach's numbers weren't wrong, they were just too small a
+  sample to expose these failure modes.
+
+bottom line: the notebook approach was the right FIRST pass -- fast,
+proved the concept, got real numbers (+44 lines) with modest effort. the
+reference-DB approach is more expensive (multiple sessions, careful
+per-collection verification) but produces something structurally
+sounder: more of its coverage comes from verified direct joins rather
+than probabilistic name-matching, it's persistent and auditable instead
+of living in notebook cells, and the extra rigor it demanded is exactly
+what caught bugs the lighter notebook pass missed. worth doing SEQUENTIALLY,
+which is what happened -- the notebook work de-risked the concept cheaply
+before committing to the heavier schema-building effort.
+
+====================================================================
+trips + trip_stops table -- reconstructing real GPS trips on line_stops
+====================================================================
+
+built trips/trip_stops by reusing foundation.reconstruct_bus_day (same
+pipeline as build_foundation.py) but pointed at line_stops geometry
+instead of foundation.build_usable_lines, plus anomaly.trip_features for
+the per-trip aggregation (reused, not reimplemented -- same principle as
+tier 6 of line_stops). ran on the SAME 30-day window as notebook 10
+(d20260523-d20260621) for a fair before/after vs foundation_arrivals_
+full.parquet.
+
+BUG FOUND (real, pre-existing, not introduced this session): anomaly.
+trip_features() computed match_rate=("matched","mean") AFTER already
+filtering the frame to matched==True rows only (`matched = fa[fa[
+"matched"]].copy()` ran BEFORE the groupby). mean of an all-True column
+is always 1.0 by construction -- this feature has been mathematically
+CONSTANT in the training data for the ALREADY-DEPLOYED anomaly model.
+impact: dead weight in the Isolation Forest (zero-variance feature after
+scaling), and the anomaly-explanation layer could never surface "mauvais
+suivi GPS / hors itineraire" as a reason despite having that exact
+message written in _REASON_BUILDERS. fixed by computing match_rate on
+the FULL per-trip window (all stops, matched or not) as a separate
+groupby, merged back onto the matched-only dwell/distance aggregates
+(those correctly stay matched-only, same principle as the dist_m p90 bug
+from notebook 10). verified: match_rate now shows real variance (min
+0.136, mean 0.807, max 1.0 on a spot check) instead of a flat 1.0.
+
+result vs foundation_arrivals_full.parquet, same 30-day window:
+                          old (parquet)   new (line_stops)   delta
+  trips                   426             915                +489
+  full trips              299 (70.2%)     272 (29.7%)         -27 *see caveat
+  stop-visit rows         3,901           7,951              +4,050
+  matched stop-visits     2,297 (58.9%)   5,970 (75.1%)       +13.4pts
+  distinct lines w/trips  11              26                  +15
+
+*full-trip caveat, traced precisely, NOT a quality regression: of the 11
+lines present in the old parquet, 10 have virtually identical geometry
+old vs new (stop count + route length match to within rounding --
+confirms these resolve via the same primary source in both systems, no
+change). excluding the 11th (TCV line 3), those 10 lines actually show a
+HIGHER full-trip rate in the new system: 62.7% vs 43.8%. the entire
+aggregate drop is driven by TCV/3 alone: old geometry was 6 stops/5.8km
+(TCV was one of the sparsest-covered companies at the very start of this
+whole effort), new geometry is 15 stops/14.3km -- richer and confirmed
+real (stop names are actual Tunis streets: Avenue Jugurtha, Place
+Pasteur, Avenue Habib Thameur). turns out TCV/3 is a LOOP route --
+"EL MENZAH 6" appears twice in the ordered stop sequence (start AND a
+mid-route revisit) -- and foundation.py's segmentation assumes a LINEAR
+route (s goes up then down for aller/retour). a loop breaks the "full
+trip" classification (0% full in the new system vs 81.8% in the old
+system's oversimplified 6-stop version). this is a genuine, newly
+discovered LIMITATION in the trip segmentation model (doesn't handle
+loop/circular routes), not a data quality problem -- the richer geometry
+just exposed it. worth fixing foundation.py's segmentation for loop
+routes as a follow-up, not urgent.
+
+separately flagged, not yet fixed: two EPE-TVE lines (976, 992) show
+IMPOSSIBLE route lengths (11,494km and 8,167km -- longer than the whole
+African continent) in BOTH old and new geometry (identical between
+systems, so it's a source-data bug, not something this session
+introduced) -- almost certainly one bad/outlier anchor coordinate
+somewhere in that line's stop list. needs isolating and fixing/flagging
+separately; not investigated further this session.
+
+====================================================================
+NEXT IMPROVEMENTS CONSIDERED (not yet done)
+====================================================================
+
+1. increase the reconstruction window (user's own suggestion) -- the
+   current 30-day run only sees May-June 2026, which structurally
+   EXCLUDES every company we found with real but now-discontinued GPS
+   (S.R.T.BIZERTE: May 2022-Apr 2023, TUS: Nov 2023-Jun 2024, EPE-TVE: a
+   few weeks Nov 2022 -- see companies table gps_first_seen/gps_last_seen).
+   running populate_trips over each company's OWN historical GPS window
+   (not just the current 30 days) would recover real trips for those 3
+   companies that are currently invisible to trips/trip_stops entirely.
+   tradeoff: populate_trips does a full rebuild each call, no shard/
+   resume like build_foundation.py -- a multi-year run needs that
+   resumability added first or it's an all-or-nothing multi-hour job.
+
+2. fix foundation.py's loop-route handling (see TCV/3 finding above) --
+   detect when a line's first and last stop coordinates are close
+   together (candidate loop) and adjust segmentation/full-trip logic
+   accordingly instead of assuming every route is strictly linear.
+
+3. find and fix the EPE-TVE impossible-route-length bug (976, 992) --
+   isolate which specific anchor point is wrong, likely one bad
+   lat/lon in the raw source data feeding that line's stop_frame.
+
+4. push further on the 185 still-unresolved line_stops lines -- mostly
+   S.R.T.SELIANA/Winicari, genuine OpenData coverage gaps in smaller
+   villages. ticket-triangulation is the only remaining lever, but per
+   the S.T.S gravity-well bug, each result needs individual verification
+   before trusting it, not a blind batch run like the failed S.T.S
+   attempt.
+
+5. add shard/resume capability to populate_trips (mirroring
+   build_foundation.py's monthly-parquet-shard pattern) so future runs
+   over longer windows don't require a full rebuild every time --
+   currently it's DELETE+full-rebuild only, fine for a 30-day comparison,
+   not for a multi-year run.
+
+====================================================================
+BEFORE vs AFTER -- whole-session summary
+====================================================================
+
+BEFORE (state of the raw MongoDB, nothing built yet):
+- no canonical company table anywhere usable as a real reference --
+  `societe` is a free-text string copy-pasted into every collection,
+  drifting differently per collection (S.R.T.K vs S.R.T.K0, Winicari vs
+  winicari)
+- station/stop identity: SIX incompatible ID schemes in different
+  collections, none documented, none cross-referencing reliably (see
+  anomalies section above)
+- station names collide across physically different real places under
+  the same string with zero dedup ever enforced (STADE MUNICIPALE,
+  MEUBLATEX, 210 confirmed >1km conflicts)
+- foundation pipeline (build_usable_lines): 143 usable lines out of 402
+  ligne docs (66% dropped for <4 geocoded anchors), 287 unique mapped
+  stop names, 2,067 mapped stop-rows
+- zero persistent reference layer -- every module that needed company/
+  stop/line info re-derived its own ad-hoc matching from raw Mongo, no
+  shared source of truth, no audit trail of how anything was resolved
+- anomaly model trained with a silently dead feature (match_rate always
+  1.0 -- present in the codebase the whole time, just never noticed
+  until this session's trips work exposed it)
+- companies with real historical GPS coverage (S.R.T.BIZERTE, TUS,
+  EPE-TVE) looked GPS-less under any naive recent-window check --
+  their real activity windows were invisible without a full historical
+  scan
+- TCV had essentially no usable geometry at all (1 line, 6 stop-rows)
+
+AFTER (data/reference/winicari_reference.db + the fixes made along the way):
+- companies: 12 canonical companies, deduped and merged with explicit
+  user sign-off on the one genuinely ambiguous case (Winicari/winicari),
+  enriched with the winicari.societe admin registry (nomComplet/
+  Gouvernorat/active_plateforme), gaps flagged not hidden (SORETRAS/
+  S.T.C.I absent from that registry), GPS presence tracked as a real
+  historical window (gps_first_seen/gps_last_seen) instead of a
+  misleading recent-only boolean
+- stops: 2,991 canonical stops built by clustering ~8,683 raw coordinate
+  points by PHYSICAL PROXIMITY instead of matching by name -- solves the
+  name-collision problem structurally rather than papering over it,
+  confidence-tiered (verifie/inferee/non_nomme/triangule_*) with a notes
+  column for every caveat instead of silent guessing
+- lines: 402 lines, the full union of ligne/ticket/gps sources (nothing
+  silently dropped, unlike before), low-confidence entries flagged
+  in-place instead of excluded
+- line_stops: 217/402 lines (54%) resolved via a 6-tier resolver, 160 of
+  those 217 from verified DIRECT ID JOINS discovered this session (not
+  probabilistic name-matching) -- includes recovering SRT.ELGOUAFEL from
+  15% to 52% resolved via a newly-found Names-registry join path
+- trips/trip_stops: real GPS reconstruction on the new geometry, same
+  30-day window as the old foundation parquet: +489 trips, +4,050
+  stop-visit rows, +15 lines with real trips, matched rate up from 58.9%
+  to 75.1%
+- anomaly.py: fixed the dead match_rate feature -- the deployed anomaly
+  model's training data now carries a real, variable signal (0.136-1.0)
+  where it used to be a flat, useless 1.0
+- two genuine data bugs found and documented for follow-up (EPE-TVE's
+  impossible route lengths, foundation.py's loop-route blind spot found
+  via TCV/3) that were invisible before because the geometry was too
+  sparse to ever reveal them
+
+net effect: went from a scattered set of MongoDB collections nobody
+could join with confidence, to a small versioned SQLite reference layer
+with foreign keys, confidence tiers, and an audit trail -- PLUS measured,
+real improvement in the actual GPS trip reconstruction pipeline that
+sits on top of it, PLUS a fixed bug in a model that was already deployed
+before any of this work started.
+
+====================================================================
+WINDOW EXTENSION -- real numbers, not projections
+====================================================================
+
+extended populate_trips (added `companies`+`additive` params) to run
+each company's OWN historical GPS window on top of the existing 30-day
+baseline, instead of guessing at impact. actually ran it -- 576 days
+total across S.R.T.BIZERTE (320d), TUS (226d), EPE-TVE (22d).
+
+result per company (additive on top of the 30-day baseline):
+                  days   trips   full trips      stop-rows   match_rate
+  S.R.T.BIZERTE    320    961    793 (82.5%)      6,804        0.863
+  TUS              226     37     36 (97.3%)        180        0.973
+  EPE-TVE           22      0      0                  0        --
+  TOTAL ADDED      576    998    829              6,984
+
+cumulative picture:
+                          old parquet   new (30d)   new (30d+historical)
+  trips                   426           915         1,913
+  full trips              299           272         1,101
+  stop-visit rows         3,901         7,951        14,935
+  lines w/ trips          11            26           33
+
+overall: 426 -> 1,913 trips, +1,487 (+349%), combining the geometry fix
+and the window extension.
+
+BUT be precise about attribution: 961 of the 998 newly added trips (96%)
+are S.R.T.BIZERTE alone. TUS contributed a modest 37 (sparse tracking
+even during its active window -- only 15 candidate bus-days found across
+226 days, this company never had a large tracked fleet). EPE-TVE
+contributed ZERO -- its 3-week window had exactly 1 candidate bus-day,
+which didn't even clear the minimum-pings threshold to produce a trip.
+so the window-extension idea is validated but narrowly: it's worth doing
+specifically because of S.R.T.BIZERTE. TUS/EPE-TVE aren't meaningfully
+recoverable this way given how thin their actual historical tracking
+was -- extending the window for THEM specifically would not be worth
+the compute.
+
+====================================================================
+PUSHING FURTHER ON THE 185 UNRESOLVED LINES -- conclusion: stop here
+====================================================================
+
+precise breakdown of why each of the 185 fails:
+  no STOP<societe> rows at all (genuinely no structured data)     52
+  names resolve via Names registry, but ZERO coord candidates    132
+  names fail to resolve at all                                     1
+
+the 132 bucket is the real target -- we know the real station names and
+their order, just no coordinate anywhere in OpenData/winicari.station/
+ligne. broken down: SRT.ELGOUAFEL 46, S.T.S 42, S.R.T.SELIANA 33,
+S.R.T.K 6, S.R.T.BIZERTE 5.
+
+tried ticket-triangulation on the "safe" subset (SRT.ELGOUAFEL/
+S.R.T.SELIANA/S.R.T.K/S.R.T.BIZERTE, excluding S.T.S which we'd already
+confirmed has the gravity-well problem). only 34 of these names actually
+had a resolvable ticket origine code to triangulate from (mostly
+S.R.T.SELIANA -- SRT.ELGOUAFEL's 46 stuck lines mostly have ZERO ticket
+history at all, consistent with the earlier "166/214 lines have no
+tickets ever" finding). result: 0/34.
+
+traced ONE case in detail (BARGOU, S.R.T.SELIANA, 11,593 tickets --
+highest volume in the batch) to understand why, since 0/34 on a
+supposedly "safe" company was unexpected:
+- bus 990 (the ticket's CodeBus) WAS in the GPS-tracked fleet that exact
+  day -- code linkage is fine, not a repeat of the S.R.T.K0-style bug
+- but the bus had a genuine 178-minute GPS dark period that day (median
+  ping gap 5.0s when tracking -- excellent -- but with occasional
+  multi-hour signal loss), and the sampled ticket happened to land in
+  one of those gaps
+- ruled out: minute-level timestamp clustering (multiple tickets sharing
+  a stamp) looked suspicious at first but is just normal precision when
+  several passengers board within the same minute, not a batch-print bug
+
+full picture across every company tried this session:
+  S.T.S (urban shuttle)              0/25 broad, then 15/50 with fixes
+                                      but 13/15 confirmed WRONG (gravity well)
+  TCV                                 0/25
+  S.R.T.SELIANA/S.R.T.K (linear,
+    supposedly the "safe" case)      0/34
+
+three genuine, validated algorithm bugs were found and fixed this
+session (year-sampling bias, naive-centroid rejection, dominant-
+subcluster selection instead of global mean) -- all real, all confirmed
+by direct evidence. but the NET correct-and-useful yield across every
+company/route-pattern actually tried is still ~0 once you require the
+result to be right, not just "found something." this is no longer a
+tuning problem -- it's a decision point.
+
+CONCLUSION: stop investing further in ticket-triangulation as a general
+lever for the remaining 185 lines. it has been tried on three genuinely
+different company/route patterns (urban shuttle, sparse-legacy TCV,
+linear intercity) and failed on all three despite real, validated
+fixes. the 132-line "known name, no coordinate" gap is a genuine data
+ceiling for automated methods, not something a better algorithm closes.
+if pushing further is wanted, the realistic remaining options are:
+  1. manual/curated geocoding of the highest-value names (we already
+     have the ranked list by ticket volume -- BARGOU, GAAFOUR,
+     ELARROUSA, etc. -- a human with local knowledge or a mapping tool
+     could plausibly geocode the top 20-30 faster than more automated
+     attempts)
+  2. accept 217/402 (54%) line_stops coverage as the practical ceiling
+     for this method and move on to other tables (tickets_daily,
+     anomaly_scores) or the loop-route/EPE-TVE bugs already flagged
+
+====================================================================
+GPS PING CHARACTERISTICS -- what the BARGOU/bus-990 trace actually showed
+====================================================================
+(worth its own section -- this is a real, generalizable characteristic
+of the GPS data itself, not specific to the triangulation investigation
+it came from, and it's the most likely TRUE explanation for why
+triangulation keeps failing across every company tried, not just
+S.R.T.SELIANA)
+
+concrete numbers from one worked example (bus 990, S.R.T.SELIANA,
+2026/01/27):
+- 1,644 pings that day, median gap between consecutive pings = 5.0s
+  (excellent density -- consistent with the ~5-13s figures found
+  elsewhere in this project for actively-tracked buses)
+- but: 2 gaps that day exceeded 2 minutes, the longest was 9,485s
+  (158 minutes -- over 2.5 hours of total signal loss in ONE gap)
+- total dark time that day: 178 minutes out of the day's tracked span
+- the specific ticket used for triangulation (07:45:00) landed inside
+  one of these gaps -- nearest real ping was 07:38:34, 6.5 minutes
+  before the ticket time, outside the +/-3min matching window
+
+pattern: GPS tracking quality is NOT uniformly good-or-bad per bus/
+company -- it's "swiss cheese." the SAME bus, same day, same company,
+can have near-perfect 5-second density for hours and then vanish for
+over 2.5 hours with no warning or pattern. average/median ping density
+looks great in aggregate (which is why nothing in the companies table's
+has_gps / gps_days_sampled signals would have predicted this failure --
+those measure PRESENCE of tracking that day, not CONTINUITY within the
+day). a random ticket timestamp has a real, seemingly unpredictable
+chance of landing in one of these gaps regardless of how good the
+company's overall GPS coverage looks.
+
+implication for triangulation specifically: with a +/-3min matching
+window and dark periods routinely running 30min-2.5h+, a fair number of
+individual ticket-to-ping match attempts are structurally doomed before
+the algorithm even runs, no matter how good the year-sampling/
+disambiguation logic is. this is very likely the dominant reason 0/34
+happened even on S.R.T.SELIANA/S.R.T.K -- companies whose ticket-pattern
+(linear, non-shuttle) and bus-code linkage both checked out fine. WIDENING
+the matching window (e.g. +/-3min -> +/-10-15min) would reduce this
+specific failure mode somewhat, at the cost of looser position precision
+(a bus moving between stops for 10-15 min covers real distance, so a
+wider window trades timestamp-matching success against spatial accuracy
+of the resulting coordinate) -- not tried this session, a reasonable
+next experiment if triangulation is revisited later.
+
+separately: ticket timestamps only have MINUTE precision (no seconds),
+confirmed by the same bus/day showing 78 tickets across only 31 distinct
+timestamps, with up to 12 tickets sharing one exact minute. this is
+normal (several passengers boarding within the same minute naturally
+share a stamp) and NOT itself a bug or the cause of the triangulation
+failures -- the +/-3min window already comfortably exceeds 1-minute
+timestamp granularity, so this doesn't materially compound the dark-
+period problem above.
+
+====================================================================
+tickets_daily table
+====================================================================
+
+built from winicari.details (daily ticket/revenue aggregates per bus,
+NOT the 5.4M individual tickets -- those are ETL input only, see
+earlier note). raw collection has real duplicates on (societe,
+CodeLigne, codeBus, date) -- 7,881 docs but only 7,171 distinct combos
+-- summed nbrTicket/recette rather than inserted as-is. 103 docs
+(~1.3%) have societe=None, unattributable, skipped.
+
+result: 7,069 rows, 0 unmatched companies, 0 unmatched lines (clean --
+details only covers the 5 companies we already have full lines/
+companies coverage for).
+
+  company          rows   tickets   recette
+  TCV              2,659   466,949   793,813
+  S.T.S              941   232,794   408,506
+  S.R.T.K          2,162   149,025   954,796
+  S.R.T.SELIANA      862    65,389   187,542
+  SRT.ELGOUAFEL      445    25,677   254,183
+
+date coverage: winicari.details itself only spans 2025/02/03 to
+2026/06/22 -- there's no earlier ticket-detail data to include, so this
+table is already at its natural full scope, nothing further to extend.
+
+====================================================================
+trips/trip_stops -- rebuilt at FULL SCALE (not a 30-day sample)
+====================================================================
+
+user's explicit ask: the earlier 30-day comparison was for a fair A/B
+test, but for actual model training data, sample less than the old
+system covered defeats the purpose -- rebuild across the SAME Jan 2025
+- Jun 2026 range the old foundation parquet covers (522 real GPS days),
+all companies, then add the 3 historical windows (S.R.T.BIZERTE/TUS/
+EPE-TVE, 2022-2024) on top since those're genuinely EXTRA data beyond
+anything the old system ever had.
+
+took 2,427s (~40 min) for the main 527-day pass (5,971 candidates
+checked, 5,781 bus-days produced trips) + ~47s for the 3 historical
+windows.
+
+result vs foundation_arrivals_full.parquet (full history):
+                       old (full hist)   new (full+historical)   delta
+  trips                21,669            26,132                 +4,463
+  stop-visit rows       177,334           198,430                +21,096
+  distinct lines            35                66                   +31
+  matched rate            70.1%             80.1%                +10pts
+  full trips (raw)    17,890 (82.6%)     5,404 (20.7%)          looks bad, see below
+
+full-trip collapse fully explained, NOT a new mystery -- same TCV/3
+loop-route bug already diagnosed on the 30-day sample, just far more
+visible at full scale: TCV/3 alone now accounts for 12,168 of 26,132
+total trips (46.6% of the ENTIRE dataset -- it's an extremely
+high-frequency short urban loop, many round-trips per day) at a 0.6%
+full-trip rate. excluding TCV/3, the lines shared between old and new
+systems settle at 80.0% full -- close to the old baseline's 82.6%,
+confirming no regression anywhere else.
+
+IMPORTANT PRIORITY CHANGE: fixing foundation.py's loop-route
+segmentation for TCV/3 is no longer a "nice to have" -- at 46.6% of the
+whole dataset, its currently-wrong "is_full" label would meaningfully
+bias any model trained on this trips table (e.g. an anomaly model could
+learn "TCV/3 trips are usually partial" as normal, when most are
+actually complete round trips just mislabeled by the segmentation
+logic's linear-route assumption). recommend fixing this BEFORE using
+trips/trip_stops for real model training, not as a deferred cleanup
+item.
+
+other lines in the "lower than expected full-rate" list worth a future
+look, less urgent, not yet investigated: S.T.S/226 (32.5%), S.R.T.K/216
+(39.6%), S.R.T.K/202 (41.5%), S.R.T.K/215 (42.6%), S.R.T.K/508 (54.1%)
+-- could be more loop/complex-topology lines, or could be genuine lower
+service-completion rates, not distinguished yet.

@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 # Import model modules
 from src.models import delay, gps_fallback, anomaly, chatbot
 from src.data import foundation as fdn
+from src.data import reference_db as rdb
 from src.data.db import get_db
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,10 +112,9 @@ class ModelManager:
                 
                 print(f"  ✓ Stops mapping built for {len(self._stops_data)} lines")
 
-                # Build stop lat/lon from MongoDB (used for map view)
+                # Build stop lat/lon from the reference DB (used for map view)
                 try:
-                    wi_db = get_db("winicari")
-                    usable = fdn.build_usable_lines(wi_db, fdn.Config())
+                    usable = _load_usable_lines()
                     for (line_code, soc), sf in usable.items():
                         key = f"{soc}_{line_code}"
                         self._stop_coords[key] = {
@@ -179,6 +179,23 @@ class ModelManager:
         return list(self._models.keys())
 
 model_manager = ModelManager()
+
+_usable_lines_cache: Optional[dict] = None
+
+
+def _load_usable_lines() -> dict:
+    """Line/stop geometry {(line_code, societe) -> stops_frame}, from the reference DB
+    (data/reference/winicari_reference.db). Built once and cached for the app's lifetime --
+    replaces the old per-call rebuild from live MongoDB via `foundation.build_usable_lines`.
+    """
+    global _usable_lines_cache
+    if _usable_lines_cache is None:
+        conn = rdb.init_db()
+        try:
+            _usable_lines_cache = rdb._usable_lines_from_line_stops(conn)
+        finally:
+            conn.close()
+    return _usable_lines_cache
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI App
@@ -996,8 +1013,7 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
             
             if len(foundation_data) > 0:
                 first_stop = foundation_data.iloc[0]
-                win_db = get_db("winicari")
-                usable = fdn.build_usable_lines(win_db, cfg)
+                usable = _load_usable_lines()
                 key = (request.line, request.societe)
                 if key in usable:
                     stops = usable[key]
@@ -1016,9 +1032,8 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
             raise HTTPException(status_code=404, detail=f"No GPS pings found for bus {request.bus} on {request.day}")
         
         g = fdn.clean_pings(g, cfg)
-        
-        win_db = get_db("winicari")
-        usable = fdn.build_usable_lines(win_db, cfg)
+
+        usable = _load_usable_lines()
         key = (request.line, request.societe)
         if key not in usable:
             raise HTTPException(status_code=404, detail=f"Line {request.line} geometry not found")
@@ -1096,17 +1111,6 @@ async def forecast_delay(
 # GPS track / gaps / examples — for the event-driven signal-loss demo
 # ─────────────────────────────────────────────────────────────────────────────
 
-_usable_lines_cache = None
-
-
-def _get_usable_lines():
-    """Line geometry {(line, societe) -> stops_frame}, built once and cached."""
-    global _usable_lines_cache
-    if _usable_lines_cache is None:
-        _usable_lines_cache = fdn.build_usable_lines(get_db("winicari"), fdn.Config())
-    return _usable_lines_cache
-
-
 def _build_gps_track(societe: str, line: str, bus: int, day: str):
     """Raw pings -> cleaned -> projected -> Kalman-filtered track.
 
@@ -1118,7 +1122,7 @@ def _build_gps_track(societe: str, line: str, bus: int, day: str):
     if len(g) == 0:
         return None
     g = fdn.clean_pings(g, cfg)
-    usable = _get_usable_lines()
+    usable = _load_usable_lines()
     key = (line, societe)
     if key not in usable:
         return None

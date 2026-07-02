@@ -102,40 +102,84 @@ def train(foundation_path: str | Path,
     n_if = int(trips_scored["anomaly"].sum())
     print(f"    total signalés : {n_if}/{len(trips_scored)} ({100*n_if/len(trips_scored):.1f}%)")
 
-    # ── Autoencodeur LSTM (global) ────────────────────────────────────────────
-    print("  Entraînement de l'Autoencodeur LSTM...")
-    X, _ = _an.build_sequences(fa, cfg)
-    print(f"    séquences : {X.shape}")
+    # ── Autoencodeur LSTM (par société + repli global) ───────────────────────
+    # Même raison que l'IF par société : un modèle global unique est dominé par la société
+    # la plus volumineuse (TCV = 75% des trajets après l'expansion de la fondation) --
+    # il apprend "normal" = "ce que fait TCV" et ne peut plus rien signaler pour TCV
+    # (dual_anomaly=0 constaté), tout en étant trop peu sensible aux petites sociétés.
+    # `min_trips_lstm_company` est plus élevé que celui de l'IF (30) car un autoencodeur a
+    # bien plus de paramètres à apprendre -- en dessous, repli sur le modèle global.
+    print("  Entraînement des Autoencodeurs LSTM (par société, repli global si trop peu de données)...")
+    min_trips_lstm_company = 200
 
-    lstm_ae, train_errors = _an.train_lstm_autoencoder(X, cfg)
-    threshold = float(np.percentile(train_errors, 95))
-    lstm_scores = _an.lstm_anomaly_scores(lstm_ae, X)
-    n_lstm = int((lstm_scores > threshold).sum())
-    print(f"    signalés : {n_lstm}/{len(X)} (seuil={threshold:.5f})")
+    lstm_models: dict[str, tuple] = {}          # soc -> (modèle, seuil)
+    lstm_company_index: dict[str, str] = {}     # safe_name -> nom original
 
-    # Attacher les scores LSTM par clé de trajet
-    lstm_df = pd.DataFrame(
-        list(_an.build_sequences(fa, cfg)[1]),
-        columns=_an.TRIP_KEYS
-    )
-    lstm_df["lstm_score"] = lstm_scores
+    for soc in sorted(fa["societe"].unique()):
+        soc_fa = fa[fa["societe"] == soc]
+        X_soc, _ = _an.build_sequences(soc_fa, cfg)
+        if len(X_soc) < min_trips_lstm_company:
+            print(f"    {soc}: {len(X_soc)} trajets -- trop peu pour un LSTM dédié, repli global")
+            continue
+        m, train_errors = _an.train_lstm_autoencoder(X_soc, cfg)
+        thr = float(np.percentile(train_errors, 95))
+        n = int((train_errors > thr).sum())
+        print(f"    {soc}: {n}/{len(X_soc)} signalés (seuil={thr:.5f})")
+        safe = _safe(soc)
+        torch.save(m.state_dict(), save_dir / f"{safe}_lstm_ae.pt")
+        np.save(save_dir / f"{safe}_lstm_threshold.npy", np.array(thr))
+        with open(save_dir / f"{safe}_lstm_ae_config.json", "w") as f:
+            json.dump({"hidden": cfg.lstm_hidden, "seq_pad": cfg.seq_pad, "n_feats": X_soc.shape[2]}, f)
+        lstm_company_index[safe] = soc
+        lstm_models[soc] = (m, thr)
+
+    # Repli global -- entraîné sur TOUS les trajets, utilisé pour les sociétés sans modèle dédié
+    X_all, _ = _an.build_sequences(fa, cfg)
+    print(f"    séquences totales : {X_all.shape}")
+    lstm_global, train_errors_global = _an.train_lstm_autoencoder(X_all, cfg)
+    threshold_global = float(np.percentile(train_errors_global, 95))
+    n_global = int((train_errors_global > threshold_global).sum())
+    print(f"    Modèle global (repli) : {n_global}/{len(X_all)} signalés (seuil={threshold_global:.5f})")
+    torch.save(lstm_global.state_dict(), save_dir / "lstm_ae.pt")
+    np.save(save_dir / "lstm_ae_threshold.npy", np.array(threshold_global))
+    with open(save_dir / "lstm_ae_config.json", "w") as f:
+        json.dump({"hidden": cfg.lstm_hidden, "seq_pad": cfg.seq_pad, "n_feats": X_all.shape[2]}, f)
+    lstm_models["_global"] = (lstm_global, threshold_global)
+
+    with open(save_dir / "lstm_company_models.json", "w") as f:
+        json.dump(lstm_company_index, f, ensure_ascii=False)
+
+    # Score chaque trajet avec le modèle LSTM de SA société (ou le repli global)
+    lstm_rows = []
+    for soc in sorted(fa["societe"].unique()):
+        soc_fa = fa[fa["societe"] == soc]
+        X_soc, ids_soc = _an.build_sequences(soc_fa, cfg)
+        if len(X_soc) == 0:
+            continue
+        model, thr = lstm_models.get(soc, lstm_models["_global"])
+        scores = _an.lstm_anomaly_scores(model, X_soc)
+        df_soc = pd.DataFrame(ids_soc, columns=_an.TRIP_KEYS)
+        df_soc["lstm_score"] = scores
+        df_soc["lstm_anomaly"] = scores > thr
+        lstm_rows.append(df_soc)
+    lstm_df = pd.concat(lstm_rows, ignore_index=True)
+
     trips_scored = trips_scored.merge(lstm_df, on=_an.TRIP_KEYS, how="left")
     trips_scored["lstm_score"] = trips_scored["lstm_score"].fillna(0.0)
-    trips_scored["lstm_anomaly"] = trips_scored["lstm_score"] > threshold
+    trips_scored["lstm_anomaly"] = trips_scored["lstm_anomaly"].fillna(False)
     trips_scored["dual_anomaly"] = trips_scored["anomaly"] & trips_scored["lstm_anomaly"]
     trips_scored.to_parquet(save_dir / "trips_scored.parquet", index=False)
 
-    torch.save(lstm_ae.state_dict(), save_dir / "lstm_ae.pt")
-    np.save(save_dir / "lstm_ae_threshold.npy", np.array(threshold))
-    with open(save_dir / "lstm_ae_config.json", "w") as f:
-        json.dump({"hidden": cfg.lstm_hidden, "seq_pad": cfg.seq_pad,
-                   "n_feats": X.shape[2]}, f)
+    n_lstm = int(trips_scored["lstm_anomaly"].sum())
+    trained_lstm_socs = set(lstm_company_index.values())
+    print(f"    LSTM total signalés : {n_lstm}/{len(trips_scored)} ({100*n_lstm/len(trips_scored):.1f}%) "
+          f"-- {len(trained_lstm_socs)} société(s) avec modèle dédié + repli global")
 
     print(f"  -> Artefacts sauvegardés dans {save_dir}")
     return {
         "if_models": {soc: None for soc in trained_socs},
-        "lstm_ae": lstm_ae, "trips": trips_scored,
-        "n_if": n_if, "n_lstm": n_lstm, "threshold": threshold,
+        "lstm_ae": lstm_global, "trips": trips_scored,
+        "n_if": n_if, "n_lstm": n_lstm, "threshold": threshold_global,
     }
 
 
@@ -169,7 +213,24 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     global_sc = np.load(save_dir / "if_scaler.npz")
     if_models["_global"] = (global_m, global_sc["mean"], global_sc["std"])
 
-    # LSTM AE
+    # LSTM AE par société (+ repli global) -- même schéma que l'IF
+    lstm_models: dict[str, tuple] = {}
+    lstm_index_path = save_dir / "lstm_company_models.json"
+    if lstm_index_path.exists():
+        with open(lstm_index_path) as f:
+            lstm_company_index = json.load(f)
+        for safe, soc in lstm_company_index.items():
+            cfg_path = save_dir / f"{safe}_lstm_ae_config.json"
+            model_path = save_dir / f"{safe}_lstm_ae.pt"
+            thr_path = save_dir / f"{safe}_lstm_threshold.npy"
+            if cfg_path.exists() and model_path.exists() and thr_path.exists():
+                with open(cfg_path) as f:
+                    ae_cfg_soc = json.load(f)
+                m = _an._make_lstm_autoencoder(ae_cfg_soc["seq_pad"], ae_cfg_soc["n_feats"], ae_cfg_soc["hidden"])
+                m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+                m.eval()
+                lstm_models[soc] = (m, float(np.load(thr_path)))
+
     with open(save_dir / "lstm_ae_config.json") as f:
         ae_cfg = json.load(f)
     lstm_ae = _an._make_lstm_autoencoder(
@@ -180,14 +241,18 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     lstm_ae.eval()
 
     threshold = float(np.load(save_dir / "lstm_ae_threshold.npy"))
+    lstm_models["_global"] = (lstm_ae, threshold)
     trips = pd.read_parquet(save_dir / "trips_scored.parquet")
 
     n_co = len(if_models) - 1
-    print(f"Modèles d'anomalie chargés ({n_co} opérateur(s) + repli global, seuil={threshold:.5f})")
+    n_co_lstm = len(lstm_models) - 1
+    print(f"Modèles d'anomalie chargés ({n_co} opérateur(s) IF + {n_co_lstm} opérateur(s) LSTM + "
+          f"repli global, seuil IF global={threshold:.5f})")
     return {
         "if_models": if_models,
         # backward-compat keys used by explain_trips fallback
         "if_model": global_m, "if_mean": global_sc["mean"], "if_std": global_sc["std"],
+        "lstm_models": lstm_models,
         "lstm_ae": lstm_ae, "threshold": threshold, "trips": trips,
     }
 
@@ -217,14 +282,25 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
 
     trips = pd.concat(parts, ignore_index=True) if parts else trips
 
-    X, ids = _an.build_sequences(fa, cfg)
-    if len(X) > 0:
-        lstm_scores = _an.lstm_anomaly_scores(models["lstm_ae"], X)
-        lstm_df = pd.DataFrame(ids, columns=_an.TRIP_KEYS)
-        lstm_df["lstm_score"] = lstm_scores
+    # Score LSTM par société (modèle dédié si disponible, sinon repli global)
+    lstm_models = models.get("lstm_models", {"_global": (models["lstm_ae"], models["threshold"])})
+    lstm_rows = []
+    for soc, soc_fa in fa.groupby("societe"):
+        X, ids = _an.build_sequences(soc_fa, cfg)
+        if len(X) == 0:
+            continue
+        model, thr = lstm_models.get(soc, lstm_models["_global"])
+        scores = _an.lstm_anomaly_scores(model, X)
+        df_soc = pd.DataFrame(ids, columns=_an.TRIP_KEYS)
+        df_soc["lstm_score"] = scores
+        df_soc["lstm_anomaly"] = scores > thr
+        lstm_rows.append(df_soc)
+
+    if lstm_rows:
+        lstm_df = pd.concat(lstm_rows, ignore_index=True)
         trips = trips.merge(lstm_df, on=_an.TRIP_KEYS, how="left")
         trips["lstm_score"] = trips["lstm_score"].fillna(0.0)
-        trips["lstm_anomaly"] = trips["lstm_score"] > models["threshold"]
+        trips["lstm_anomaly"] = trips["lstm_anomaly"].fillna(False)
     else:
         trips["lstm_score"] = 0.0
         trips["lstm_anomaly"] = False

@@ -97,6 +97,7 @@ class Config:
     layover_gap_s: int = 2400         # diviser une course uniquement aux écarts >= ceci ...
     park_frac: float = 0.05           # ... et seulement si le bus a à peine bougé pendant l'écart
     full_frac: float = 0.10           # le trajet est "complet" s'il couvre les deux extrémités dans cette bande
+    loop_frac: float = 0.15           # 1er et dernier arrêt à moins de cette fraction de route_len -> route en boucle
     # accrochage des arrivées
     arrival_thresh_m: float = 350.0   # distance max ping-à-arrêt pour compter comme une arrivée
 
@@ -149,6 +150,30 @@ def stops_frame(ligne: dict) -> pd.DataFrame:
 
 def usable_geometry(ligne: dict, cfg: Config) -> bool:
     return len(real_anchor_stops(ligne)) >= cfg.min_anchors
+
+
+def detect_loop_route(stops: pd.DataFrame, cfg: Config) -> bool:
+    """Repère une ligne en forme de boucle : premier et dernier arrêt physiquement proches
+    (à moins de `loop_frac` de route_len l'un de l'autre) malgré une longue distance `s_m`
+    entre eux dans l'ordre de la route.
+
+    Trouvé sur TCV/3 (Tunis, El Menzah) : le même arrêt "EL MENZAH 6" apparaît en seq=0 ET
+    seq=12 sur 15 -- la trace GPS réelle montre le bus oscillant en boucles courtes
+    (s=0<->~5900) sans jamais atteindre le second tronçon de la route, suggérant PLUSIEURS
+    variantes de service réelles (boucle courte + boucle longue) sous le même code de ligne,
+    pas une confusion d'algorithme à corriger simplement. Pour ces lignes, la classification
+    "complet"/"partiel" basée sur route_len n'est PAS fiable -- mieux vaut le signaler
+    explicitement (voir `segment_trips`) que de deviner un seuil qui réintroduirait le même
+    biais que l'ancienne géométrie éparse (surestimation systématique du taux de complétion).
+    """
+    if len(stops) < 2:
+        return False
+    route_len = float(stops["s_m"].iloc[-1])
+    if route_len <= 0:
+        return False
+    first, last = stops.iloc[0], stops.iloc[-1]
+    d = float(haversine(first["lat"], first["lon"], last["lat"], last["lon"]))
+    return d <= cfg.loop_frac * route_len
 
 
 # Per-company stop-list collections and their matching societe names in `ligne`.
@@ -225,17 +250,32 @@ def _stop_station_frame(db: Database, code, societe: str) -> Optional[pd.DataFra
     return st
 
 
-def build_usable_lines(db: Database, cfg: Config) -> dict:
+def build_usable_lines(db: Database, cfg: Config, ticket_index=None, od_dict=None,
+                        tk_db: Optional[Database] = None, gps_db: Optional[Database] = None,
+                        triangulate_gaps: bool = False) -> dict:
     """Table {(code, societe) -> stops_frame} pour chaque ligne utilisable.
 
-    Tries STOP<societe>+station first (ordered, named stops with real coords);
-    falls back to ligne.array_lat_opendata anchors where that coverage is absent.
+    Ordre de priorité des sources de coordonnées :
+    1. STOP<societe>+station (ordonné, coords géocodées — la source la plus fiable).
+    2. Enrichissement OpenData+tickets (`stations.build_enriched_stops`), si `ticket_index`
+       et `od_dict` sont fournis — récupère des lignes qui seraient sinon abandonnées.
+    3. Ancres brutes `ligne.array_lat_opendata` (dernier recours, seulement si >= min_anchors).
+
+    Les paramètres d'enrichissement sont optionnels (défaut None) : sans eux, le comportement
+    est identique à l'ancienne signature (rétrocompatible).
     """
     out: dict = {}
     for linge in db["ligne"].find({}):
         code = linge["code"]
         soc = linge.get("societe")
         sf = _stop_station_frame(db, code, soc)
+        if sf is None and ticket_index is not None and od_dict is not None:
+            from src.data import stations as _st
+            enriched = _st.build_enriched_stops(ticket_index, od_dict, code, soc,
+                                                 tk_db=tk_db, gps_db=gps_db,
+                                                 triangulate_gaps=triangulate_gaps)
+            if not enriched.empty:
+                sf = enriched
         if sf is None:
             if not usable_geometry(linge, cfg):
                 continue
@@ -336,10 +376,18 @@ def project_to_route(g: pd.DataFrame, stops: pd.DataFrame, cfg: Config):
 
 
 # --------------------------------------------------------------------------- segmentation
-def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config) -> pd.DataFrame:
+def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config, is_loop: bool = False) -> pd.DataFrame:
     """Segmentation par oscillation de direction. Capture les trajets complets et partiels ;
     divise une course à un écart uniquement quand le bus était stationné pendant celui-ci
-    (une vraie pause entre courses)."""
+    (une vraie pause entre courses).
+
+    `is_loop` (voir `detect_loop_route`) : pour une ligne en boucle, `full` basé sur route_len
+    n'est PAS fiable -- observé sur TCV/3, la trace GPS oscille en boucles courtes sans jamais
+    couvrir toute la géométrie, ce qui pourrait autant signifier « boucle courte complète »
+    que « boucle longue abandonnée en route » : rien ne permet de trancher avec la géométrie
+    actuelle. Plutôt que deviner (et risquer de réintroduire la surestimation de l'ancienne
+    géométrie éparse), `full` est mis à None (inconnu) explicitement pour ces lignes.
+    """
     if len(g) < 5 or route_len <= 0:
         return pd.DataFrame()
     rev = max(cfg.reversal_floor_m, cfg.reversal_frac * route_len)
@@ -385,11 +433,13 @@ def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config) -> pd.DataFram
             if span < min_span or dur < cfg.min_trip_min:
                 continue
             lo, hi = float(min(s[sa], s[se])), float(max(s[sa], s[se]))
+            full = (None if is_loop else
+                    lo <= cfg.full_frac * route_len and hi >= (1 - cfg.full_frac) * route_len)
             trips.append({
                 "dir": "ALLER" if s[se] > s[sa] else "RETOUR",
                 "start": pd.Timestamp(tm[sa]), "end": pd.Timestamp(tm[se]),
                 "s_lo": lo, "s_hi": hi,
-                "full": lo <= cfg.full_frac * route_len and hi >= (1 - cfg.full_frac) * route_len,
+                "full": full,
             })
     return pd.DataFrame(trips).reset_index(drop=True)
 
@@ -494,7 +544,8 @@ def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
     if len(g) < 20:
         return pd.DataFrame()
     g, route_len = project_to_route(g, stops, cfg)
-    trips = segment_trips(g, route_len, cfg)
+    is_loop = detect_loop_route(stops, cfg)
+    trips = segment_trips(g, route_len, cfg, is_loop=is_loop)
     trips = correct_direction_from_voyage(trips, g)
     frames = []
     for tid, tr in trips.iterrows():
@@ -504,7 +555,9 @@ def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
         a.insert(0, "day", day[1:]); a.insert(1, "line", line)
         a.insert(2, "societe", societe); a.insert(3, "bus", bus)
         a.insert(4, "trip_id", tid); a.insert(5, "dir", tr["dir"])
-        a.insert(6, "full", bool(tr["full"]))
+        # None = « inconnu » pour une ligne en boucle (voir segment_trips) -- NE PAS caster en
+        # bool(), ça convertirait silencieusement None -> False et annulerait le signal
+        a.insert(6, "full", tr["full"] if pd.isna(tr["full"]) or tr["full"] is None else bool(tr["full"]))
         a.insert(7, "trip_start", tr["start"]); a.insert(8, "trip_end", tr["end"])
         frames.append(a)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

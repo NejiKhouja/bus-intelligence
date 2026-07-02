@@ -52,6 +52,7 @@ import numpy as np
 import pandas as pd
 
 from src.data import delay as _dl
+from src.data import weather as _wx
 
 SAVE_DIR = Path("models/delay")
 
@@ -84,6 +85,17 @@ def train(foundation_path: str | Path,
     cfg = _dl.DelayConfig()
     df = _dl.load_foundation(foundation_path)
     m = _dl.add_daytype(_dl.with_elapsed(df, cfg))
+
+    weather = _wx.load_day_weather()
+    m = _dl.add_weather(m, weather)
+    if weather is not None:
+        coverage = 100 * m["rain_frac"].notna().mean()
+        print(f"  Signal météo (rain_frac) : {coverage:.0f}% des lignes couvertes "
+              f"(cache: {_wx.DEFAULT_CACHE_PATH})")
+    else:
+        print(f"  Signal météo (rain_frac) : cache absent ({_wx.DEFAULT_CACHE_PATH}) -- "
+              f"rain_frac=NaN partout. Lancer weather.build_day_weather_cache() pour l'activer.")
+
     baseline = _dl.build_baseline(m, cfg)
     d = _dl.add_daytype(_dl.with_delay(m, baseline, cfg))
     roll = _dl.rolling_table(d)

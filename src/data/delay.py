@@ -115,17 +115,44 @@ def trip_features(d: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
 # `line`/`dir` sont passées nativement comme catégorielles (HistGradientBoosting les gère),
 # donc l'entraînement et l'inférence utilisent exactement les mêmes colonnes sans codage
 # one-hot manuel.
-FEATURES_NUM = ["dep_hour", "dow", "is_weekend", "seq", "seq_frac", "delay_min", "elapsed_min"]
+FEATURES_NUM = ["dep_hour", "dow", "is_weekend", "is_rush_hour", "seq", "seq_frac",
+                "delay_min", "elapsed_min", "rain_frac"]
 FEATURES_CAT = ["line", "dir"]
 TARGET = "next_delay_min"
 
 
 def add_daytype(m: pd.DataFrame) -> pd.DataFrame:
-    """Ajoute des caractéristiques calendaires simples. (La météo nécessiterait une source externe absente de la BD.)
-    Le week-end tunisien est samedi/dimanche -> dayofweek 5/6."""
+    """Ajoute des caractéristiques calendaires simples.
+    Le week-end tunisien est samedi/dimanche -> dayofweek 5/6.
+
+    `is_rush_hour` : jour de semaine + 7h-9h ou 16h-19h -- une hypothèse calendaire documentée,
+    pas ajustée empiriquement. Peu coûteuse et utilisable aussi bien à l'entraînement qu'en
+    service en direct, contrairement à la météo/congestion qui nécessitent une source externe.
+    """
     m = m.copy()
     m["is_weekend"] = m["dow"].isin([5, 6]).astype(int)
+    m["is_rush_hour"] = (
+        (~m["is_weekend"].astype(bool)) &
+        (((m["dep_hour"] >= 7) & (m["dep_hour"] <= 9)) | ((m["dep_hour"] >= 16) & (m["dep_hour"] <= 19)))
+    ).astype(int)
     m["month"] = m["trip_start"].dt.month
+    return m
+
+
+def add_weather(m: pd.DataFrame, weather: pd.DataFrame | None) -> pd.DataFrame:
+    """Attache `rain_frac` par jour calendaire, depuis le cache météo journalier précalculé
+    (voir `src/data/weather.py::load_day_weather`). Laissé à NaN là où le jour n'est pas
+    couvert (~55% des jours, la collection source étant éparse et s'arrêtant ~sept. 2025) --
+    HistGBM gère nativement les valeurs manquantes (branche apprise dédiée), donc aucune
+    imputation n'est nécessaire. Si `weather` est None (cache pas encore construit), `rain_frac`
+    est NaN partout -- comportement inchangé pour qui n'a pas encore lancé la construction du cache.
+    """
+    m = m.copy()
+    if weather is None or len(weather) == 0:
+        m["rain_frac"] = np.nan
+        return m
+    m["day"] = m["trip_start"].dt.strftime("%Y%m%d")
+    m = m.merge(weather[["day", "rain_frac"]], on="day", how="left")
     return m
 
 
@@ -168,13 +195,17 @@ def train_rolling_model(roll: pd.DataFrame, **kw):
 # Modèle LSTM glissant de retard (PyTorch)
 
 # Caractéristiques fournies au LSTM à chaque arrêt le long d'un trajet.
-# POURQUOI ces cinq :
+# POURQUOI ces six :
 #   delay_min    -- retard actuel du bus (prédicteur le plus fort ; le retard se cumule)
 #   elapsed_min  -- temps absolu depuis le départ (capture les effets de fatigue longue distance)
 #   seq_frac     -- progression le long de la route 0->1 (les arrêts tardifs voient plus de retard cumulé)
 #   is_weekend   -- le week-end tunisien (sam/dim) est mesurабlement moins embouteillé
 #   dep_hour     -- comportement heure de pointe vs hors pointe
-LSTM_STEP_FEATS = ["delay_min", "elapsed_min", "seq_frac", "is_weekend", "dep_hour"]
+#   is_rush_hour -- version explicite/binaire du signal heure de pointe (voir add_daytype)
+# `is_rain` n'est PAS inclus ici : ~55% de NaN et pas de valeur au service en direct (pas de
+# flux météo branché) -- le LSTM ne gère pas nativement les NaN comme HistGBM, donc ce
+# signal reste réservé au modèle HistGBM (voir FEATURES_NUM) pour l'instant.
+LSTM_STEP_FEATS = ["delay_min", "elapsed_min", "seq_frac", "is_weekend", "dep_hour", "is_rush_hour"]
 
 
 def build_lstm_sequences(roll: pd.DataFrame, max_len: int = 30
@@ -401,13 +432,14 @@ def serve_eta_lstm(model, baseline: pd.DataFrame, *,
     dep_time = pd.Timestamp(dep_time)
     dep_hour = dep_time.hour
     is_wkend = int(dep_time.dayofweek in (5, 6))
+    is_rush  = int(((7 <= dep_hour <= 9) or (16 <= dep_hour <= 19)) and not is_wkend)
     exp  = dict(zip(b["seq"].astype(int), b["expected_min"]))
     smax = int(b["seq"].max())
 
     # Initialiser l'historique glissant avec l'état actuel connu du bus
     history: list[list[float]] = [
         [current_delay_min, exp.get(current_seq, 0.0) + current_delay_min,
-         current_seq / smax if smax else 0.0, is_wkend, dep_hour]
+         current_seq / smax if smax else 0.0, is_wkend, dep_hour, is_rush]
     ]
 
     cur_seq, cur_delay, rows = int(current_seq), float(current_delay_min), []
@@ -427,7 +459,7 @@ def serve_eta_lstm(model, baseline: pd.DataFrame, *,
             "pred_delay_min": round(nd, 1),
             "eta": dep_time + pd.Timedelta(minutes=exp[nxt] + nd),
         })
-        history.append([nd, exp[nxt] + nd, nxt / smax, is_wkend, dep_hour])
+        history.append([nd, exp[nxt] + nd, nxt / smax, is_wkend, dep_hour, is_rush])
         cur_seq, cur_delay = nxt, nd
 
     return pd.DataFrame(rows)
@@ -480,6 +512,7 @@ def serve_eta(model, baseline: pd.DataFrame, *, societe, line, direction, dep_ti
     dep_time = pd.Timestamp(dep_time)
     dep_hour, dow = dep_time.hour, dep_time.dayofweek
     is_weekend = int(dow in (5, 6))
+    is_rush_hour = int(((7 <= dep_hour <= 9) or (16 <= dep_hour <= 19)) and not is_weekend)
     exp = dict(zip(b["seq"].astype(int), b["expected_min"]))
     smax = int(b["seq"].max())
 
@@ -490,10 +523,13 @@ def serve_eta(model, baseline: pd.DataFrame, *, societe, line, direction, dep_ti
             cur_seq = nxt
             continue
         x = _design(pd.DataFrame([{
-            "dep_hour": dep_hour, "dow": dow, "is_weekend": is_weekend,
+            "dep_hour": dep_hour, "dow": dow, "is_weekend": is_weekend, "is_rush_hour": is_rush_hour,
             "seq": cur_seq, "seq_frac": cur_seq / smax,
             "delay_min": cur_delay, "elapsed_min": exp.get(cur_seq, 0.0) + cur_delay,
             "line": line, "dir": direction,
+            # pas de flux météo en direct branché -- HistGBM gère nativement le NaN
+            # (branche apprise dédiée), voir add_weather()
+            "rain_frac": np.nan,
         }]))
         nd = float(model.predict(x)[0])
         rows.append({"seq": nxt, "expected_min": round(exp[nxt], 1),
