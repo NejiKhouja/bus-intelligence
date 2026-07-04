@@ -228,6 +228,23 @@ source underneath changed.
   smaller companies (`S.R.T.SELIANA`: 106 trips, `TUS`: 37 trips) correctly fall back to a
   global model rather than getting an unstable dedicated one. Isolation Forest was already
   per-company before this change and needed no split.
+- **Per-company HistGBM delay models, added only where measured to help.** The pooled
+  (all-companies) delay model showed the same "dominant company defines normal" pattern as
+  the anomaly module: TCV (largest, 56.7k training rows) MAE 1.62 min vs. S.R.T.SELIANA MAE
+  10.05 min. Adding `societe` as a plain feature made no measurable difference (the model
+  already captured most of that signal via `line`). A dedicated per-company HistGBM model
+  was tested at several minimum-training-row thresholds — below ~3,000 rows a dedicated
+  model actively *regresses* (SRT.ELGOUAFEL, 1,228 rows: 5.71→6.59 min), while above it,
+  dedicated models clearly help (TCV 1.62→1.46, S.R.T.K 4.17→4.10, overall 3.12→3.02) with
+  no regression for any company that has real test data. `MIN_TRIPS_COMPANY = 3000` in
+  `src/models/delay.py` — companies below that threshold automatically fall back to the
+  global model rather than getting an unstable dedicated one.
+- **Service-duration anomaly features** (`elapsed_vs_bus_z`, `elapsed_vs_line_z` in
+  `src/data/anomaly.py::trip_features()`): bidirectional z-scores comparing a trip's total
+  duration to that specific bus's own historical average and to that line's average
+  (distinct from `total_elapsed`, which only compares against the whole company's pooled
+  distribution). Added directly to the existing per-company Isolation Forest / LSTM
+  autoencoder rather than as a separate model.
 - **New, separate ticket-sale anomaly signal** (`src/data/ticket_anomaly.py` /
   `src/models/ticket_anomaly.py`), deliberately not merged with GPS trip anomaly — it
   scores at the (company, line, bus, **day**) grain from `tickets_daily`, while GPS anomaly

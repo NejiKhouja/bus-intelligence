@@ -1,46 +1,59 @@
+# Production stack: the AI API + reverse proxy, for the PHP platform to call.
+# The Streamlit dashboard is NOT part of this file (dev-only tool, see docker-compose.dev.yml).
+#
+# MongoDB: this deployment assumes a REAL production MongoDB is already reachable at
+# MONGO_URL (set in .env) -- point it at that instance. If you have no MongoDB elsewhere yet,
+# uncomment the `mongodb` service below and run with `docker compose --profile local-mongo up`
+# (it's opt-in via a profile, not started by a plain `docker compose up`).
 
 services:
+  api:
+    image: ${API_IMAGE:-winicari-api:local}
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: winicari-api
+    environment:
+      - MONGO_URL=${MONGO_URL}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - ENABLE_CHATBOT=${ENABLE_CHATBOT:-false}
+      - API_KEY=${API_KEY}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+    volumes:
+      - ./models:/app/models:ro
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: winicari-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - API_DOMAIN=${API_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Opt-in only (`docker compose --profile local-mongo up`) -- skip entirely if a real
+  # production MongoDB is already reachable elsewhere.
   mongodb:
     image: mongo:latest
     container_name: winicari-mongodb
+    profiles: ["local-mongo"]
     ports:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
     restart: unless-stopped
 
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: winicari-api
-    ports:
-      - "8000:8000"
-    environment:
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - MONGO_URL=mongodb://mongodb:27017
-      - DB_MAIN=${DB_MAIN:-winicari}
-      - DB_POS_BUS=${DB_POS_BUS:-Historique_pos}
-    volumes:
-      - ./models:/app/models
-      - ./data:/app/data
-      - ./.env:/app/.env
-    depends_on:
-      - mongodb
-    restart: unless-stopped
-
-  dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dashboard
-    container_name: winicari-dashboard
-    ports:
-      - "8501:8501"
-    environment:
-      - API_URL=http://api:8000
-    depends_on:
-      - api
-    restart: unless-stopped
-
 volumes:
+  caddy_data:
+  caddy_config:
   mongodb_data:

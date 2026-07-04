@@ -1,0 +1,26 @@
+# Secrets must never be baked into an image layer -- env vars are injected at
+# container runtime instead (docker-compose `environment:`/`--env-file`).
+.env
+.env.*
+
+# Not needed in the production API image (this deployment excludes the dashboard,
+# notebooks, and chatbot -- see requirements.txt vs requirements-dev.txt)
+notebooks/
+src/dashboard/
+docs/
+requirements-dev.txt
+.claude
+.git
+.github
+
+# Always supplied via the docker-compose volume mounts at runtime, never baked into the
+# image itself -- keeps model/data updates decoupled from code image rebuilds (see
+# docs/DEPLOYMENT.md). The Dockerfile creates empty placeholder dirs for these.
+models/
+data/
+logs/
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/

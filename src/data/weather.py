@@ -17,7 +17,12 @@ from pathlib import Path
 
 import pandas as pd
 
-DEFAULT_CACHE_PATH = Path("data/processed/day_weather.parquet")
+# Ancré sur l'emplacement du module (pas un chemin relatif au répertoire de travail courant) --
+# un chemin relatif se résout différemment selon que l'appelant est un script lancé depuis la
+# racine du dépôt ou un notebook (dont le cwd d'exécution est `notebooks/`), et se résoudrait
+# alors silencieusement vers un fichier inexistant plutôt que de lever une erreur claire.
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CACHE_PATH = ROOT / "data" / "processed" / "day_weather.parquet"
 
 
 def build_day_weather_cache(od_db, out_path: str | Path = DEFAULT_CACHE_PATH) -> pd.DataFrame:

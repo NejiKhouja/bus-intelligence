@@ -20,14 +20,18 @@ See `src/models/*.py` for the underlying train/load/predict logic each endpoint 
 """
 from __future__ import annotations
 
+import logging
+import os
+import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -35,7 +39,47 @@ from pydantic import BaseModel, Field
 from src.models import delay, gps_fallback, anomaly, chatbot
 from src.data import foundation as fdn
 from src.data import reference_db as rdb
+from src.data import model_version as mv
 from src.data.db import get_db
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Journalisation des requêtes -- fichier tournant, pas d'infra externe (voir
+# docs/DEPLOYMENT.md deliverable #8). Portée délibérément légère : méthode/chemin/
+# paramètres de requête (GET), code de statut, latence, version des modèles -- pas le
+# corps JSON complet des requêtes POST (éviterait de journaliser de gros payloads et un
+# second lecteur de flux de requête).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LOG_DIR = Path("logs")
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+api_logger = logging.getLogger("winicari.api")
+api_logger.setLevel(logging.INFO)
+if not api_logger.handlers:
+    _handler = RotatingFileHandler(_LOG_DIR / "api.log", maxBytes=10_000_000, backupCount=5)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    api_logger.addHandler(_handler)
+
+_process_start_time = time.time()
+_request_count = 0
+# Lu une seule fois au démarrage -- correct par construction : la version des artefacts
+# d'un processus en cours d'exécution ne change pas pendant sa durée de vie (un nouveau
+# lot d'artefacts implique un redémarrage du conteneur, voir docs/DEPLOYMENT.md).
+_model_version_info = mv.read_version_file()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Déploiement -- config lue depuis l'environnement (voir docs/DEPLOYMENT.md)
+# ─────────────────────────────────────────────────────────────────────────────
+
+API_KEY = os.getenv("API_KEY")  # None = auth désactivée (dev local uniquement)
+ENABLE_CHATBOT = os.getenv("ENABLE_CHATBOT", "false").lower() == "true"
+
+_allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
+if _allowed_origins_env:
+    ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+else:
+    ALLOWED_ORIGINS = ["*"]
+    print("  ! ALLOWED_ORIGINS non défini -- CORS grand ouvert (\"*\"). "
+          "À restreindre au domaine réel avant la mise en production (voir docs/DEPLOYMENT.md).")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic Models
@@ -62,6 +106,12 @@ class AnomalyRequest(BaseModel):
     line: str
     societe: str
     bus: Optional[int] = None
+
+class AnomalyLiveScoreRequest(BaseModel):
+    day: str
+    line: str
+    societe: str
+    bus: int
 
 class ChatbotRequest(BaseModel):
     query: str
@@ -134,7 +184,13 @@ class ModelManager:
         except Exception as e:
             print(f"  ✗ Failed to load foundation data: {e}")
 
-        for model_name in ["delay", "fallback", "anomaly", "chatbot"]:
+        model_names = ["delay", "fallback", "anomaly"]
+        if ENABLE_CHATBOT:
+            model_names.append("chatbot")
+        else:
+            print("  - Chatbot disabled (ENABLE_CHATBOT=false) -- skipped, not loaded")
+
+        for model_name in model_names:
             try:
                 if model_name == "delay":
                     self._models[model_name] = delay.load()
@@ -219,11 +275,41 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if API_KEY:
+    @app.middleware("http")
+    async def require_api_key(request: Request, call_next):
+        """Simple shared-secret auth for /api/* routes (see docs/PHP_INTEGRATION.md) --
+        `/`, `/health`, and the auto-generated docs stay open for uptime monitors."""
+        if request.url.path.startswith("/api/") and request.headers.get("X-API-Key") != API_KEY:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Missing or invalid X-API-Key"})
+        return await call_next(request)
+else:
+    print("  ! API_KEY non défini -- authentification désactivée (dev local uniquement). "
+          "À définir avant la mise en production (voir docs/DEPLOYMENT.md).")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Journalise chaque requête (méthode/chemin/params/statut/latence) dans logs/api.log
+    et compte les requêtes pour /health -- voir la section journalisation en tête de fichier."""
+    global _request_count
+    _request_count += 1
+    t0 = time.time()
+    response = await call_next(request)
+    latency_ms = round((time.time() - t0) * 1000, 1)
+    api_logger.info(
+        f"{request.method} {request.url.path} query={dict(request.query_params)} "
+        f"status={response.status_code} latency_ms={latency_ms} "
+        f"model_commit={(_model_version_info or {}).get('git_commit', 'n/a')}"
+    )
+    return response
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper Functions
@@ -266,7 +352,10 @@ async def health_check():
         "foundation_data": df is not None,
         "rows": len(df) if df is not None else 0,
         "latest_day": model_manager.get_latest_day(),
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "model_version": _model_version_info,
+        "uptime_seconds": round(time.time() - _process_start_time, 1),
+        "request_count": _request_count,
     }
 
 
@@ -431,7 +520,7 @@ async def get_route_info(
     bus_data = df[
         (df["societe"] == societe) &
         (df["line"] == line) &
-        (df["bus"] == bus) &
+        (df["bus"] == str(bus)) &
         (df["day"] == day)
     ].sort_values("trip_start")
     
@@ -498,7 +587,7 @@ async def get_bus_status(
     bus_data = df[
         (df["societe"] == societe) &
         (df["line"] == line) &
-        (df["bus"] == bus) &
+        (df["bus"] == str(bus)) &
         (df["day"] == day)
     ].sort_values("trip_start")
     
@@ -570,7 +659,7 @@ def _filter_trips(societe: str, line: Optional[str] = None,
     if line:
         mask &= trips["line"] == line
     if bus is not None:
-        mask &= trips["bus"] == bus
+        mask &= trips["bus"] == str(bus)
     if day:
         mask &= trips["day"] == day
     return models, trips[mask].copy()
@@ -612,6 +701,48 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
             "trip_end": r["trip_end"].isoformat() if pd.notna(r["trip_end"]) else None,
         })
     return rows
+
+
+@app.post("/api/anomaly/score-live")
+async def anomaly_score_live(request: AnomalyLiveScoreRequest):
+    """Score a trip in REAL TIME from live GPS pings -- for an in-progress or just-finished
+    trip that isn't in the precomputed `trips_scored.parquet` yet (see /api/anomaly-history
+    for previously-scored trips). Reuses the exact same reconstruction + scoring pipeline
+    `populate_trips`/`anomaly.train()` already use, just on-demand for one bus-day instead of
+    a full offline batch -- no separate model or logic path.
+    """
+    try:
+        models = model_manager.get("anomaly")
+        usable = _load_usable_lines()
+        key = (request.line, request.societe)
+        if key not in usable:
+            raise HTTPException(status_code=404, detail=f"Line {request.line} geometry not found")
+        stops = usable[key]
+
+        cfg = fdn.Config()
+        gps_db = get_db("Historique_pos")
+        fa = fdn.reconstruct_bus_day(gps_db, f"d{request.day}", request.line,
+                                     request.societe, request.bus, stops, cfg)
+        if fa.empty:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No usable GPS trip found for bus {request.bus} on {request.day}"
+            )
+
+        scored = anomaly.score(models, fa)
+        rows = _rows_with_reasons(models, scored, anomalies_only=False)
+        return {
+            "societe": request.societe, "line": request.line,
+            "bus": request.bus, "day": request.day,
+            "trips": rows,
+            "anomaly_count": sum(1 for r in rows if r["severity"] != "low"),
+        }
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Anomaly models not loaded")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error scoring live trip: {str(e)}")
 
 
 @app.get("/api/anomaly-history")
@@ -694,7 +825,7 @@ async def get_current_anomalies(
 def _trip_sequence(df, societe, line, bus, day, trip_id):
     """Per-stop sequence rows for one trip, with lat/lon for map rendering."""
     seqdf = df[
-        (df["societe"] == societe) & (df["line"] == line) & (df["bus"] == bus) &
+        (df["societe"] == societe) & (df["line"] == line) & (df["bus"] == str(bus)) &
         (df["day"] == day) & (df["trip_id"] == trip_id)
     ].sort_values("seq")
     coord_map = model_manager.get_stop_coords(societe, line)
@@ -982,7 +1113,7 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
                 (foundation["day"] == request.day) &
                 (foundation["line"] == request.line) &
                 (foundation["societe"] == request.societe) &
-                (foundation["bus"] == request.bus)
+                (foundation["bus"] == str(request.bus))
             ]
             if len(exists) == 0:
                 available = foundation[
@@ -1008,7 +1139,7 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
                 (foundation["day"] == request.day) &
                 (foundation["line"] == request.line) &
                 (foundation["societe"] == request.societe) &
-                (foundation["bus"] == request.bus)
+                (foundation["bus"] == str(request.bus))
             ]
             
             if len(foundation_data) > 0:
@@ -1075,7 +1206,9 @@ async def chatbot_ask(request: ChatbotRequest):
             "tokens_used": result.get("tokens_used", 0)
         }
     except KeyError:
-        raise HTTPException(status_code=503, detail="Chatbot models not loaded")
+        detail = ("Chatbot disabled in this deployment (ENABLE_CHATBOT=false)"
+                  if not ENABLE_CHATBOT else "Chatbot models not loaded")
+        raise HTTPException(status_code=503, detail=detail)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1339,7 +1472,7 @@ def _bus_status_at(societe: str, line: str, bus: int, day: str,
     if df is None:
         return None
     sub = df[(df["societe"] == societe) & (df["line"] == line) &
-             (df["bus"] == bus) & (df["day"] == day)].copy()
+             (df["bus"] == str(bus)) & (df["day"] == day)].copy()
     if len(sub) == 0:
         return None
 

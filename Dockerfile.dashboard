@@ -2,12 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Streamlit specifically
-RUN pip install --no-cache-dir streamlit plotly requests pandas numpy python-dotenv
+# Dev-only image (dashboard, not part of the production API deployment) -- installs the
+# full requirements-dev.txt (which itself pulls in requirements.txt), no redundant second
+# install needed.
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # Copy source code (includes src/dashboard/)
 COPY src/ ./src/

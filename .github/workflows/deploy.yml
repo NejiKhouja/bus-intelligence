@@ -1,0 +1,44 @@
+# Manual-trigger deploy ONLY -- never runs on push/PR (see docs/DEPLOYMENT.md). A human
+# must explicitly click "Run workflow" in the GitHub Actions UI before anything touches the
+# live server. Builds the image, pushes it to GitHub Container Registry, then SSHes into
+# the server to pull and restart the api container. Retrained model/data artifacts are NOT
+# part of this flow -- those are shipped separately (rsync), see docs/DEPLOYMENT.md #3/#6.
+name: Deploy (manual)
+
+on:
+  workflow_dispatch: {}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}-api
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        run: |
+          docker build -f Dockerfile.api -t "$IMAGE:latest" -t "$IMAGE:${{ github.sha }}" .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            export API_IMAGE="${{ env.IMAGE }}:latest"
+            docker compose pull api
+            docker compose up -d api
+            docker image prune -f

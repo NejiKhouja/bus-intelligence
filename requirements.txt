@@ -1,39 +1,31 @@
-# WiniCari AI layer — runtime dependencies.
-# Pinned to the versions installed in the `bus-intelligence` conda env used for
-# training and serving. Transitive dependencies (e.g. pydantic-core, jinja2) are
-# resolved automatically by pip and intentionally not pinned here.
+# WiniCari AI layer — PRODUCTION runtime dependencies (the FastAPI serving image only).
+# Dashboard, notebooks, and the RAG chatbot are NOT part of this deployment — see
+# requirements-dev.txt for those. Pinned to the versions installed in the `bus-intelligence`
+# conda env used for training and serving.
+
+# --extra-index-url pulls the CPU-only torch wheel instead of the default CUDA-bundled one --
+# this service only ever does CPU inference, and the CUDA wheel is several GB larger for
+# nothing. See docs/DEPLOYMENT.md.
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 # API / serving
 fastapi==0.138.0
 uvicorn==0.49.0
 pydantic==2.13.4
 
-# Dashboard
-streamlit==1.58.0
-streamlit-option-menu==0.4.0
-plotly==6.8.0
-
 # Data / MongoDB
 pymongo==4.17.0
 pandas==2.3.3
 numpy==2.4.6
 python-dotenv==1.2.2
-requests==2.34.2
+# pandas needs one of these to read/write .parquet -- not a direct pandas dependency, easy
+# to miss (this was in fact missing from the original requirements.txt and only "worked"
+# in dev because pyarrow was pulled in transitively by an unrelated package).
+pyarrow==24.0.0
 
-# Modeling
+# Modeling (delay, GPS fallback, anomaly detection — chatbot excluded from this deployment)
 torch==2.12.1
 scikit-learn==1.9.0
 joblib==1.5.3
 prophet==1.3.0
 filterpy==1.4.5
-
-# RAG chatbot
-chromadb==1.5.9
-sentence-transformers==5.6.0
-groq==1.5.0
-
-# Notebooks (EDA / training exploration)
-jupyterlab==4.6.0
-notebook==7.6.0
-ipykernel==7.3.0
-matplotlib==3.11.0

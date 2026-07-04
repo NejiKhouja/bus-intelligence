@@ -1,10 +1,20 @@
 """Module de retard — entraîner, sauvegarder, charger, servir.
 
 Cycle de vie complet pour le Module 1 :
-  train()       -> HistGBM + LSTM + Prophet -> artefacts sauvegardés dans models/delay/
+  train()       -> HistGBM (global + par société) + LSTM + Prophet -> models/delay/
   load()        -> charge tous les artefacts depuis le disque
   predict_eta() -> table ETA glissante pour un bus en direct
   forecast()    -> prévision de retard sur 30 jours pour une ligne (Prophet)
+
+HistGBM par société (2026-07-03)
+    Mesuré, pas supposé : un modèle HistGBM DÉDIÉ par société n'aide QUE si cette société a
+    >= MIN_TRIPS_COMPANY lignes d'entraînement (voir la constante). En dessous (ex.
+    SRT.ELGOUAFEL, 1 228 lignes), un modèle dédié RÉGRESSE par rapport au modèle global
+    (5.71->6.59 min de MAE) -- pas assez de données pour apprendre un pattern propre à cette
+    société sans surapprendre. Au-dessus (TCV, S.R.T.K, S.T.S), un modèle dédié améliore
+    nettement la MAE (TCV 1.62->1.46, S.R.T.K 4.17->4.10, MAE globale 3.12->3.02). D'où le
+    repli automatique sur le modèle global pour toute société sous le seuil, plutôt qu'un
+    modèle dédié systématique.
 
 Notes d'ingénierie ML
 ----------------------
@@ -55,6 +65,18 @@ from src.data import delay as _dl
 from src.data import weather as _wx
 
 SAVE_DIR = Path("models/delay")
+
+# En dessous de ce nombre de lignes d'entraînement, un HistGBM DÉDIÉ à la société régresse
+# par rapport au modèle global (mesuré : SRT.ELGOUAFEL, 1 228 lignes, MAE 5.71->6.59) --
+# repli sur le modèle global. Au-dessus (ex. TCV, S.R.T.K, S.T.S), un modèle dédié améliore
+# nettement la MAE (TCV 1.62->1.46, S.R.T.K 4.17->4.10) sans dégrader les autres sociétés
+# testées. Voir docs/DATA_PIPELINE_REPORT.md pour les chiffres complets avant/après.
+MIN_TRIPS_COMPANY = 3000
+
+
+def _safe(name: str) -> str:
+    """Nom de fichier sûr pour un nom d'opérateur."""
+    return "".join(c if c.isalnum() else "_" for c in str(name))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,14 +130,42 @@ def train(foundation_path: str | Path,
     print(f"  Division : train={len(tr):,} lignes (jours<{cut_day})  "
           f"test={len(te):,} lignes (jours>={cut_day})")
 
-    # ── HistGBM ──────────────────────────────────────────────────────────────
+    # ── HistGBM (global + par société) ────────────────────────────────────────
     # Les modèles à arbres sont invariants par rapport à l'échelle — pas de normalisation nécessaire.
-    # Les catégorielles (line, dir) gérées nativement par HistGBM.
-    print("  Entraînement de HistGBM...")
+    # Les catégorielles (societe, line, dir) gérées nativement par HistGBM.
+    print("  Entraînement de HistGBM (global + par société si assez de données)...")
     hgbm = _dl.train_rolling_model(tr)
-    hgbm_mae = mean_absolute_error(te[_dl.TARGET], hgbm.predict(_dl._design(te)))
-    print(f"    MAE test : {hgbm_mae:.2f} min")
+    hgbm_mae = mean_absolute_error(te[_dl.TARGET], hgbm.predict(_dl._design(te, hgbm.feature_names_used_)))
+    print(f"    MAE test (global) : {hgbm_mae:.2f} min")
     joblib.dump(hgbm, save_dir / "hgbm.joblib")
+
+    # Modèle dédié par société -- seulement si assez de lignes d'entraînement (voir
+    # MIN_TRIPS_COMPANY) pour ne pas régresser par rapport au modèle global sur les petites
+    # sociétés (mesuré, pas supposé).
+    hgbm_company_index: dict[str, str] = {}
+    for soc, grp in tr.groupby("societe"):
+        if len(grp) < MIN_TRIPS_COMPANY:
+            continue
+        m_soc = _dl.train_rolling_model(grp)
+        safe = _safe(soc)
+        joblib.dump(m_soc, save_dir / f"{safe}_hgbm.joblib")
+        hgbm_company_index[safe] = soc
+    with open(save_dir / "hgbm_company_models.json", "w") as f:
+        json.dump(hgbm_company_index, f, ensure_ascii=False)
+
+    # MAE par société en TEST -- dédié si entraîné, repli global sinon -- pour vérifier
+    # concrètement qu'aucune société ne régresse (pas juste supposer que ça aide).
+    for soc, grp in te.groupby("societe"):
+        safe = _safe(soc)
+        if safe in hgbm_company_index:
+            m_soc = joblib.load(save_dir / f"{safe}_hgbm.joblib")
+            pred = m_soc.predict(_dl._design(grp, m_soc.feature_names_used_))
+            tag = "dédié"
+        else:
+            pred = hgbm.predict(_dl._design(grp, hgbm.feature_names_used_))
+            tag = "repli global"
+        print(f"    {soc}: MAE={mean_absolute_error(grp[_dl.TARGET], pred):.2f} min "
+              f"({len(grp)} lignes test, {tag})")
 
     baseline.to_parquet(save_dir / "baseline.parquet", index=False)
 
@@ -176,8 +226,9 @@ def train(foundation_path: str | Path,
 def load(save_dir: str | Path = SAVE_DIR) -> dict:
     """Charge tous les artefacts de retard entraînés depuis save_dir.
 
-    Retourne dict : hgbm, lstm, feat_mean, feat_std, baseline,
-                    prophet (clé par societe_line_dir).
+    Retourne dict : hgbm (modèle global, rétrocompatible), hgbm_models (dict
+                    société -> modèle dédié, + "_global"), lstm, feat_mean, feat_std,
+                    baseline, prophet (clé par societe_line_dir).
     """
     import joblib
     import torch
@@ -185,6 +236,16 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     save_dir = Path(save_dir)
     hgbm     = joblib.load(save_dir / "hgbm.joblib")
     baseline = pd.read_parquet(save_dir / "baseline.parquet")
+
+    hgbm_models: dict = {"_global": hgbm}
+    company_index_path = save_dir / "hgbm_company_models.json"
+    if company_index_path.exists():
+        with open(company_index_path) as f:
+            hgbm_company_index = json.load(f)
+        for safe, soc in hgbm_company_index.items():
+            m_path = save_dir / f"{safe}_hgbm.joblib"
+            if m_path.exists():
+                hgbm_models[soc] = joblib.load(m_path)
 
     scaler   = np.load(save_dir / "lstm_scaler.npz")
     feat_mean, feat_std = scaler["mean"], scaler["std"]
@@ -203,8 +264,10 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
             with open(p, "rb") as f:
                 prophets[p.stem] = pickle.load(f)
 
-    print(f"Modèles de retard chargés : HistGBM + LSTM + {len(prophets)} modèles Prophet")
-    return {"hgbm": hgbm, "lstm": lstm, "baseline": baseline,
+    n_dedicated = len(hgbm_models) - 1
+    print(f"Modèles de retard chargés : HistGBM ({n_dedicated} société(s) dédiée(s) + repli global) "
+          f"+ LSTM + {len(prophets)} modèles Prophet")
+    return {"hgbm": hgbm, "hgbm_models": hgbm_models, "lstm": lstm, "baseline": baseline,
             "feat_mean": feat_mean, "feat_std": feat_std, "prophet": prophets}
 
 
@@ -220,7 +283,8 @@ def predict_eta(models: dict, *,
                 model_type: str = "hgbm") -> pd.DataFrame:
     """Table ETA pour tous les arrêts restants étant donné l'état en direct d'un bus.
 
-    model_type : 'hgbm' (défaut — plus rapide, même précision à la taille d'entraînement actuelle)
+    model_type : 'hgbm' (défaut — utilise le modèle DÉDIÉ de la société si disponible
+                 (voir MIN_TRIPS_COMPANY dans train()), repli sur le modèle global sinon)
                  'lstm' (utilise l'historique complet du trajet ; meilleur avec plus d'époques/GPU)
     Retourne DataFrame : seq, expected_min, pred_delay_min, eta.
     """
@@ -232,8 +296,10 @@ def predict_eta(models: dict, *,
             current_delay_min=current_delay_min,
             scaler_mean=models["feat_mean"], scaler_std=models["feat_std"],
         )
+    hgbm_models = models.get("hgbm_models", {"_global": models["hgbm"]})
+    hgbm_model = hgbm_models.get(societe, hgbm_models["_global"])
     return _dl.serve_eta(
-        models["hgbm"], models["baseline"],
+        hgbm_model, models["baseline"],
         societe=societe, line=line, direction=direction,
         dep_time=dep_time, current_seq=current_seq,
         current_delay_min=current_delay_min,

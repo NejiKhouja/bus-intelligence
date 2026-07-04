@@ -1,0 +1,23 @@
+# Local development stack: adds the Streamlit dashboard on top of the production
+# docker-compose.yml. Not used in the real deployment (PHP talks to the api service
+# directly, no dashboard involved there).
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile local-mongo up
+# (--profile local-mongo also starts the base file's bundled MongoDB -- omit it if you're
+# pointing MONGO_URL at a MongoDB you already have running elsewhere). Leave API_KEY unset
+# in .env for this stack -- the dashboard's HTTP client doesn't send an API key header
+# (it's an internal tool, not the public PHP-facing path).
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: winicari-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    restart: unless-stopped

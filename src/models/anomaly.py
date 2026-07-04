@@ -321,6 +321,10 @@ _REASON_BUILDERS = {
     "match_rate":    ("low",  lambda v: f"Mauvais suivi GPS / hors itinéraire — seulement {v*100:.0f}% des arrêts détectés"),
     "n_stops":       ("low",  lambda v: f"Nombre d'arrêts desservis anormalement faible ({int(v)} arrêts)"),
     "max_dark_s":    ("high", lambda v: f"Perte de signal GPS prolongée à un arrêt (~{v/60:.0f} min sans ping)"),
+    # Bidirectionnelles : trop long ET trop court sont anormaux, contrairement aux features
+    # ci-dessus qui n'ont qu'un seul sens de dérive suspect -- voir la direction "either" plus bas.
+    "elapsed_vs_bus_z":  ("either", lambda v: f"Trajet {'plus long' if v > 0 else 'plus court'} que d'habitude pour CE BUS (z={v:+.1f})"),
+    "elapsed_vs_line_z": ("either", lambda v: f"Trajet {'plus long' if v > 0 else 'plus court'} que d'habitude pour CETTE LIGNE (z={v:+.1f})"),
 }
 
 
@@ -358,7 +362,10 @@ def explain_trips(models: dict, scored: pd.DataFrame, *,
             direction, _builder = _REASON_BUILDERS.get(f, (None, None))
             if direction is None:
                 continue
-            signed = z[i] if direction == "high" else -z[i]
+            if direction == "either":
+                signed = abs(z[i])
+            else:
+                signed = z[i] if direction == "high" else -z[i]
             if signed >= z_thresh:
                 scored_feats.append((signed, f, row[f]))
         scored_feats.sort(reverse=True)

@@ -117,7 +117,7 @@ def trip_features(d: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
 # one-hot manuel.
 FEATURES_NUM = ["dep_hour", "dow", "is_weekend", "is_rush_hour", "seq", "seq_frac",
                 "delay_min", "elapsed_min", "rain_frac"]
-FEATURES_CAT = ["line", "dir"]
+FEATURES_CAT = ["societe", "line", "dir"]
 TARGET = "next_delay_min"
 
 
@@ -171,16 +171,37 @@ def rolling_table(d: pd.DataFrame) -> pd.DataFrame:
     return d.dropna(subset=[TARGET]).reset_index(drop=True)
 
 
-def _design(frame: pd.DataFrame) -> pd.DataFrame:
-    X = frame[FEATURES_NUM + FEATURES_CAT].copy()
+def _design(frame: pd.DataFrame, numeric_features: list[str] | None = None) -> pd.DataFrame:
+    numeric_features = FEATURES_NUM if numeric_features is None else numeric_features
+    X = frame[numeric_features + FEATURES_CAT].copy()
     for c in FEATURES_CAT:
         X[c] = X[c].astype("category")
     return X
 
 
 def train_rolling_model(roll: pd.DataFrame, **kw):
-    """Entraîne le modèle de retard au prochain arrêt. `line`/`dir` gérées comme catégorielles natives."""
+    """Entraîne le modèle de retard au prochain arrêt. `line`/`dir` gérées comme catégorielles natives.
+
+    Élimine d'abord toute caractéristique numérique dégénérée (< 2 valeurs non manquantes
+    distinctes) dans CE split d'entraînement précis. POURQUOI : `HistGradientBoostingRegressor`
+    plante (au lieu de gérer gracieusement) sur une colonne constante lors du binning --
+    `rain_frac` y est particulièrement exposé car la couverture météo est figée à ~sept. 2025
+    alors que la fenêtre d'entraînement continue de grandir : plus le temps passe, plus la
+    fraction de jours couverts rétrécit, et un split futur pourrait ne recouper qu'un seul jour
+    météo (donc une seule valeur non manquante) sans qu'aucun code n'ait changé.
+
+    La liste des caractéristiques réellement utilisées est stockée sur le modèle lui-même
+    (`model.feature_names_used_`, persistée par joblib) -- `serve_eta()` DOIT la relire plutôt
+    que de supposer `FEATURES_NUM` au complet, sinon la matrice de service ne correspondrait
+    plus à ce sur quoi le modèle a été entraîné.
+    """
     from sklearn.ensemble import HistGradientBoostingRegressor
+
+    usable_num = [c for c in FEATURES_NUM if roll[c].nunique(dropna=True) >= 2]
+    dropped = [c for c in FEATURES_NUM if c not in usable_num]
+    if dropped:
+        print(f"  ATTENTION : caractéristiques dégénérées ignorées pour cet entraînement : {dropped}")
+
     model = HistGradientBoostingRegressor(
         categorical_features=FEATURES_CAT,
         max_iter=kw.get("max_iter", 300),
@@ -188,7 +209,8 @@ def train_rolling_model(roll: pd.DataFrame, **kw):
         max_depth=kw.get("max_depth", 6),
         random_state=0,
     )
-    model.fit(_design(roll), roll[TARGET])
+    model.fit(_design(roll, usable_num), roll[TARGET])
+    model.feature_names_used_ = usable_num
     return model
 
 
@@ -516,6 +538,11 @@ def serve_eta(model, baseline: pd.DataFrame, *, societe, line, direction, dep_ti
     exp = dict(zip(b["seq"].astype(int), b["expected_min"]))
     smax = int(b["seq"].max())
 
+    # Utiliser exactement les caractéristiques avec lesquelles CE modèle a été entraîné
+    # (voir train_rolling_model) -- une colonne dégénérée peut avoir été exclue à l'entraînement ;
+    # lui fournir quand même ici recréerait le décalage de forme que ce mécanisme évite.
+    numeric_features = getattr(model, "feature_names_used_", FEATURES_NUM)
+
     cur_seq, cur_delay, rows = int(current_seq), float(current_delay_min), []
     while cur_seq < smax:
         nxt = cur_seq + 1
@@ -526,11 +553,11 @@ def serve_eta(model, baseline: pd.DataFrame, *, societe, line, direction, dep_ti
             "dep_hour": dep_hour, "dow": dow, "is_weekend": is_weekend, "is_rush_hour": is_rush_hour,
             "seq": cur_seq, "seq_frac": cur_seq / smax,
             "delay_min": cur_delay, "elapsed_min": exp.get(cur_seq, 0.0) + cur_delay,
-            "line": line, "dir": direction,
+            "societe": societe, "line": line, "dir": direction,
             # pas de flux météo en direct branché -- HistGBM gère nativement le NaN
             # (branche apprise dédiée), voir add_weather()
             "rain_frac": np.nan,
-        }]))
+        }]), numeric_features)
         nd = float(model.predict(x)[0])
         rows.append({"seq": nxt, "expected_min": round(exp[nxt], 1),
                      "pred_delay_min": round(nd, 1),

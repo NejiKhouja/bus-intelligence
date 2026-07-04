@@ -1,0 +1,62 @@
+# Build + smoke test only -- deliberately not a full test suite (this repo has none yet,
+# see docs/DATA_PIPELINE_REPORT.md known limitations). Catches broken dependencies, import
+# errors, and artifact-path mistakes before anyone tries to deploy them. Never deploys
+# anything itself -- see deploy.yml (manual-trigger only) for that.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -f Dockerfile.api -t winicari-api:ci .
+
+      - name: Boot the API with the repo's real static artifacts and smoke-test /health
+        run: |
+          docker run -d --name winicari-api-ci -p 8000:8000 \
+            -e MONGO_URL="mongodb://unused:27017" \
+            -e ENABLE_CHATBOT=false \
+            -v "$(pwd)/models:/app/models:ro" \
+            -v "$(pwd)/data:/app/data:ro" \
+            winicari-api:ci
+
+          # Cold start (torch import + loading 65 Prophet models + the LSTM/IF artifacts)
+          # measured ~130s locally -- generous margin here since CI runners vary.
+          ok=0
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:8000/health -o response.json; then ok=1; break; fi
+            sleep 3
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "API never became healthy"
+            docker logs winicari-api-ci
+            exit 1
+          fi
+
+          cat response.json
+          echo
+
+          # Fail if the models genuinely didn't load -- a 200 with models_loaded:false would
+          # otherwise silently pass and defeat the point of this check.
+          python3 -c "
+          import json, sys
+          r = json.load(open('response.json'))
+          assert r.get('models_loaded') is True, f'models_loaded was not true: {r}'
+          assert set(r.get('models', [])) >= {'delay', 'fallback', 'anomaly'}, f'missing modules: {r}'
+          print('OK -- models_loaded true, delay/fallback/anomaly all present')
+          "
+
+      - name: Show container logs (always, for debugging)
+        if: always()
+        run: docker logs winicari-api-ci || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f winicari-api-ci || true

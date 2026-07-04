@@ -1,0 +1,7 @@
+# Reverse proxy / automatic HTTPS for the WiniCari AI API.
+# Replace `api.example.tn` with the real subdomain the PHP platform will call, and point its
+# DNS A record at this server before starting Caddy -- it requests a Let's Encrypt cert
+# automatically on first request to a real domain (localhost/IP-only setups skip TLS).
+{$API_DOMAIN:localhost} {
+    reverse_proxy api:8000
+}

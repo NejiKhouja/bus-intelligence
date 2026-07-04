@@ -5,7 +5,16 @@ on the latest day each line actually operated. This keeps every live view popula
 with real data while behaving like a live system.
 """
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
+
+# `streamlit run src/dashboard/app.py` puts this file's own directory on sys.path, not the
+# repo root -- so `from src...` imports (here and transitively, e.g. realtime.py's own
+# `from src.data.fallback import ...`) fail unless the root is added explicitly first.
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 import requests
@@ -14,10 +23,7 @@ import plotly.express as px
 import streamlit as st
 from streamlit_option_menu import option_menu
 
-try:
-    from src.dashboard import realtime as rt
-except ModuleNotFoundError:  # `streamlit run src/dashboard/app.py` puts this dir on path
-    import realtime as rt
+from src.dashboard import realtime as rt
 
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 

@@ -20,6 +20,10 @@ Signaux d'anomalie utilisés
 - match_rate    : fraction des arrêts avec une arrivée GPS (faible -> bus dévié)
 - total_elapsed : durée totale du trajet en minutes (loin de la base de référence -> suspect)
 - dist_m_max    : pire distance d'accrochage entre tous les arrêts (loin de la route)
+- elapsed_vs_bus_z  : durée du trajet vs la moyenne habituelle de CE bus (z-score, bidirectionnel --
+                      un service anormalement long OU court par rapport à son propre historique)
+- elapsed_vs_line_z : durée du trajet vs la moyenne habituelle de CETTE ligne (même principe,
+                      référence = tous les bus de la ligne plutôt qu'un bus spécifique)
 """
 from __future__ import annotations
 
@@ -99,11 +103,26 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
     if "max_dark_s" not in trips.columns:
         trips["max_dark_s"] = 0.0
     trips["max_dark_s"] = trips["max_dark_s"].fillna(0)
+
+    # Service-duration z-scores -- "was this trip unusually long/short for THIS bus / THIS
+    # line specifically", as opposed to total_elapsed/dist_m_max which only compare against
+    # the whole company's pooled distribution. Bidirectional by design (too long AND too
+    # short both matter) -- see _REASON_BUILDERS' "either" direction in src/models/anomaly.py.
+    # Computed over the whole scored batch (own-trip included in its own baseline) -- normal
+    # practice for unsupervised z-score outlier flagging, not a train/test leakage concern.
+    for group_cols, col in [(["societe", "bus"], "elapsed_vs_bus_z"),
+                            (["societe", "line"], "elapsed_vs_line_z")]:
+        g = trips.groupby(group_cols)["total_elapsed"]
+        mean = g.transform("mean")
+        std = g.transform("std").fillna(0)
+        trips[col] = np.where(std > 1e-6, (trips["total_elapsed"] - mean) / std, 0.0)
+
     return trips.reset_index(drop=True)
 
 
 FEATURES = ["n_stops", "match_rate", "max_dwell_s", "mean_dwell_s",
-            "total_elapsed", "dist_m_max", "max_dark_s"]
+            "total_elapsed", "dist_m_max", "max_dark_s",
+            "elapsed_vs_bus_z", "elapsed_vs_line_z"]
 
 
 def _scale(X: np.ndarray, mean: np.ndarray = None, std: np.ndarray = None):
