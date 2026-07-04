@@ -9,6 +9,48 @@ excluded — `ENABLE_CHATBOT=false`, see that report's rationale). Nothing here 
 autonomous — retraining, redeploying, and rebuilding the reference DB are all commands a
 human runs deliberately, by design.
 
+## Why a separate service, not direct integration into the PHP platform?
+
+The short version: **the AI layer is Python, the platform is native PHP, and there is no
+practical way to run these specific models inside PHP.** In more detail:
+
+- **No ML runtime in PHP.** The 3 modules in scope are built on scikit-learn
+  (`HistGradientBoostingRegressor`), PyTorch (LSTM delay model, LSTM autoencoder for
+  anomaly detection, the Kalman-correction LSTM), Prophet (which itself wraps Stan via
+  `cmdstanpy`), and `filterpy`'s Kalman filter — none of which have a PHP equivalent. A
+  trained model isn't portable data PHP can just "read": a `.joblib` file is a Python
+  object graph (pickle format, scikit-learn class instances and all), a `.pt` file is
+  PyTorch's own tensor/state-dict serialization. There's no PHP library that understands
+  either format, and reimplementing gradient-boosted tree traversal, LSTM forward-pass
+  matrix math, and Kalman filter linear algebra in PHP from scratch isn't a realistic
+  option — that's rebuilding a numerical computing stack PHP was never designed to have.
+- **PHP's request lifecycle doesn't fit "load once, serve many."** The API's `ModelManager`
+  loads every artifact (HistGBM, 2 LSTMs, 65 Prophet models, the IF/LSTM-AE anomaly
+  ensembles, the foundation parquet, the reference DB) exactly **once**, at process
+  startup, and keeps it all resident in memory for the life of that process (see
+  `src/api/main.py`'s `lifespan`) — that's why a prediction request is fast. Classic PHP
+  (PHP-FPM workers, the model implied by "native PHP") is fundamentally
+  shared-nothing/request-scoped: nothing persists in memory between requests by default.
+  Re-loading gigabytes of model artifacts from disk on every single page view isn't
+  workable — you'd need something unusual (a long-running PHP process manager like
+  RoadRunner or Swoole) to even approach what a normal Python process does for free, and
+  that still wouldn't solve the "no PyTorch/scikit-learn in PHP" problem above.
+- **"Native" narrows this further.** A native PHP + HTML/CSS platform (as opposed to one
+  built on a framework with a rich package ecosystem) typically also means no Composer
+  dependency management pulling in exotic bindings, no compiled PHP extensions for things
+  like ONNX Runtime, and hosting that may not permit long-running background processes at
+  all — all of which would be prerequisites for any in-process alternative.
+- **Independent deployment/scaling matters too**, separate from the language issue: even
+  if the language barrier didn't exist, coupling a multi-GB Python ML stack into the same
+  process/server as the PHP app would mean a PHP deploy could break the AI layer (or vice
+  versa), and neither could be restarted, scaled, or rolled back independently.
+
+Given all that, HTTP/REST is the natural integration boundary — it's language-agnostic,
+PHP already knows how to make HTTP requests (`curl`, same as it would to any third-party
+API), and it lets the AI layer keep its models loaded in memory the way it needs to,
+completely independent of how the PHP platform is hosted. See `docs/PHP_INTEGRATION.md`
+for exactly what that contract looks like from the PHP side.
+
 ## Architecture
 
 ```
