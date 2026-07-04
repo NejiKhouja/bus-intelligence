@@ -27,10 +27,7 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in str(name))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Entraînement
-# ─────────────────────────────────────────────────────────────────────────────
-
 def train(foundation_path: str | Path,
           save_dir: str | Path = SAVE_DIR) -> dict:
     """Entraîne un Isolation Forest par opérateur + un Autoencodeur LSTM global.
@@ -61,7 +58,7 @@ def train(foundation_path: str | Path,
         fa["departure"] = pd.to_datetime(fa["departure"])
     fa["dwell_s"] = fa.get("dwell_s", pd.Series(0.0, index=fa.index)).fillna(0)
 
-    # ── Isolation Forest par opérateur ───────────────────────────────────────
+    # Isolation Forest par opérateur
     print("  Entraînement des Isolation Forests (un par opérateur)...")
     trips = _an.trip_features(fa, cfg)
     print(f"    trajets total : {len(trips):,}")
@@ -102,13 +99,13 @@ def train(foundation_path: str | Path,
     n_if = int(trips_scored["anomaly"].sum())
     print(f"    total signalés : {n_if}/{len(trips_scored)} ({100*n_if/len(trips_scored):.1f}%)")
 
-    # ── Autoencodeur LSTM (par société + repli global) ───────────────────────
+    #  Autoencodeur LSTM (par société + repli global)
     # Même raison que l'IF par société : un modèle global unique est dominé par la société
-    # la plus volumineuse (TCV = 75% des trajets après l'expansion de la fondation) --
+    # la plus volumineuse (TCV = 75% des trajets après l'expansion de la fondation) 
     # il apprend "normal" = "ce que fait TCV" et ne peut plus rien signaler pour TCV
     # (dual_anomaly=0 constaté), tout en étant trop peu sensible aux petites sociétés.
     # `min_trips_lstm_company` est plus élevé que celui de l'IF (30) car un autoencodeur a
-    # bien plus de paramètres à apprendre -- en dessous, repli sur le modèle global.
+    # bien plus de paramètres à apprendre en dessous, repli sur le modèle global.
     print("  Entraînement des Autoencodeurs LSTM (par société, repli global si trop peu de données)...")
     min_trips_lstm_company = 200
 
@@ -133,7 +130,7 @@ def train(foundation_path: str | Path,
         lstm_company_index[safe] = soc
         lstm_models[soc] = (m, thr)
 
-    # Repli global -- entraîné sur TOUS les trajets, utilisé pour les sociétés sans modèle dédié
+    # Repli global entraîné sur TOUS les trajets, utilisé pour les sociétés sans modèle dédié
     X_all, _ = _an.build_sequences(fa, cfg)
     print(f"    séquences totales : {X_all.shape}")
     lstm_global, train_errors_global = _an.train_lstm_autoencoder(X_all, cfg)
@@ -183,10 +180,7 @@ def train(foundation_path: str | Path,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Chargement
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load(save_dir: str | Path = SAVE_DIR) -> dict:
     """Charge les modèles d'anomalie entraînés depuis save_dir."""
     import joblib
@@ -257,10 +251,7 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Service (scoring en ligne)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
     """Score les trajets dans de nouvelles données avec les deux modèles."""
     cfg = _an.AnomalyConfig()
@@ -309,10 +300,7 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
     return trips
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Explicabilité
-# ─────────────────────────────────────────────────────────────────────────────
-
 _REASON_BUILDERS = {
     "max_dwell_s":   ("high", lambda v: f"Immobilisation anormale à un arrêt (~{v/60:.0f} min sans mouvement GPS)"),
     "total_elapsed": ("high", lambda v: f"Trajet anormalement long (~{int(v)//60}h{int(v)%60:02d} au total)"),
@@ -321,8 +309,6 @@ _REASON_BUILDERS = {
     "match_rate":    ("low",  lambda v: f"Mauvais suivi GPS / hors itinéraire — seulement {v*100:.0f}% des arrêts détectés"),
     "n_stops":       ("low",  lambda v: f"Nombre d'arrêts desservis anormalement faible ({int(v)} arrêts)"),
     "max_dark_s":    ("high", lambda v: f"Perte de signal GPS prolongée à un arrêt (~{v/60:.0f} min sans ping)"),
-    # Bidirectionnelles : trop long ET trop court sont anormaux, contrairement aux features
-    # ci-dessus qui n'ont qu'un seul sens de dérive suspect -- voir la direction "either" plus bas.
     "elapsed_vs_bus_z":  ("either", lambda v: f"Trajet {'plus long' if v > 0 else 'plus court'} que d'habitude pour CE BUS (z={v:+.1f})"),
     "elapsed_vs_line_z": ("either", lambda v: f"Trajet {'plus long' if v > 0 else 'plus court'} que d'habitude pour CETTE LIGNE (z={v:+.1f})"),
 }

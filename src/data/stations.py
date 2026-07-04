@@ -58,10 +58,7 @@ def norm(name) -> str:
     return re.sub(r"[^A-Z0-9]", "", s.upper())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Source 1 — dictionnaire OpenData
-# ─────────────────────────────────────────────────────────────────────────────
-
 def opendata_dict(od_db: Database) -> dict[str, list[tuple]]:
     """{nom_normalisé -> [(lat, lon, collection_source), ...]} — TOUS les candidats gardés.
 
@@ -155,10 +152,7 @@ def _disambiguate_sequential(stop_candidates: list[dict]) -> list[Optional[tuple
     return resolved
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Source 2 — ordre des arrêts depuis les tickets
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _ticket_stop_votes(tk_db: Database) -> pd.DataFrame:
     """Un passage par collection annuelle : compte les votes (societe, line, code, name) pour
     origine->NomFR1 ET Distination->NomFR2, sur TOUTES les années. Beaucoup plus rapide qu'une
@@ -220,10 +214,7 @@ def load_or_build_ticket_index(tk_db: Database, cache_path) -> pd.DataFrame:
     return idx
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Source 3 — triangulation ticket-heure x ping GPS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _ticket_day_str(jour_service: str) -> Optional[str]:
     """'2025/02/03' -> 'd20250203'."""
     if not jour_service:
@@ -239,20 +230,6 @@ def triangulate_stop(tk_db: Database, gps_db: Database, societe: str, line: str,
                       max_tickets: int = 150, window_min: float = 3.0,
                       max_spread_m: float = 800.0, min_used: int = 5) -> Optional[dict]:
     """Position d'un arrêt inféré à partir des pings GPS proches de l'heure des tickets qui le référencent.
-
-    Pour chaque ticket citant `code` comme origine sur cette (ligne, société), on cherche le ping GPS
-    du même bus le plus proche dans le temps (fenêtre +/- `window_min` min). Le centroïde de ces
-    positions est retenu si suffisamment de tickets indépendants convergent (`min_used`) et que la
-    dispersion spatiale reste faible (`max_spread_m`) — sinon la triangulation est jugée peu fiable.
-
-    Échantillonne un quota FIXE PAR ANNÉE (pas « le plus récent d'abord ») : la fenêtre GPS
-    utile diffère par société et n'est pas toujours la plus récente -- ex. S.R.T.K a été équipé
-    tardivement (bus 6039 : aucun ping avant nov. 2025, donc récent=mieux), mais S.T.S a une
-    couverture GPS quasi nulle sur les tout derniers jours alors qu'elle était dense en
-    2022-2024 (donc récent=pire). Pour un arrêt à très fort volume (ex. 1,78M tickets), un
-    remplissage glouton « récent d'abord » épuise le quota sur 2025-2026 seul et ne voit JAMAIS
-    les années où le GPS de CETTE société était bon. Répartir le quota sur toutes les années
-    laisse chaque période une vraie chance, quelle que soit la direction du biais GPS.
     """
     tickets: list[dict] = []
     per_year_quota = max(1, max_tickets // len(TICKET_YEARS))
@@ -263,8 +240,6 @@ def triangulate_stop(tk_db: Database, gps_db: Database, societe: str, line: str,
             {"CodeBus": 1, "date": 1, "jour_service": 1, "_id": 0},
         ).limit(per_year_quota)
         tickets.extend(list(cur))
-    # si le quota par année n'a pas rempli max_tickets (années sans données), compléter avec
-    # les années restantes sans se soucier de l'ordre -- mieux qu'un budget gaspillé
     if len(tickets) < max_tickets:
         for yr in TICKET_YEARS:
             if len(tickets) >= max_tickets:
@@ -314,13 +289,6 @@ def triangulate_stop(tk_db: Database, gps_db: Database, societe: str, line: str,
     if len(positions) < min_used:
         return None
 
-    # Le bus peut réellement charger à 2+ points distincts près de l'arrêt nominal (portes
-    # différentes d'un grand complexe, léger détour un jour donné...). Une simple moyenne +
-    # rejet-si-écart-max pénalise à tort un groupe majoritaire TRÈS serré simplement parce
-    # qu'une minorité de points est ailleurs (observé : 10/18 points quasi identiques pour
-    # HOP.SAHLOUL, mais rejeté par la moyenne globale à cause de 5 points ~1.2km plus loin).
-    # On cherche donc le plus grand sous-groupe SERRÉ (`max_spread_m` de rayon) plutôt que
-    # d'imposer que TOUS les points convergent.
     lats_all = np.array([p[0] for p in positions])
     lons_all = np.array([p[1] for p in positions])
     best_members, best_clat, best_clon = [], None, None
@@ -338,10 +306,7 @@ def triangulate_stop(tk_db: Database, gps_db: Database, societe: str, line: str,
             "spread_m": spread, "source": "ticket_triangulation"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Assemblage — une ligne enrichie complète
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_enriched_stops(ticket_index: pd.DataFrame, od_dict: dict, line: str, societe: str,
                           tk_db: Optional[Database] = None, gps_db: Optional[Database] = None,
                           triangulate_gaps: bool = False) -> pd.DataFrame:

@@ -130,10 +130,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     return conn
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Table 1 — companies
-# ─────────────────────────────────────────────────────────────────────────────
-
 # Regroupement canonique décidé manuellement après audit des variantes brutes
 # (voir notebook/scratch d'inventaire) : un seul cas ambigu (Winicari/winicari,
 # tranché par l'utilisateur comme une même entité) + un artefact billetterie
@@ -170,9 +167,6 @@ def _gps_history(gps_db, canonical_companies: dict[str, list[str]],
     import re
     days = sorted(n for n in gps_db.list_collection_names() if re.fullmatch(r"d\d{8}", n))
     recent_days = days[-recent_n_days:]
-    # la fenêtre récente est scannée EXHAUSTIVEMENT (pas d'échantillonnage) : une société peut
-    # n'avoir du GPS que 1 jour sur 10 récemment (ex. S.T.S) -- un échantillonnage grossier la
-    # raterait par pur hasard. Seule la plage historique complète est échantillonnée (coût).
     sample = sorted(set(days[::sample_stride]) | set(recent_days))
     recent = set(recent_days)
 
@@ -266,10 +260,7 @@ def enrich_companies_from_societe(conn: sqlite3.Connection, wi_db,
     print(f"Enrichies depuis winicari.societe : {len(matched_canon)} ; absentes (flaguées) : {sorted(missing)}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Table 2 — lines
-# ─────────────────────────────────────────────────────────────────────────────
-
 # Codes qui, par leur forme (bloc 900-999) ou leur volume quasi nul, ressemblent à des
 # codes administratifs/spéciaux (charter, test, service non régulier) plutôt qu'à de
 # vraies lignes numérotées -- gardés (l'utilisateur veut TOUTES les lignes) mais annotés
@@ -296,7 +287,7 @@ def populate_lines(conn: sqlite3.Connection, wi_db, tk_db=None, gps_db=None,
     alias_to_canon = {alias: canon for canon, aliases in canonical_companies.items() for alias in aliases}
     company_id = {row[1]: row[0] for row in conn.execute("SELECT company_id, canonical_name FROM companies")}
 
-    # 1. `ligne` -- source la plus fiable
+    # 1. `ligne` source la plus fiable
     ligne_pairs: dict[tuple, dict] = {}
     for d in wi_db["ligne"].find({}, {"code": 1, "societe": 1}):
         canon = alias_to_canon.get(d.get("societe"))
@@ -305,7 +296,7 @@ def populate_lines(conn: sqlite3.Connection, wi_db, tk_db=None, gps_db=None,
         key = (canon, str(d["code"]).strip())
         ligne_pairs.setdefault(key, {"source": "ligne", "notes": None})
 
-    # 2. tickets -- avec volume, pour distinguer signal réel de bruit
+    # 2. tickets avec volume, pour distinguer signal réel de bruit
     tk_pairs: dict[tuple, int] = {}
     if tk_db is not None:
         for yr in ["2019", "2020", "2021", "2022", "2023", "2024", "2025", "2026"]:
@@ -320,7 +311,7 @@ def populate_lines(conn: sqlite3.Connection, wi_db, tk_db=None, gps_db=None,
                 key = (canon, str(code).strip())
                 tk_pairs[key] = tk_pairs.get(key, 0) + d["n"]
 
-    # 3. GPS -- échantillon (juste pour découvrir des codes, pas pour des stats)
+    # 3. GPS échantillon (juste pour découvrir des codes, pas pour des stats)
     gps_pairs: set = set()
     if gps_db is not None:
         days = sorted(n for n in gps_db.list_collection_names() if re.fullmatch(r"d\d{8}", n))
@@ -356,12 +347,9 @@ def populate_lines(conn: sqlite3.Connection, wi_db, tk_db=None, gps_db=None,
     return all_pairs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Table 3 — stops (la table « propre » : arrêts canoniques par coordonnée)
-# ─────────────────────────────────────────────────────────────────────────────
-
 EARTH_R_M = 6371000.0
-STOP_CLUSTER_EPS_M = 150.0   # voir notebook/diagnostic : sensibilité douce 100-350m, 150m retenu
+STOP_CLUSTER_EPS_M = 150.0   
 
 _PLACEHOLDER_NAME_RE = re.compile(r"^(stop\d+|section\d+)$", re.IGNORECASE)
 
@@ -533,14 +521,11 @@ def merge_triangulated_stops(conn: sqlite3.Connection, results: list[dict],
     return {"merged": merged, "created": created}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Table 4 — line_stops : résolution multi-niveaux, la source la plus fiable d'abord
-#
 # Un seul mécanisme de désaccord potentiel : chaque niveau produit un lat/lon brut, qu'on
 # rattache au `stops` canonique déjà construit par PROXIMITÉ (pas par nom) -- cohérent avec
 # la façon dont `stops` a lui-même été bâti, donc la correspondance est quasi exacte pour
 # les niveaux 1 à 4 (ces points ont été des ENTRÉES du clustering initial).
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _StopIndex:
     """Recherche du stop canonique le plus proche -- vectorisé, pas d'index spatial nécessaire
@@ -843,10 +828,7 @@ def populate_line_stops(conn: sqlite3.Connection, wi_db, od_db, tk_db=None,
     return tier_counts
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Table 5/6 — trips + trip_stops : reconstruction GPS réelle sur la géométrie line_stops
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _usable_lines_from_line_stops(conn: sqlite3.Connection) -> dict:
     """{(line_code, societe) -> DataFrame(seq, route_seq, name, lat, lon, s_m, stop_id)}
     -- remplace `foundation.build_usable_lines` comme source de géométrie de ligne pour la
@@ -1005,10 +987,7 @@ def populate_trips(conn: sqlite3.Connection, gps_db, since_day: str = None, unti
             "n_stop_rows": n_stop_rows}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Table 7 — tickets_daily (agrégats journaliers, depuis winicari.details)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def populate_tickets_daily(conn: sqlite3.Connection, wi_db,
                             canonical_companies: dict[str, list[str]] = None) -> dict:
     """Peuple `tickets_daily` depuis `winicari.details` (agrégats journaliers billetterie,
@@ -1064,10 +1043,7 @@ def populate_tickets_daily(conn: sqlite3.Connection, wi_db,
             "n_unmatched_company": n_unmatched_company, "n_unmatched_line": n_unmatched_line}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Export -- reconstitue la forme `foundation_arrivals_full.parquet` depuis trips/trip_stops
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Export reconstitue la forme `foundation_arrivals_full.parquet` depuis trips/trip_stops
 def export_foundation_parquet(conn: sqlite3.Connection, out_path) -> dict:
     """Reconstruit un parquet avec EXACTEMENT les colonnes de l'ancien
     `foundation_arrivals_full.parquet` (day, line, societe, bus, trip_id, dir, full,

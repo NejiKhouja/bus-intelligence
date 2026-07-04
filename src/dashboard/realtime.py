@@ -22,10 +22,7 @@ import plotly.graph_objects as go
 from src.data.fallback import haversine_m
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Geometry
-# ─────────────────────────────────────────────────────────────────────────────
-
 def s_to_latlon(s_km: float, route: List[Dict]) -> tuple[float, float]:
     """Distance along route (km) -> (lat, lon) via the stop polyline. Mirrors backend."""
     s = np.array([r["s_m"] for r in route], dtype=float)        # route s_m is in km
@@ -52,10 +49,7 @@ def circle_lonlat(lat: float, lon: float, radius_m: float, n: int = 48):
     return (lat + dlat * np.sin(ang)).tolist(), (lon + dlon * np.cos(ang)).tolist()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Replay state
-# ─────────────────────────────────────────────────────────────────────────────
-
 def prep_track(track: List[Dict]) -> Dict:
     """Vectorize a /api/gps-track payload for fast per-tick lookup."""
     t = pd.to_datetime([p["t"] for p in track], format="ISO8601")
@@ -125,10 +119,7 @@ def position_at(P: Dict, route: List[Dict], sim_unix: float,
             "s_est_km": s_now, "s_last_km": s_now}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Map builders (Plotly open-street-map — no token required)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _route_traces(route: List[Dict], color="#94a3b8") -> list:
     return [go.Scattermapbox(
         lat=[r["lat"] for r in route], lon=[r["lon"] for r in route], mode="lines",
@@ -255,11 +246,8 @@ def build_eta_map(route: List[Dict], bus_pos: Dict, rider_seq: int,
                    bus_pos.get("lon") if bus_pos else None)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Client-side animation (Plotly frames) — renders ONCE, no Streamlit reruns,
 # so the map never flashes. Play/pause + scrub are native Plotly controls.
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _ds(arr, n=220):
     """Downsample a 1-D array to at most n points (keep last)."""
     if len(arr) <= n:

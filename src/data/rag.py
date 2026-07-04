@@ -33,10 +33,7 @@ DEFAULT_LLM_MODEL   = "llama-3.1-8b-instant"
 COLLECTION_NAME     = "winicari_kb"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Génération de documents — transformer les données structurées en texte consultable
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _line_doc(row: pd.Series) -> str:
     cov = row.get("coverage_type", "unknown")
     km  = row.get("route_km", 0)
@@ -113,10 +110,7 @@ def build_knowledge_base(fa: pd.DataFrame,
     return docs, ids, metas
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # ChromaDB — construire / charger le magasin de vecteurs
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_chroma(docs: list[str], ids: list[str], metas: list[dict],
                  persist_dir: str | Path,
                  embed_model: str = DEFAULT_EMBED_MODEL):
@@ -152,10 +146,7 @@ def load_chroma(persist_dir: str | Path,
     return col, model
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Récupération
-# ─────────────────────────────────────────────────────────────────────────────
-
 def retrieve(query: str, col, model, k: int = 5) -> list[str]:
     """Retourne les textes des k documents les plus pertinents pour la requête."""
     q_emb = model.encode([query]).tolist()
@@ -163,10 +154,7 @@ def retrieve(query: str, col, model, k: int = 5) -> list[str]:
     return res["documents"][0]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Génération — Groq / Llama 3
-# ─────────────────────────────────────────────────────────────────────────────
-
 SYSTEM_PROMPT = """Vous êtes un assistant intelligent pour WiniCari, une plateforme tunisienne \
 de gestion des transports publics. Vous répondez aux questions des opérateurs et gestionnaires \
 de compagnies de bus sur leur réseau — retards, anomalies, couverture GPS, distances de lignes, \

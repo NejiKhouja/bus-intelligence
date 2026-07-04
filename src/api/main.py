@@ -1,23 +1,4 @@
-"""FastAPI serving layer for WiniCari AI — the HTTP interface the dashboard talks to.
-
-Loads all four trained modules once at startup (`ModelManager.load_all`) and exposes
-them as REST endpoints, grouped as:
-
-  Metadata / fleet state  GET /health, /api/options, /api/lines*, /api/directions,
-                          /api/buses*, /api/days*, /api/stops, /api/route-info,
-                          /api/active-buses
-  Delay / ETA             GET /api/prophet-lines, /api/eta-to-stop
-                          POST /api/predict/delay/{auto,manual,forecast}
-  GPS fallback            GET /api/bus-status, /api/gps-track, /api/gps-gaps,
-                          /api/gps-gap-examples
-                          POST /api/predict/gps-fallback
-  Anomaly detection       GET /api/anomaly-history, /api/bus-anomaly-check,
-                          /api/current-anomalies, /api/anomaly-explain,
-                          /api/trip-detail, /api/anomaly-patterns
-  RAG chatbot             POST /api/chatbot/ask
-
-See `src/models/*.py` for the underlying train/load/predict logic each endpoint wraps.
-"""
+"""FastAPI serving layer for WiniCari AI"""
 from __future__ import annotations
 
 import logging
@@ -42,14 +23,6 @@ from src.data import reference_db as rdb
 from src.data import model_version as mv
 from src.data.db import get_db
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Journalisation des requêtes -- fichier tournant, pas d'infra externe (voir
-# docs/DEPLOYMENT.md deliverable #8). Portée délibérément légère : méthode/chemin/
-# paramètres de requête (GET), code de statut, latence, version des modèles -- pas le
-# corps JSON complet des requêtes POST (éviterait de journaliser de gros payloads et un
-# second lecteur de flux de requête).
-# ─────────────────────────────────────────────────────────────────────────────
-
 _LOG_DIR = Path("logs")
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 api_logger = logging.getLogger("winicari.api")
@@ -61,15 +34,9 @@ if not api_logger.handlers:
 
 _process_start_time = time.time()
 _request_count = 0
-# Lu une seule fois au démarrage -- correct par construction : la version des artefacts
-# d'un processus en cours d'exécution ne change pas pendant sa durée de vie (un nouveau
-# lot d'artefacts implique un redémarrage du conteneur, voir docs/DEPLOYMENT.md).
 _model_version_info = mv.read_version_file()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Déploiement -- config lue depuis l'environnement (voir docs/DEPLOYMENT.md)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# Déploiement config lue depuis l'environnement (voir docs/DEPLOYMENT.md)
 API_KEY = os.getenv("API_KEY")  # None = auth désactivée (dev local uniquement)
 ENABLE_CHATBOT = os.getenv("ENABLE_CHATBOT", "false").lower() == "true"
 
@@ -81,10 +48,8 @@ else:
     print("  ! ALLOWED_ORIGINS non défini -- CORS grand ouvert (\"*\"). "
           "À restreindre au domaine réel avant la mise en production (voir docs/DEPLOYMENT.md).")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pydantic Models
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Pydantic Models
 class DelayPredictionManualRequest(BaseModel):
     societe: str
     line: str
@@ -124,10 +89,7 @@ class ListResponse(BaseModel):
     buses: List[int]
     days: List[str]
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Model Manager
-# ─────────────────────────────────────────────────────────────────────────────
-
 class ModelManager:
     _instance = None
     _models = {}
@@ -148,7 +110,7 @@ class ModelManager:
             foundation_path = Path("data/processed/foundation_arrivals_full.parquet")
             if foundation_path.exists():
                 self._foundation_data = pd.read_parquet(foundation_path)
-                print(f"  ✓ Foundation data loaded ({len(self._foundation_data):,} rows)")
+                print(f"Foundation data loaded ({len(self._foundation_data):,} rows)")
                 
                 # Build stops mapping for each line
                 for societe in self._foundation_data['societe'].unique():
@@ -160,7 +122,7 @@ class ModelManager:
                         ].sort_values('route_seq')[['route_seq', 'stop']].drop_duplicates()
                         self._stops_data[key] = stops_data.to_dict('records')
                 
-                print(f"  ✓ Stops mapping built for {len(self._stops_data)} lines")
+                print(f"Stops mapping built for {len(self._stops_data)} lines")
 
                 # Build stop lat/lon from the reference DB (used for map view)
                 try:
@@ -172,17 +134,17 @@ class ModelManager:
                             for _, row in sf.iterrows()
                             if pd.notna(row.get("lat")) and pd.notna(row.get("lon"))
                         }
-                    print(f"  ✓ Stop coordinates loaded for {len(self._stop_coords)} lines")
+                    print(f"Stop coordinates loaded for {len(self._stop_coords)} lines")
                 except Exception as e:
-                    print(f"  ! Stop coordinates not available: {e}")
+                    print(f"Stop coordinates not available: {e}")
 
                 # Demo clock: "today" = the most recent day with real data.
                 self._latest_day = str(self._foundation_data["day"].max())
-                print(f"  ✓ Demo 'today' set to latest data day: {self._latest_day}")
+                print(f"Demo 'today' set to latest data day: {self._latest_day}")
             else:
-                print("  ✗ Foundation data not found")
+                print("Foundation data not found")
         except Exception as e:
-            print(f"  ✗ Failed to load foundation data: {e}")
+            print(f"Failed to load foundation data: {e}")
 
         model_names = ["delay", "fallback", "anomaly"]
         if ENABLE_CHATBOT:
@@ -200,9 +162,9 @@ class ModelManager:
                     self._models[model_name] = anomaly.load()
                 elif model_name == "chatbot":
                     self._models[model_name] = chatbot.load()
-                print(f"  ✓ {model_name.capitalize()} models loaded")
+                print(f"{model_name.capitalize()} models loaded")
             except Exception as e:
-                print(f"  ✗ Failed to load {model_name} models: {e}")
+                print(f"Failed to load {model_name} models: {e}")
 
         return self._models
 
@@ -223,7 +185,7 @@ class ModelManager:
         return self._stop_coords.get(f"{societe}_{line}", {})
 
     def get_latest_day(self) -> Optional[str]:
-        """Demo 'today' — most recent day present in the foundation data."""
+        """Demo 'today' most recent day present in the foundation data."""
         if self._latest_day is None and self._foundation_data is not None:
             self._latest_day = str(self._foundation_data["day"].max())
         return self._latest_day
@@ -253,10 +215,7 @@ def _load_usable_lines() -> dict:
             conn.close()
     return _usable_lines_cache
 
-# ─────────────────────────────────────────────────────────────────────────────
 # FastAPI App
-# ─────────────────────────────────────────────────────────────────────────────
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("=" * 60)
@@ -311,10 +270,7 @@ async def log_requests(request: Request, call_next):
     )
     return response
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Helper Functions
-# ─────────────────────────────────────────────────────────────────────────────
-
 def get_available_options(societe: Optional[str] = None, line: Optional[str] = None) -> Dict:
     df = model_manager.get_foundation_data()
     if df is None or len(df) == 0:
@@ -337,10 +293,7 @@ def get_available_options(societe: Optional[str] = None, line: Optional[str] = N
     
     return result
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Health & Options Endpoints
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/")
 @app.get("/health")
 async def health_check():
@@ -646,10 +599,7 @@ async def get_bus_status(
             "all_stops": trip_data[["seq", "stop", "arrival", "departure"]].to_dict('records')
         }
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Anomaly Detection — served from precomputed trip scores, with explainability
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _filter_trips(societe: str, line: Optional[str] = None,
                   bus: Optional[int] = None, day: Optional[str] = None):
     """Filter the precomputed scored-trips table. Returns (models, trips_df)."""
@@ -998,10 +948,7 @@ async def anomaly_patterns(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error computing patterns: {str(e)}")
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Delay Prediction - Auto Mode
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/api/predict/delay/auto")
 async def predict_delay_auto(
     societe: str,
@@ -1060,10 +1007,7 @@ async def predict_delay_auto(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Delay Prediction - Manual Mode
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/api/predict/delay/manual")
 async def predict_delay_manual(request: DelayPredictionManualRequest):
     """Manual delay prediction with user-specified parameters."""
@@ -1098,10 +1042,7 @@ async def predict_delay_manual(request: DelayPredictionManualRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ─────────────────────────────────────────────────────────────────────────────
 # GPS Fallback
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/api/predict/gps-fallback")
 async def predict_gps_fallback(request: GPSFallbackRequest):
     try:
@@ -1190,10 +1131,7 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Chatbot
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/api/chatbot/ask")
 async def chatbot_ask(request: ChatbotRequest):
     try:
@@ -1212,10 +1150,7 @@ async def chatbot_ask(request: ChatbotRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Forecast
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/api/predict/delay/forecast")
 async def forecast_delay(
     societe: str,
@@ -1240,10 +1175,7 @@ async def forecast_delay(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ─────────────────────────────────────────────────────────────────────────────
 # GPS track / gaps / examples — for the event-driven signal-loss demo
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _build_gps_track(societe: str, line: str, bus: int, day: str):
     """Raw pings -> cleaned -> projected -> Kalman-filtered track.
 
@@ -1402,10 +1334,7 @@ async def gps_gap_examples(
     return {"societe": societe, "line": line, "examples": examples[:limit], "scanned": scanned}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Live ETA helpers — active buses + ETA to a rider's stop
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.get("/api/active-buses")
 async def active_buses(
     societe: str,
@@ -1614,10 +1543,7 @@ async def eta_to_stop(
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

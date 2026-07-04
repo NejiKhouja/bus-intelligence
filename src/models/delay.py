@@ -79,10 +79,7 @@ def _safe(name: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in str(name))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Entraînement
-# ─────────────────────────────────────────────────────────────────────────────
-
 def train(foundation_path: str | Path,
           save_dir: str | Path = SAVE_DIR,
           *,
@@ -102,7 +99,7 @@ def train(foundation_path: str | Path,
     save_dir.mkdir(parents=True, exist_ok=True)
     (save_dir / "prophet").mkdir(exist_ok=True)
 
-    # ── ingénierie des caractéristiques ──────────────────────────────────────
+    # ingénierie des caractéristiques 
     print("  Chargement de la fondation...")
     cfg = _dl.DelayConfig()
     df = _dl.load_foundation(foundation_path)
@@ -130,7 +127,7 @@ def train(foundation_path: str | Path,
     print(f"  Division : train={len(tr):,} lignes (jours<{cut_day})  "
           f"test={len(te):,} lignes (jours>={cut_day})")
 
-    # ── HistGBM (global + par société) ────────────────────────────────────────
+    # HistGBM (global + par société) 
     # Les modèles à arbres sont invariants par rapport à l'échelle — pas de normalisation nécessaire.
     # Les catégorielles (societe, line, dir) gérées nativement par HistGBM.
     print("  Entraînement de HistGBM (global + par société si assez de données)...")
@@ -169,7 +166,7 @@ def train(foundation_path: str | Path,
 
     baseline.to_parquet(save_dir / "baseline.parquet", index=False)
 
-    # ── LSTM ─────────────────────────────────────────────────────────────────
+    # LSTM
     print(f"  Entraînement du LSTM ({epochs} époques, patience={patience})...")
     X, _, y = _dl.build_lstm_sequences(roll)
     day_arr = roll["day"].values
@@ -193,7 +190,7 @@ def train(foundation_path: str | Path,
         json.dump({"hidden": hidden, "n_layers": n_layers,
                    "n_feats": X.shape[2], "max_len": 30}, f)
 
-    # ── Prophet (un modèle par ligne/dir) ────────────────────────────────────
+    # Prophet (un modèle par ligne/dir)
     # Entraîné sur le jeu de données COMPLET (toutes les dates) — Prophet est un prédicteur
     # de séries temporelles, pas un modèle supervisé ; il capture la saisonnalité à partir de l'historique.
     print("  Ajustement des modèles Prophet...")
@@ -219,10 +216,7 @@ def train(foundation_path: str | Path,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Chargement
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load(save_dir: str | Path = SAVE_DIR) -> dict:
     """Charge tous les artefacts de retard entraînés depuis save_dir.
 
@@ -271,10 +265,7 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
             "feat_mean": feat_mean, "feat_std": feat_std, "prophet": prophets}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Service
-# ─────────────────────────────────────────────────────────────────────────────
-
 def predict_eta(models: dict, *,
                 societe: str, line: str, direction: str,
                 dep_time: str,

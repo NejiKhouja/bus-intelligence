@@ -17,10 +17,7 @@ from src.data import rag as _rag
 CHROMA_DIR = Path("data/processed/chroma_kb")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Construction
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build(foundation_path: str | Path,
           line_distances_path: str | Path,
           anomaly_trips_path: str | Path | None = None,
@@ -62,10 +59,7 @@ def build(foundation_path: str | Path,
     return {"col": col, "embed_model": embed_model}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Chargement
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load(chroma_dir: str | Path = CHROMA_DIR) -> dict:
     """Charge une base de connaissances ChromaDB existante depuis le disque.
 
@@ -76,10 +70,7 @@ def load(chroma_dir: str | Path = CHROMA_DIR) -> dict:
     return {"col": col, "embed_model": embed_model}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Service
-# ─────────────────────────────────────────────────────────────────────────────
-
 def ask(models: dict, query: str,
         *,
         api_key: str | None = None,

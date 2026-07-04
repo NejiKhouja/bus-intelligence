@@ -7,7 +7,6 @@ la détection d'anomalies et le repli GPS. Ce module est la source de vérité u
 le notebook et le CLI batch (`build_foundation.py`) importent tous deux depuis ici.
 
 Comment la segmentation est réalisée (chaîne en 4 étapes)
-----------------------------------------------------------
 1. NETTOYAGE  (`clean_pings`)
    Supprime les pings consécutifs aux coordonnées identiques (un bus stationné ping encore
    toutes les ~5 s, ~10% des lignes), en gardant le PREMIER contact pour préserver
@@ -39,28 +38,7 @@ Comment la segmentation est réalisée (chaîne en 4 étapes)
    bus est passé dans un rayon `arrival_thresh_m` (350 m). Le taux de correspondance par
    ligne est le signal principal de qualité des données.
 
-Ce que cette couche fait et ne calcule PAS encore
---------------------------------------------------
-FAIT   - heure d'ARRIVÉE réelle à chaque arrêt (`arrival`), structure du trajet, écarts de signal.
-FAIT   - STATIONNEMENT / IMMOBILISATION par arrêt (`departure`, `dwell_s`) : arrivée = premier
-         ping dans la zone, départ = dernier ping consécutif encore dans la zone avant que le bus
-         ne reparte, dwell_s = leur écart. Un long stationnement est un signal d'anomalie fort
-         (panne / incident / arrêt non prévu). NOTE : nécessite de ré-exécuter build_foundation
-         pour apparaître dans le jeu de données persisté.
-À FAIRE - RETARD : retard = arrivée réelle - arrivée prévue. Nous avons `réelle` mais il n'y a
-          pas d'horaires par arrêt — `ligne.horaires` ne stocke que les heures de DÉPART à
-          l'origine. Construit dans 03_delay sur une base de référence pilotée par les données
-          (médiane observée du temps écoulé jusqu'à l'arrêt) plutôt qu'un horaire officiel.
-Ce module est la COUCHE prérequise ; le retard (03_delay) est la couche suivante au-dessus.
 
-Hypothèses / limites
----------------------
-- La géométrie de la ligne est constituée des ancres `array_lat/lng_opendata` ordonnées avec
-  les espaces réservés `0.0` supprimés ; les routes nécessitent >= `min_anchors` vraies ancres.
-  Avec des ancres clairsemées, la polyligne est une approximation grossière de la route,
-  c'est pourquoi la segmentation utilise des oscillations de distance avec hystérésis plutôt
-  qu'une correspondance cartographique exacte.
-- `code` n'est pas unique entre entreprises ; toujours clé par `(code, societe)`.
 """
 from __future__ import annotations
 
@@ -156,15 +134,6 @@ def detect_loop_route(stops: pd.DataFrame, cfg: Config) -> bool:
     """Repère une ligne en forme de boucle : premier et dernier arrêt physiquement proches
     (à moins de `loop_frac` de route_len l'un de l'autre) malgré une longue distance `s_m`
     entre eux dans l'ordre de la route.
-
-    Trouvé sur TCV/3 (Tunis, El Menzah) : le même arrêt "EL MENZAH 6" apparaît en seq=0 ET
-    seq=12 sur 15 -- la trace GPS réelle montre le bus oscillant en boucles courtes
-    (s=0<->~5900) sans jamais atteindre le second tronçon de la route, suggérant PLUSIEURS
-    variantes de service réelles (boucle courte + boucle longue) sous le même code de ligne,
-    pas une confusion d'algorithme à corriger simplement. Pour ces lignes, la classification
-    "complet"/"partiel" basée sur route_len n'est PAS fiable -- mieux vaut le signaler
-    explicitement (voir `segment_trips`) que de deviner un seuil qui réintroduirait le même
-    biais que l'ancienne géométrie éparse (surestimation systématique du taux de complétion).
     """
     if len(stops) < 2:
         return False
@@ -327,7 +296,7 @@ def clean_pings(g: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     return g
 
 
-# --------------------------------------------------------------------------- projection
+# projection
 def project_to_route(g: pd.DataFrame, stops: pd.DataFrame, cfg: Config):
     """Correspondance cartographique séquentielle (fenêtrée) : distance le long de la route `s` et hors-route `off`.
 
@@ -375,7 +344,7 @@ def project_to_route(g: pd.DataFrame, stops: pd.DataFrame, cfg: Config):
     return g, float(cum[-1])
 
 
-# --------------------------------------------------------------------------- segmentation
+# segmentation
 def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config, is_loop: bool = False) -> pd.DataFrame:
     """Segmentation par oscillation de direction. Capture les trajets complets et partiels ;
     divise une course à un écart uniquement quand le bus était stationné pendant celui-ci
@@ -444,15 +413,10 @@ def segment_trips(g: pd.DataFrame, route_len: float, cfg: Config, is_loop: bool 
     return pd.DataFrame(trips).reset_index(drop=True)
 
 
-# --------------------------------------------------------------------------- arrivées
+# arrivées
 def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """Accroche les arrêts dans la plage couverte du trajet aux pings, dans l'ordre de voyage,
     en imposant des temps d'arrivée monotones. Retourne une ligne par arrêt couvert (correspondant ou non).
-
-    Dérive aussi le STATIONNEMENT/IMMOBILISATION : `arrival` = premier ping dans la zone,
-    `departure` = dernier ping consécutif encore dans la zone avant que le bus ne reparte,
-    `dwell_s` = leur écart. Un long stationnement est un signal d'anomalie fort
-    (panne / incident / arrêt non prévu).
     """
     seg = g[(g["t"] >= trip["start"]) & (g["t"] <= trip["end"])]
     if len(seg) == 0:
@@ -479,9 +443,6 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
 
         departure, dwell_s, dark_s, had_gap = pd.NaT, None, 0.0, False
         if matched:
-            # départ = dernier ping *consécutif* encore dans la zone, sans franchir un écart de signal.
-            # Un écart de signal fait partie de `gap_flag`; on s'arrête avant lui pour ne pas
-            # compter la durée de l'écart comme immobilisation (ce qui déclencherait des anomalies).
             d_fwd = haversine(lat[j_local:], lon[j_local:], st["lat"], st["lon"])
             within = d_fwd <= cfg.arrival_thresh_m
             last = 0
@@ -563,7 +524,7 @@ def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-# --------------------------------------------------------------------------- candidats
+# candidats
 def candidates_for_day(gps_db: Database, day: str, usable: dict, cfg: Config) -> list:
     """Couples distincts (jour, ligne, societe, bus) actifs ce jour sur des lignes à géométrie utilisable."""
     pipe = [{"$group": {"_id": {"l": "$service.codeLigne", "s": "$service.societe",

@@ -1,46 +1,4 @@
-"""Pipeline de reconstruction de la base de référence WiniCari -- point d'entrée admin.
-
-Utilisation
------------
-    conda activate bus-intelligence
-    python -m src.build_reference_db                          # tables de référence seulement (<1 min)
-    python -m src.build_reference_db --with-trips              # + reconstruction complète des trajets GPS (~40 min)
-    python -m src.build_reference_db --with-trips --since 20250101 --until 20250630
-    python -m src.build_reference_db --with-trips --company S.R.T.BIZERTE --company TUS
-
-Ce que ça fait
---------------
-  1. companies       -- regroupement canonique + fenêtre GPS + enrichissement `societe`
-  2. lines           -- union ligne/tickets/GPS
-  3. stops           -- clustering géographique (DBSCAN) de tous les points géocodés bruts
-  4. line_stops      -- résolveur à 6 niveaux (jointures directes -> repli billetterie)
-  5. tickets_daily   -- agrégats journaliers billetterie (depuis winicari.details)
-  6. [optionnel] trips/trip_stops -- reconstruction GPS complète (`--with-trips`)
-  7. export_foundation_parquet -- réécrit data/processed/foundation_arrivals_full.parquet
-                                   depuis la base SQLite, pour que tous les modules IA
-                                   existants (delay/fallback/anomaly/RAG) bénéficient des
-                                   données enrichies SANS aucune modification de leur code.
-
-Un admin qui a simplement ajouté/corrigé des données MongoDB (nouvelles stations, nouvelles
-lignes, etc.) peut relancer cette commande SANS `--with-trips` pour rafraîchir rapidement
-tout sauf les trajets. `--with-trips` n'est nécessaire que si l'historique GPS lui-même a
-changé (nouvelle fenêtre de données, nouvelle société connectée).
-
-Prérequis
----------
-  - Accès MongoDB (MONGO_URL dans .env) -- bases winicari, OpenData, Historique_Tickets,
-    et Historique_pos (uniquement si --with-trips)
-  - environnement conda bus-intelligence (pandas, scikit-learn, pymongo)
-
-Après reconstruction
---------------------
-    from src.data import reference_db as rdb
-    conn = rdb.init_db()
-    usable = rdb._usable_lines_from_line_stops(conn)   # géométrie ligne/arrêt pour l'API
-
-    # Ou charger le parquet de fondation régénéré, comme avant :
-    import pandas as pd
-    fa = pd.read_parquet("data/processed/foundation_arrivals_full.parquet")
+"""Pipeline de reconstruction de la base de référence WiniCari point d'entrée admin.
 """
 from __future__ import annotations
 

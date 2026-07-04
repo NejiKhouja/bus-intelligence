@@ -1,7 +1,6 @@
 """Couche de détection d'anomalies — évalue les trajets et les arrêts comme normaux ou anormaux.
 
 Deux modèles complémentaires
------------------------------
 Isolation Forest (scikit-learn)
     Entraîné sur des vecteurs de caractéristiques par trajet. Attribue un score d'anomalie
     à chaque trajet (-1 = anormal, 1 = normal). Rapide, sans labels, caractéristiques
@@ -13,7 +12,6 @@ Autoencodeur LSTM (PyTorch)
     d'anomalie. Bon pour localiser *où* dans un trajet quelque chose s'est mal passé.
 
 Signaux d'anomalie utilisés
-----------------------------
 - max_dwell_s   : immobilisation maximale à un arrêt dans le trajet (signal de panne / incident)
 - mean_dwell_s  : immobilisation moyenne aux arrêts
 - n_stops       : nombre d'arrêts correspondants (faible -> problème GPS ou de géométrie)
@@ -47,22 +45,9 @@ class AnomalyConfig:
     min_trip_stops: int = 3
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Ingénierie des caractéristiques
-# ─────────────────────────────────────────────────────────────────────────────
-
 def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
     """Une ligne par trajet : agrège immobilisation/correspondance/durée en vecteur de caractéristiques.
-
-    BUG CORRIGÉ (2026-07-02) : `match_rate` doit être calculé sur TOUS les arrêts de la fenêtre
-    du trajet (correspondus ou non) -- calculer la moyenne de `matched` APRÈS avoir filtré aux
-    seuls arrêts correspondus donne 1.0 par construction, quel que soit le trajet. Ce bug
-    préexistant rendait `match_rate` constant dans les données d'entraînement du modèle
-    d'anomalie déployé : la caractéristique contribuait un vecteur nul à l'Isolation Forest,
-    et la couche d'explication ne pouvait jamais citer un mauvais suivi GPS comme raison,
-    malgré un message dédié dans `_REASON_BUILDERS`. Les stats de stationnement/distance
-    restent, elles, calculées uniquement sur les arrêts correspondus (dwell_s/dist_m n'ont pas
-    de sens pour un arrêt non atteint -- même principe que le bug dist_m du notebook 10).
     """
     fa = fa.copy()
     fa["elapsed_min"] = (fa["arrival"] - fa["trip_start"]).dt.total_seconds() / 60
@@ -104,12 +89,6 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
         trips["max_dark_s"] = 0.0
     trips["max_dark_s"] = trips["max_dark_s"].fillna(0)
 
-    # Service-duration z-scores -- "was this trip unusually long/short for THIS bus / THIS
-    # line specifically", as opposed to total_elapsed/dist_m_max which only compare against
-    # the whole company's pooled distribution. Bidirectional by design (too long AND too
-    # short both matter) -- see _REASON_BUILDERS' "either" direction in src/models/anomaly.py.
-    # Computed over the whole scored batch (own-trip included in its own baseline) -- normal
-    # practice for unsupervised z-score outlier flagging, not a train/test leakage concern.
     for group_cols, col in [(["societe", "bus"], "elapsed_vs_bus_z"),
                             (["societe", "line"], "elapsed_vs_line_z")]:
         g = trips.groupby(group_cols)["total_elapsed"]
@@ -133,10 +112,7 @@ def _scale(X: np.ndarray, mean: np.ndarray = None, std: np.ndarray = None):
     return (X - mean) / std, mean, std
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Modèle 1 — Isolation Forest
-# ─────────────────────────────────────────────────────────────────────────────
-
 def train_isolation_forest(trips: pd.DataFrame, cfg: AnomalyConfig):
     """Entraîne l'Isolation Forest sur la matrice de caractéristiques des trajets. Retourne (modèle, scaler_mean, scaler_std)."""
     from sklearn.ensemble import IsolationForest
@@ -163,10 +139,7 @@ def score_trips(model, mean: np.ndarray, std: np.ndarray,
     return trips
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Modèle 2 — Autoencodeur LSTM (PyTorch)
-# ─────────────────────────────────────────────────────────────────────────────
-
 SEQ_FEATURES = ["dwell_s", "dist_m", "matched"]
 
 

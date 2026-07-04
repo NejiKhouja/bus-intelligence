@@ -76,39 +76,34 @@ def main():
     from src.data import model_version as mv
     metrics: dict = {}
 
-    # ── Module 1 : Retard ────────────────────────────────────────────────────
+    # Module 1 : Retard
     print("\n[1/4] Prédiction de retard  (HistGBM + LSTM + Prophet)")
     print("-" * 50)
     from src.models import delay
     metrics["delay"] = mv.scalars_only(delay.train(FOUNDATION, MODELS_DIR / "delay", epochs=30))
 
-    # ── Module 2 : Repli GPS ─────────────────────────────────────────────────
+    # Module 2 : Repli GPS
     print("\n[2/4] Repli GPS  (Kalman + correction LSTM)")
     print("-" * 50)
     from src.models import gps_fallback
     metrics["fallback"] = mv.scalars_only(gps_fallback.train(MODELS_DIR / "fallback"))
 
-    # ── Module 3 : Détection d'anomalies ─────────────────────────────────────
+    # Module 3 : Détection d'anomalies
     print("\n[3/4] Détection d'anomalies  (Isolation Forest + Autoencodeur LSTM)")
     print("-" * 50)
     from src.models import anomaly
     metrics["anomaly"] = mv.scalars_only(anomaly.train(FOUNDATION, MODELS_DIR / "anomaly"))
 
-    # ── Module 4 : Chatbot RAG ───────────────────────────────────────────────
+    # Module 4 : Chatbot RAG 
     print("\n[4/4] Chatbot RAG  (ChromaDB + Llama 3 via Groq)")
     print("-" * 50)
     from src.models import chatbot
     anomaly_trips = MODELS_DIR / "anomaly" / "trips_scored.parquet"
     chatbot.build(FOUNDATION, LINE_DISTANCES, anomaly_trips)
 
-    # ── Versionnement ────────────────────────────────────────────────────────
-    # Enregistre QUAND / depuis quel commit ce lot d'artefacts a été construit + les
-    # métriques scalaires de chaque module -- /health de l'API le relit (voir
-    # docs/DEPLOYMENT.md). Pas un réentraînement automatique, juste un enregistrement de
-    # ce qui vient de se passer.
     version_info = mv.write_version_file(metrics, MODELS_DIR / "models_version.json")
 
-    # ── Terminé ──────────────────────────────────────────────────────────────
+    # Terminé
     elapsed = time.time() - t0
     print(f"\n{'='*60}")
     print(f"Tous les modèles entraînés en {elapsed/60:.1f} minutes")

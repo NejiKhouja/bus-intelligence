@@ -3,17 +3,6 @@
 Quand un bus perd le GPS pendant plus de `signal_gap_s` secondes, le tableau de bord
 opérateur affiche le bus comme « disparu ». Cette couche comble l'écart avec une
 estimation de position dérivée de la géométrie de la route.
-
-Méthodes de base
-----------------
-linear_interp   Interpole s (distance le long de la route, en mètres) linéairement entre
-                le dernier ping connu avant l'écart et le premier ping après.
-
-dead_reckoning  Projette en avant depuis le dernier ping en utilisant sa vitesse rapportée.
-                Utile quand aucun ping de récupération n'existe encore (bus actuellement dark).
-
-Méthodes améliorées
--------------------
 Filtre de Kalman  Suit l'état [s, vitesse] le long de la route. Chaque ping GPS est une
                   mesure bruitée ; pendant un écart seule l'étape de prédiction s'exécute,
                   donnant une estimation d'incertitude rigoureuse (la covariance croît).
@@ -23,9 +12,6 @@ Correction LSTM   Après la prédiction Kalman, un LSTM entraîné sur des pings
                   corrige l'estimation en utilisant les schémas de trafic appris (profils de
                   vitesse, comportement aux arrêts). Réduit le biais systématique que le
                   modèle Kalman linéaire ne peut pas capturer.
-
-`kalman_filter_track` exécute le filtre de Kalman complet sur une séquence de pings projetés.
-`kalman_fallback` interroge la piste filtrée à n'importe quel horodatage dans un écart.
 """
 from __future__ import annotations
 
@@ -33,10 +19,7 @@ import numpy as np
 import pandas as pd
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Assistants de géométrie de route
-# ─────────────────────────────────────────────────────────────────────────────
-
 def s_to_latlon(s_query: float, stops: pd.DataFrame) -> tuple[float, float]:
     """Convertit une distance de route (mètres) en (lat, lon) via la polyligne d'ancrage."""
     s_arr = stops["s_m"].values
@@ -62,10 +45,7 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return float(2 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1))))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Extraction des écarts
-# ─────────────────────────────────────────────────────────────────────────────
-
 def gap_table(g: pd.DataFrame) -> pd.DataFrame:
     """Une ligne par écart de signal avec le contexte de route avant/après.
 
@@ -91,10 +71,7 @@ def gap_table(g: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Méthodes d'estimation
-# ─────────────────────────────────────────────────────────────────────────────
-
 def interp_position(t_query: pd.Timestamp, t0: pd.Timestamp, s0: float,
                     t1: pd.Timestamp, s1: float,
                     stops: pd.DataFrame) -> tuple[float, float, float]:
@@ -122,10 +99,7 @@ def dead_reckon_position(t_query: pd.Timestamp, t0: pd.Timestamp, s0: float,
     return lat, lon, s_est
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Production : meilleure estimation pour tout horodatage de requête
-# ─────────────────────────────────────────────────────────────────────────────
-
 def fallback_position(g: pd.DataFrame, t_query: pd.Timestamp,
                       stops: pd.DataFrame) -> dict | None:
     """Meilleure estimation de position pour un horodatage de requête qui tombe dans un écart.
@@ -168,10 +142,7 @@ def fallback_position(g: pd.DataFrame, t_query: pd.Timestamp,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Évaluation : masquage synthétique
-# ─────────────────────────────────────────────────────────────────────────────
-
 def eval_fallback(g: pd.DataFrame, stops: pd.DataFrame,
                   mask_min: float = 3.0, n_samples: int = 200,
                   rng: np.random.Generator | None = None) -> pd.DataFrame:
@@ -232,10 +203,7 @@ def eval_fallback(g: pd.DataFrame, stops: pd.DataFrame,
     return pd.DataFrame(rows)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Traceur du filtre de Kalman
-# ─────────────────────────────────────────────────────────────────────────────
-
 def kalman_filter_track(g: pd.DataFrame, route_len: float,
                         r_std: float = 100.0, q_v: float = 0.5) -> pd.DataFrame:
     """Exécute un filtre de Kalman sur une séquence de pings projetés.
@@ -321,10 +289,7 @@ def kalman_fallback(g_filtered: pd.DataFrame, t_query: pd.Timestamp,
             "uncertainty_m": round(unc, 0), "method": "kalman"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Correction LSTM des estimations Kalman
-# ─────────────────────────────────────────────────────────────────────────────
-
 _LSTM_CORR_FEATS = ["ks", "kv", "kp", "speed"]
 
 

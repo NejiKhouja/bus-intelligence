@@ -1,15 +1,5 @@
 """Détection d'anomalies dans les ventes de tickets — signal COMPLÉMENTAIRE au signal GPS
 (`src/data/anomaly.py`), pas fusionné avec lui.
-
-Pourquoi un modèle séparé plutôt qu'une fusion dans les caractéristiques de trajet GPS :
-`tickets_daily` est agrégé par (société, ligne, bus, JOUR) alors que l'anomalie GPS score au
-niveau TRAJET -- un bus peut faire plusieurs trajets par jour, donc répartir le nombre de
-tickets d'une journée entre trajets individuels demanderait une hypothèse inventée qu'on ne
-peut pas dériver honnêtement des données. Ce module reste donc au grain JOUR : « ce bus a-t-il
-vendu un nombre de tickets/une recette anormal ce jour-là sur cette ligne, par rapport à sa
-propre normale ? ». Mêmes principes que l'anomalie GPS : un Isolation Forest PAR SOCIÉTÉ
-(ce qui est un jour normal pour TCV ne l'est pas forcément pour S.R.T.K), `contamination='auto'`
-data-driven, pas de seuil forcé.
 """
 from __future__ import annotations
 

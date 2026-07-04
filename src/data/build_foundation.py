@@ -1,7 +1,6 @@
 """Construction par lots du jeu de données de fondation GPS sur une plage de jours.
 
 Ce que ce fichier fait EN PLUS DE foundation.py
-------------------------------------------------
 `foundation.py` sait reconstruire UN seul bus-jour (un `(jour, ligne, societe, bus)`).
 Ce fichier est l'**orchestrateur** qui exécute cette logique sur toute la base de données
 et la transforme en un seul jeu de données sur disque. Il fait quatre choses que foundation.py
@@ -21,7 +20,6 @@ ne fait pas :
    data/processed/foundation_arrivals_full.parquet.
 
 Lecture des lignes de progression
------------------------------------
     [202502] days=28 cand=219 busdays_with_trips=215 rows=17240 match=83% (89s)
       days                = collections de jours traitées ce mois
       cand                = bus-jours candidats (ligne,societe,bus) trouvés

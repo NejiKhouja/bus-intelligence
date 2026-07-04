@@ -53,46 +53,110 @@ for exactly what that contract looks like from the PHP side.
 
 ## Architecture
 
+Two deployment shapes are supported, controlled by Compose profiles in `docker-compose.yml`
+— pick based on whether you're sharing a VPS that already runs something else, or starting
+from a blank machine.
+
+**Shape A — sharing an existing VPS** (recommended if the company already has one running
+the PHP platform, and likely MongoDB too — this also conveniently answers the "is MongoDB
+reachable" question for free, since it'd already be on the same box):
+
 ```
-PHP platform  --HTTPS + X-API-Key-->  Caddy (TLS)  -->  api container (FastAPI, uvicorn)
-                                                              |
-                                                    reads models/, data/ (read-only,
-                                                    static, admin-refreshed artifacts)
-                                                              |
-                                                    live queries: MongoDB (GPS pings,
-                                                    only for GPS fallback + the new
-                                                    real-time anomaly endpoint)
+PHP platform (same VPS)  --HTTP, localhost-->  existing web server (Apache/nginx,
+                                                already serving the PHP app + TLS)
+                                                        |
+                                                proxies a subdomain/path to:
+                                                        |
+                                          api container, bound to 127.0.0.1:8000 ONLY
+                                          (never exposed directly to the internet)
+                                                        |
+                                          reads models/, data/ (read-only, static,
+                                          admin-refreshed artifacts)
+                                                        |
+                                          live queries: MongoDB on localhost (GPS pings,
+                                          only for GPS fallback + real-time anomaly)
 ```
 
-`data/reference/winicari_reference.db` (the SQLite reference DB) is one of those static,
-read-only artifacts — never written to or queried live in place of MongoDB. It's refreshed
-the same way the trained models are: by re-running the offline pipeline locally and
-shipping the updated file to the server.
+**Shape B — fresh, dedicated VPS** (nothing else running on it):
+
+```
+PHP platform (elsewhere)  --HTTPS + X-API-Key-->  Caddy (TLS, ports 80/443)  -->  api container
+                                                                                        |
+                                                                          same models/data/Mongo
+                                                                          setup as shape A
+```
+
+In both shapes, `data/reference/winicari_reference.db` (the SQLite reference DB) is a
+static, read-only artifact — never written to or queried live in place of MongoDB. It's
+refreshed the same way the trained models are: by re-running the offline pipeline locally
+and shipping the updated file to the server.
 
 ## 1. One-time server setup
 
-1. Provision a small Linux VPS (any provider works — DigitalOcean, Hetzner, OVH, etc. — the
-   architecture below doesn't depend on which one). 2 vCPU / 4GB RAM is a reasonable
-   starting point for CPU-only inference across 3 modules.
+### Shape A — sharing the existing VPS (do this first, it's simpler)
+
+1. Check the box actually has spare capacity before committing to this
+   (`free -h`, `nproc`, `df -h`) — the AI layer's heaviest cost is at startup (loading
+   torch + 65 Prophet models + the LSTM/IF artifacts into memory, roughly ~1-1.5GB
+   resident) plus brief CPU bursts per prediction request, not sustained heavy load.
+   `docker-compose.yml` caps the `api` container at `mem_limit: 2g` / `cpus: 1.5` as a
+   safety net so it can't starve the PHP app or MongoDB if something misbehaves — adjust
+   those numbers to what's genuinely spare.
+2. Confirm MongoDB's actual bind address on that box (`mongod.conf` or however it was
+   started) — if it's `127.0.0.1`/`localhost`, `MONGO_URL=mongodb://localhost:27017` in
+   `.env` just works, no firewall changes needed at all since the API container will run
+   on the same host.
+3. Install Docker + the Compose plugin if not already present.
+4. `git clone` this repo onto the server into its own directory (or pull a release
+   tarball) — it doesn't need to live anywhere near the PHP app's own directory.
+5. Pick a subdomain or path for the AI API (e.g. `api.yourdomain.tn`, or
+   `yourdomain.tn/ai-api/`) and add a reverse-proxy rule to the **existing** web server
+   pointing at `127.0.0.1:8000` (the `api` container's exposed loopback port) — it keeps
+   using whatever TLS cert setup it already has (certbot, etc.), no new one needed.
+
+   nginx example (as a new `server`/`location` block alongside the existing PHP config):
+   ```nginx
+   location /ai-api/ {
+       proxy_pass http://127.0.0.1:8000/;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+   }
+   ```
+   Apache example (`mod_proxy` must be enabled):
+   ```apache
+   ProxyPass /ai-api/ http://127.0.0.1:8000/
+   ProxyPassReverse /ai-api/ http://127.0.0.1:8000/
+   ```
+   Whichever path/subdomain you pick becomes `WINICARI_API_URL` in
+   `docs/PHP_INTEGRATION.md`'s PHP snippets.
+
+With this shape, `docker compose up -d --build` (no `--profile` flags) is enough — `caddy`
+and `mongodb` both stay off since the existing web server and existing MongoDB already do
+those jobs.
+
+### Shape B — fresh, dedicated VPS
+
+1. Provision a small Linux VPS (any provider — DigitalOcean, Hetzner, OVH, etc.). 2 vCPU /
+   4GB RAM is a reasonable starting point for CPU-only inference across 3 modules.
 2. Point a DNS A record for your API subdomain (e.g. `api.yourdomain.tn`) at the server —
    needed for Caddy's automatic HTTPS.
 3. Install Docker + the Compose plugin.
-4. `git clone` this repo onto the server (or pull a release tarball — whichever you
-   prefer; there's no build-on-server step beyond `docker compose build`).
+4. `git clone` this repo onto the server.
+5. Confirm the real production MongoDB is reachable over the network from this new
+   server (it almost certainly is NOT by default, since it currently listens on localhost
+   per this project's dev environment) — open it up with proper auth/firewalling
+   (ideally a private network/VPC between the two servers, not the open internet).
 
-**Open question you need to confirm before going further**: is the real production
-MongoDB (`Historique_pos` especially) already reachable over the network from wherever
-this server will be, or does it currently only listen on localhost the way this
-development environment's does? If it's localhost-only, either open it up with proper
-auth/firewalling, or co-locate this API on the same host as MongoDB.
+Start with `docker compose --profile standalone-tls up -d --build` — this also starts
+`caddy`, which claims ports 80/443 and gets its own Let's Encrypt cert for `API_DOMAIN`.
 
 ## 2. Configure `.env` on the server
 
 ```bash
-MONGO_URL=mongodb://<real-mongo-host>:27017
+MONGO_URL=mongodb://<real-mongo-host>:27017   # shape A: usually mongodb://localhost:27017
 API_KEY=<generate a long random secret, e.g. `openssl rand -hex 32`>
 ALLOWED_ORIGINS=https://your-php-platform-domain.tn
-API_DOMAIN=api.yourdomain.tn
+API_DOMAIN=api.yourdomain.tn      # only used by caddy -- irrelevant in shape A, no caddy there
 ENABLE_CHATBOT=false
 GROQ_API_KEY=            # unused while chatbot is disabled, leave blank
 ```
@@ -121,21 +185,25 @@ rsync -avz models/ data/reference/ data/processed/foundation_arrivals_full.parqu
 ## 4. Start the stack
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build                              # shape A: just `api`
+docker compose --profile standalone-tls up -d --build      # shape B: `api` + `caddy`
+docker compose --profile local-mongo up -d --build          # add if you also need the bundled MongoDB
 ```
-
-This starts `api` (the FastAPI service) and `caddy` (reverse proxy/TLS). MongoDB is **not**
-started by this command — it's opt-in (see the "local-mongo" profile in
-`docker-compose.yml`) for the case where you don't have a MongoDB elsewhere yet:
-```bash
-docker compose --profile local-mongo up -d --build
-```
+(profiles combine — e.g. `--profile standalone-tls --profile local-mongo` if you somehow
+need both.)
 
 Verify:
 ```bash
-curl https://api.yourdomain.tn/health          # no key needed, should show models_loaded: true
-curl -H "X-API-Key: $API_KEY" https://api.yourdomain.tn/api/options   # 200 with a key, 401 without
+# shape A -- through the existing web server's proxy path/subdomain:
+curl https://yourdomain.tn/ai-api/health
+curl -H "X-API-Key: $API_KEY" https://yourdomain.tn/ai-api/api/options
+
+# shape B -- Caddy's own domain:
+curl https://api.yourdomain.tn/health
+curl -H "X-API-Key: $API_KEY" https://api.yourdomain.tn/api/options
 ```
+Either way: `/health` needs no key and should show `models_loaded: true`; the other
+endpoint needs the key and returns 401 without it.
 
 ## 5. Updating code (CI/CD)
 

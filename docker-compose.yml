@@ -1,10 +1,20 @@
-# Production stack: the AI API + reverse proxy, for the PHP platform to call.
+# Production stack: the AI API (+ optional reverse proxy), for the PHP platform to call.
 # The Streamlit dashboard is NOT part of this file (dev-only tool, see docker-compose.dev.yml).
 #
-# MongoDB: this deployment assumes a REAL production MongoDB is already reachable at
-# MONGO_URL (set in .env) -- point it at that instance. If you have no MongoDB elsewhere yet,
-# uncomment the `mongodb` service below and run with `docker compose --profile local-mongo up`
-# (it's opt-in via a profile, not started by a plain `docker compose up`).
+# TWO DEPLOYMENT SHAPES, see docs/DEPLOYMENT.md for the full explanation:
+#   A) Sharing an existing VPS that already runs the PHP platform (+ probably MongoDB) --
+#      the default here. `api` binds ONLY to 127.0.0.1:8000 (not exposed to the internet)
+#      and the box's EXISTING web server (Apache/nginx, whatever already serves the PHP
+#      app) reverse-proxies a subdomain/path to it. `caddy` is NOT started by a plain
+#      `docker compose up` in this shape -- there's already a web server doing that job.
+#   B) A fresh, dedicated VPS with nothing else on it -- run with
+#      `docker compose --profile standalone-tls up` to also start `caddy`, which claims
+#      ports 80/443 itself and gets its own Let's Encrypt cert.
+#
+# MongoDB: assumes a REAL MongoDB is already reachable at MONGO_URL (set in .env) -- most
+# likely on localhost of the SAME box if you're sharing the existing VPS (shape A above).
+# If you genuinely have no MongoDB reachable anywhere yet, run with
+# `docker compose --profile local-mongo up` to also start the bundled `mongodb` service.
 
 services:
   api:
@@ -13,6 +23,9 @@ services:
       context: .
       dockerfile: Dockerfile.api
     container_name: winicari-api
+    ports:
+      - "127.0.0.1:8000:8000"   # loopback-only -- the existing web server proxies to this,
+                                 # never exposed directly to the internet
     environment:
       - MONGO_URL=${MONGO_URL}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
@@ -23,11 +36,19 @@ services:
       - ./models:/app/models:ro
       - ./data:/app/data:ro
       - ./logs:/app/logs
+    # Safety net when sharing a box that also runs other production services (the PHP
+    # platform, MongoDB) -- keeps a runaway/bursty inference load from starving them.
+    # Adjust to what the VPS actually has spare; see docs/DEPLOYMENT.md.
+    mem_limit: 2g
+    cpus: 1.5
     restart: unless-stopped
 
+  # Opt-in only (`docker compose --profile standalone-tls up`) -- shape B above. Skip
+  # entirely when sharing an existing VPS that already has a web server doing this job.
   caddy:
     image: caddy:2-alpine
     container_name: winicari-caddy
+    profiles: ["standalone-tls"]
     ports:
       - "80:80"
       - "443:443"
@@ -42,7 +63,7 @@ services:
     restart: unless-stopped
 
   # Opt-in only (`docker compose --profile local-mongo up`) -- skip entirely if a real
-  # production MongoDB is already reachable elsewhere.
+  # production MongoDB is already reachable elsewhere (e.g. localhost on a shared VPS).
   mongodb:
     image: mongo:latest
     container_name: winicari-mongodb

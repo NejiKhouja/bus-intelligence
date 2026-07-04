@@ -30,9 +30,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# NOTE : torch et prophet sont importés paresseusement à l'intérieur des fonctions pour que
-# le module se charge dans des environnements qui ne les ont pas (ex. noyau py310).
-
 TRIP_KEYS = ["day", "line", "societe", "bus", "trip_id"]
 
 
@@ -110,11 +107,6 @@ def trip_features(d: pd.DataFrame, cfg: DelayConfig) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# modèle par type de jour + glissant
-# Caractéristiques numériques + catégorielles utilisées par le modèle glissant au prochain arrêt.
-# `line`/`dir` sont passées nativement comme catégorielles (HistGradientBoosting les gère),
-# donc l'entraînement et l'inférence utilisent exactement les mêmes colonnes sans codage
-# one-hot manuel.
 FEATURES_NUM = ["dep_hour", "dow", "is_weekend", "is_rush_hour", "seq", "seq_frac",
                 "delay_min", "elapsed_min", "rain_frac"]
 FEATURES_CAT = ["societe", "line", "dir"]
@@ -214,19 +206,6 @@ def train_rolling_model(roll: pd.DataFrame, **kw):
     return model
 
 
-# Modèle LSTM glissant de retard (PyTorch)
-
-# Caractéristiques fournies au LSTM à chaque arrêt le long d'un trajet.
-# POURQUOI ces six :
-#   delay_min    -- retard actuel du bus (prédicteur le plus fort ; le retard se cumule)
-#   elapsed_min  -- temps absolu depuis le départ (capture les effets de fatigue longue distance)
-#   seq_frac     -- progression le long de la route 0->1 (les arrêts tardifs voient plus de retard cumulé)
-#   is_weekend   -- le week-end tunisien (sam/dim) est mesurабlement moins embouteillé
-#   dep_hour     -- comportement heure de pointe vs hors pointe
-#   is_rush_hour -- version explicite/binaire du signal heure de pointe (voir add_daytype)
-# `is_rain` n'est PAS inclus ici : ~55% de NaN et pas de valeur au service en direct (pas de
-# flux météo branché) -- le LSTM ne gère pas nativement les NaN comme HistGBM, donc ce
-# signal reste réservé au modèle HistGBM (voir FEATURES_NUM) pour l'instant.
 LSTM_STEP_FEATS = ["delay_min", "elapsed_min", "seq_frac", "is_weekend", "dep_hour", "is_rush_hour"]
 
 
@@ -247,10 +226,6 @@ def build_lstm_sequences(roll: pd.DataFrame, max_len: int = 30
     X       : (N, max_len, n_feats)  -- séquences brutes rembourrées
     lengths : (N,)                   -- vraie longueur de séquence avant rembourrage
     y       : (N,)                   -- cible next_delay_min
-
-    NOTE : X est retourné NON normalisé. Appeler fit_lstm_scaler(X_train) puis
-    scale_sequences() avant l'entraînement pour que les statistiques viennent uniquement
-    des données d'entraînement (pas de fuite vers val/test).
     """
     seqs, lengths, targets = [], [], []
     roll = roll.sort_values(TRIP_KEYS + ["seq"])
@@ -537,10 +512,6 @@ def serve_eta(model, baseline: pd.DataFrame, *, societe, line, direction, dep_ti
     is_rush_hour = int(((7 <= dep_hour <= 9) or (16 <= dep_hour <= 19)) and not is_weekend)
     exp = dict(zip(b["seq"].astype(int), b["expected_min"]))
     smax = int(b["seq"].max())
-
-    # Utiliser exactement les caractéristiques avec lesquelles CE modèle a été entraîné
-    # (voir train_rolling_model) -- une colonne dégénérée peut avoir été exclue à l'entraînement ;
-    # lui fournir quand même ici recréerait le décalage de forme que ce mécanisme évite.
     numeric_features = getattr(model, "feature_names_used_", FEATURES_NUM)
 
     cur_seq, cur_delay, rows = int(current_seq), float(current_delay_min), []

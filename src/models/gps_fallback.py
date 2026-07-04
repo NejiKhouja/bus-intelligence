@@ -1,44 +1,4 @@
 """Module de repli GPS — entraîner, sauvegarder, charger, servir.
-
-Cycle de vie complet pour le Module 2 :
-  train()            -> modèle de correction LSTM -> sauvegardé dans models/fallback/
-  load()             -> charge les artefacts depuis le disque
-  predict_position() -> meilleure estimation de position pendant un écart GPS
-
-Notes d'ingénierie ML
-----------------------
-Le filtre de Kalman n'a PAS de paramètres apprenables — c'est un estimateur en ligne
-qui s'exécute à l'inférence sur le flux de pings en direct de chaque bus. Pas d'entraînement nécessaire.
-
-Correction LSTM
-    Le LSTM apprend à corriger l'estimation s de Kalman en utilisant le SCHÉMA des
-    valeurs récentes [ks, kv, kp, speed]. Un bus qui s'approche d'un stationnement en terminus,
-    ou qui monte une pente à vitesse réduite, suit un profil caractéristique qu'un modèle
-    Kalman linéaire ne peut pas capturer.
-
-Stratégie des données d'entraînement
-    On s'entraîne sur des pings GPS de PLUSIEURS bus-jours extraits directement de MongoDB.
-    Utiliser un seul trajet donne un modèle qui sur-ajuste la géométrie spécifique de ce trajet
-    et les schémas de trafic. Plus de trajets = meilleure généralisation à travers différents
-    jours, heures et bus sur la même ligne.
-
-    Concrètement : on charge tous les bus pour une ligne donnée sur plusieurs jours du calendrier,
-    on les projette sur la route, on exécute le filtre de Kalman, et on regroupe toutes les
-    fenêtres sans écart en un seul ensemble d'entraînement.
-
-Normalisation des caractéristiques
-    Les caractéristiques [ks, kv, kp, speed] sont normalisées avec moyenne/écart-type ajustés
-    sur les pings d'entraînement uniquement (pas de fuite). Les mêmes statistiques sont
-    sauvegardées et appliquées à l'inférence.
-
-Division entraînement/test
-    Non appliquée ici : la correction LSTM est un assistant de régression pour le filtre de
-    Kalman (elle corrige les estimations à partir de l'historique récent) et est évaluée via
-    l'expérience de gap synthétique dans le notebook, pas un ensemble étiqueté séparé.
-    Si des paires erreur-gap étiquetées étaient disponibles, une division par jour s'appliquerait.
-
-SMOTE / équilibrage des classes
-    Non applicable — tâche de régression, pas d'étiquettes de classe.
 """
 from __future__ import annotations
 
@@ -74,10 +34,7 @@ def _make_corr_lstm(n_feats: int = _N_FEATS, hidden: int = _HIDDEN):
     return CorrLSTM()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Entraînement
-# ─────────────────────────────────────────────────────────────────────────────
-
 def train(save_dir: str | Path = SAVE_DIR,
           *,
           line: str = "209",
@@ -132,13 +89,6 @@ def train(save_dir: str | Path = SAVE_DIR,
                 g, route_len = _fdn.project_to_route(
                     _fdn.clean_pings(raw, cfg), stops, cfg)
                 g_kf = _fb.kalman_filter_track(g, route_len)
-
-                # Pings sans écart uniquement.
-                # La cible est le RÉSIDU (s_true - ks), pas s absolu.
-                # POURQUOI : s brut s'étend sur 0..192 000 m ; prédire des valeurs absolues depuis
-                # des caractéristiques normalisées cause une perte de ~10^11 m2 (le modèle prédit
-                # le milieu de route). L'estimation Kalman ks est déjà proche de s_true ;
-                # le LSTM n'a qu'à apprendre le petit terme de correction (+/-500 m).
                 non_gap = g_kf[~g_kf["signal_gap"]].reset_index(drop=True)
                 feats   = non_gap[_fb._LSTM_CORR_FEATS].values.astype(np.float32)
                 targets = (non_gap["s"] - non_gap["ks"]).values.astype(np.float32)
@@ -202,10 +152,7 @@ def train(save_dir: str | Path = SAVE_DIR,
     return {"model": model, "mean": mean, "std": std, "window": window}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Chargement
-# ─────────────────────────────────────────────────────────────────────────────
-
 def load(save_dir: str | Path = SAVE_DIR) -> dict:
     """Charge le modèle de correction LSTM entraîné.
 
@@ -229,10 +176,7 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
             "window": cfg["window"]}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Service
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _kalman_params() -> dict:
     """Charge les paramètres Kalman réglés (r_std, q_v) si présents, sinon défauts.
 
@@ -265,15 +209,5 @@ def predict_position(models: dict,
                      t_query: pd.Timestamp,
                      stops: pd.DataFrame) -> dict | None:
     """Meilleure estimation de position pendant un écart GPS — **Kalman pur**.
-
-    Décision pilotée par les données : sur une évaluation par masquage synthétique
-    (notebook 02_gps_fallback), la correction LSTM n'améliorait PAS l'estimation
-    Kalman (erreur médiane quasi identique, ~573 m vs 579 m sur la ligne 209), pour
-    un coût et une complexité supplémentaires. On utilise donc le filtre de Kalman
-    seul : il propage le dernier état filtré [s, v] jusqu'à t_query et fournit une
-    incertitude croissante rigoureuse.
-
-    g_filtered doit être la sortie de run_kalman().
-    Retourne dict : lat, lon, s_m (km), uncertainty_m, method — ou None.
     """
     return _fb.kalman_fallback(g_filtered, t_query, stops)
