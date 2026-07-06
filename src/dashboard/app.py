@@ -520,12 +520,145 @@ elif selected == "Détection d'anomalies":
     SEV_COLOR = {"high": "🔴", "medium": "🟠", "low": "🟡"}
     SEV_FR = {"high": "Élevée", "medium": "Moyenne", "low": "Faible"}
 
+    # Catégorie dominante par trajet (`top_feature`, calculée par anomaly.explain_trips) --
+    # même vocabulaire que les puces de raison, pour filtrer une longue liste de trajets
+    # signalés par TYPE de problème plutôt que de les parcourir un par un.
+    TOP_FEATURE_FR = {
+        "max_dwell_s": "🛑 Immobilisation anormale",
+        "total_elapsed": "⏱️ Trajet anormalement long",
+        "mean_dwell_s": "🛑 Durée d'arrêt moyenne élevée",
+        "dist_m_max": "📍 Déviation de l'itinéraire",
+        "match_rate": "🚧 Mauvais suivi GPS / hors itinéraire",
+        "n_stops": "🚧 Arrêts desservis anormalement faible",
+        "max_dark_s": "📡 Perte de signal GPS",
+        "elapsed_vs_bus_z": "⏱️ Durée inhabituelle pour ce bus",
+        "elapsed_vs_line_z": "⏱️ Durée inhabituelle pour cette ligne",
+        None: "❓ Autre / non catégorisé",
+    }
+
+    def category_filter(anomalies, key):
+        """Multiselect par type de problème dominant -- retourne la liste filtrée.
+        N'affiche le widget que s'il y a au moins 2 catégories parmi lesquelles choisir."""
+        if not anomalies:
+            return anomalies
+        present = sorted({a.get("top_feature") for a in anomalies},
+                         key=lambda f: TOP_FEATURE_FR.get(f, str(f)))
+        if len(present) < 2:
+            return anomalies
+        options = [TOP_FEATURE_FR.get(f, str(f)) for f in present]
+        picked = st.multiselect("Filtrer par type d'anomalie", options,
+                               default=options, key=key)
+        picked_features = {f for f in present if TOP_FEATURE_FR.get(f, str(f)) in picked}
+        return [a for a in anomalies if a.get("top_feature") in picked_features]
+
     def _fmt_duration(minutes):
         h, m = int(minutes) // 60, int(minutes) % 60
         return f"{h}h{m:02d}" if h else f"{m} min"
 
-    def render_alert_cards(anomalies):
-        for a in anomalies:
+    def render_trip_map(seq_list, key=None, direction=None):
+        """Carte des arrêts d'un trajet — cercles colorés selon le problème détecté.
+
+        `direction` (ALLER/RETOUR) oriente la carte : les arrêts sont numérotés dans
+        l'ordre de passage réel du bus (RETOUR = seq décroissant), avec départ/terminus.
+        """
+        map_rows = [s for s in seq_list if s.get("lat") and s.get("lon")]
+        if not map_rows:
+            st.info("Coordonnées GPS non disponibles pour les arrêts de cette ligne.")
+            return
+        st.caption(
+            "Chaque cercle représente un arrêt, numéroté dans l'ordre de passage (🚏 départ → 🏁 terminus). "
+            "La taille reflète la durée d'immobilisation + perte de signal. "
+            "🟢 Normal · 🔵 Immobilisation longue (≥10 min) · 🟡 Perte de signal (≥5 min) · "
+            "🔴 Arrêt non desservi (bus jamais passé) · ⚪ Coordonnées d'arrêt douteuses (jamais suivi sur cette ligne)"
+        )
+        mdf = pd.DataFrame(map_rows)
+        if "dark_min" not in mdf.columns:
+            mdf["dark_min"] = 0.0
+        if "coord_suspect" not in mdf.columns:
+            mdf["coord_suspect"] = False
+
+        # Ordre de passage réel : les seq suivent la géométrie ALLER, donc un trajet
+        # RETOUR visite les arrêts en seq décroissant.
+        mdf = mdf.sort_values("seq", ascending=(direction != "RETOUR")).reset_index(drop=True)
+        mdf["visit_order"] = range(1, len(mdf) + 1)
+
+        def _scolor(row):
+            if row["coord_suspect"]: return "#9ca3af"
+            if not row["matched"]: return "#ef4444"
+            if row.get("dark_min", 0) >= 5: return "#f59e0b"
+            if row.get("dwell_min", 0) >= 10: return "#2563eb"
+            return "#22c55e"
+
+        mdf["color"] = mdf.apply(_scolor, axis=1)
+        mdf["msize"] = (mdf["dwell_min"] + mdf["dark_min"]).clip(8, 28)
+        mdf["hover"] = (
+            "<b>" + mdf["visit_order"].astype(str) + " : " + mdf["stop"] + "</b><br>" +
+            "Immobilisation réelle : " + mdf["dwell_min"].apply(lambda v: f"{v:.1f} min") + "<br>" +
+            "Signal perdu : " + mdf["dark_min"].apply(lambda v: f"{v:.1f} min") + "<br>" +
+            "Distance de l'arrêt attendu : " + mdf["dist_m"].apply(lambda v: f"{v:.0f} m") + "<br>" +
+            "Suivi GPS : " + mdf["matched"].map({True: "Oui", False: "Non"}) +
+            mdf["coord_suspect"].map({True: "<br>⚠️ Cet arrêt n'est jamais suivi sur cette ligne "
+                                            "(coordonnées probablement erronées)", False: ""})
+        )
+
+        fig_map = go.Figure()
+        fig_map.add_trace(go.Scattermapbox(
+            lat=mdf["lat"].tolist(), lon=mdf["lon"].tolist(),
+            mode="lines", line=dict(width=3, color="#94a3b8"),
+            name="Itinéraire prévu", hoverinfo="skip",
+        ))
+        for color, label in [
+            ("#22c55e", "Arrêt normal"),
+            ("#2563eb", "Immobilisation longue"),
+            ("#f59e0b", "Perte de signal GPS"),
+            ("#ef4444", "Arrêt non desservi"),
+            ("#9ca3af", "Coordonnées douteuses"),
+        ]:
+            sub = mdf[mdf["color"] == color]
+            if sub.empty:
+                continue
+            fig_map.add_trace(go.Scattermapbox(
+                lat=sub["lat"].tolist(), lon=sub["lon"].tolist(),
+                mode="markers",
+                marker=dict(size=sub["msize"].tolist(), color=color),
+                name=label,
+                text=sub["hover"].tolist(),
+                hovertemplate="%{text}<extra></extra>",
+            ))
+        # Numéros d'ordre de passage superposés aux cercles → sens de circulation lisible
+        fig_map.add_trace(go.Scattermapbox(
+            lat=mdf["lat"].tolist(), lon=mdf["lon"].tolist(),
+            mode="text", text=mdf["visit_order"].astype(str).tolist(),
+            textfont=dict(size=10, color="#111827"),
+            hoverinfo="skip", showlegend=False,
+        ))
+        # Départ / terminus du trajet dans le sens de circulation
+        dir_label = f" ({direction})" if direction else ""
+        fig_map.add_trace(go.Scattermapbox(
+            lat=[mdf["lat"].iloc[0]], lon=[mdf["lon"].iloc[0]],
+            mode="text", text=["🚏"], textfont=dict(size=26),
+            name=f"Départ{dir_label}", hoverinfo="skip",
+        ))
+        fig_map.add_trace(go.Scattermapbox(
+            lat=[mdf["lat"].iloc[-1]], lon=[mdf["lon"].iloc[-1]],
+            mode="text", text=["🏁"], textfont=dict(size=26),
+            name="Terminus", hoverinfo="skip",
+        ))
+        fig_map.update_layout(
+            mapbox=dict(
+                style="open-street-map",
+                center=dict(lat=float(mdf["lat"].mean()), lon=float(mdf["lon"].mean())),
+                zoom=10,
+            ),
+            margin=dict(l=0, r=0, t=0, b=0), height=500,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_map, use_container_width=True, key=key)
+
+    def render_alert_cards(anomalies, detail_company=None):
+        """detail_company : si renseigné, chaque carte reçoit un bouton « Plus de détails »
+        qui charge à la demande la carte des arrêts du trajet concerné."""
+        for i, a in enumerate(anomalies):
             icon = SEV_COLOR.get(a["severity"], "🟡")
             with st.container(border=True):
                 top = st.columns([3, 1, 1])
@@ -557,8 +690,26 @@ elif selected == "Détection d'anomalies":
                     others = ps.get('off_route_count', len(ps['off_route_stops'])) - len(ps['off_route_stops'])
                     suffix = f" (+{others} autres)" if others > 0 else ""
                     chips.append(f"🚧 Arrêts non desservis : {', '.join(ps['off_route_stops'])}{suffix}")
+                # Stops never matched on ANY trip of the line = bad geocoding, not an anomaly
+                if ps.get("suspect_coord_count"):
+                    chips.append(f"⚪ {ps['suspect_coord_count']} arrêt(s) aux coordonnées douteuses "
+                                 f"(jamais suivis sur cette ligne — exclus du diagnostic)")
                 for c in chips:
                     st.caption(c)
+
+                # Bouton « Plus de détails » : charge la carte du trajet à la demande
+                if detail_company and a.get("trip_id") is not None:
+                    k = f"an_card_{i}_{a['bus']}_{a['day']}_{a['trip_id']}"
+                    shown = st.session_state.get(k, False)
+                    if st.button("Masquer les détails" if shown else "🗺️ Plus de détails",
+                                 key=k + "_btn"):
+                        st.session_state[k] = not shown
+                        st.rerun()
+                    if shown:
+                        detail = get_trip_detail(detail_company, a["line"], a["bus"],
+                                                 a["day"], a["trip_id"])
+                        render_trip_map((detail or {}).get("sequence", []),
+                                        key=k + "_map", direction=a.get("dir"))
 
     with tab_live:
         col = st.columns([1, 1, 2])
@@ -576,7 +727,8 @@ elif selected == "Détection d'anomalies":
             m[2].metric("Signalés", f"{data['anomaly_count']}  ({pct:.1f} %)")
             if data["anomalies"]:
                 st.markdown("#### Trajets signalés ce jour")
-                render_alert_cards(data["anomalies"])
+                filtered = category_filter(data["anomalies"], key="an_live_cat")
+                render_alert_cards(filtered)
             else:
                 st.success("Aucune anomalie le dernier jour d'exploitation pour ce périmètre.")
                 st.caption("Essayez une ligne précise, ou consultez l'historique ci-dessous.")
@@ -585,7 +737,8 @@ elif selected == "Détection d'anomalies":
         st.markdown("#### Historique récent")
         hist = get_anomaly_history(company, line_param, limit=40)
         if hist and hist.get("anomalies"):
-            render_alert_cards(hist["anomalies"][:12])
+            filtered_hist = category_filter(hist["anomalies"][:12], key="an_hist_cat")
+            render_alert_cards(filtered_hist)
         else:
             st.info("Aucune anomalie historique pour ce périmètre.")
 
@@ -595,6 +748,32 @@ elif selected == "Détection d'anomalies":
         company = col[0].selectbox("Opérateur", companies, key="an_ex_co")
         lines = get_lines(company)
         line = col[1].selectbox("Ligne", lines, key="an_ex_line") if lines else None
+
+        # ── Verdict global de la ligne — visible dès qu'une ligne est choisie ──
+        if line:
+            pat = get_anomaly_patterns(company, line)
+            if pat and pat["total_trips"] >= 5:
+                rate = pat["overall_rate"]
+                n, k = pat["total_trips"], pat["total_anomalies"]
+                # Repère : l'Isolation Forest est calibrée pour ~5% d'anomalies par
+                # construction (contamination=0.05) — c'est le taux "normal" attendu.
+                if rate <= 0.07:
+                    icon, verdict, color = "🟢", "Ligne en bon état", "normal"
+                elif rate <= 0.15:
+                    icon, verdict, color = "🟡", "Ligne à surveiller", "off"
+                else:
+                    icon, verdict, color = "🔴", "Ligne à risque élevé", "inverse"
+                with st.container(border=True):
+                    vc = st.columns([2, 1, 1])
+                    vc[0].markdown(f"### {icon} {verdict}")
+                    vc[0].caption(f"Ligne {line} · {company} — basé sur {n} trajets analysés.")
+                    vc[1].metric("Taux d'anomalie", f"{rate*100:.1f} %",
+                                delta=f"{(rate-0.05)*100:+.1f} pts vs. taux normal (5 %)",
+                                delta_color=color)
+                    vc[2].metric("Trajets signalés", f"{k} / {n}")
+            elif pat:
+                st.info(f"Ligne {line} : seulement {pat['total_trips']} trajet(s) enregistré(s) "
+                       f"— pas assez de données pour juger l'état général de la ligne.")
 
         # Bus is optional — "Tous les bus" analyses the whole line
         bus_opts = ["Tous les bus"] + [str(b) for b in (get_buses_for_line(company, line) if line else [])]
@@ -637,27 +816,33 @@ elif selected == "Détection d'anomalies":
                 st.markdown("---")
                 # ── Cartes d'alerte ──────────────────────────────────────────
                 st.markdown("##### Trajets signalés")
-                render_alert_cards(res["anomalies"])
+                filtered_ex = category_filter(res["anomalies"], key="an_ex_cat")
+                render_alert_cards(filtered_ex, detail_company=company)
 
                 # ── Détail par trajet ─────────────────────────────────────────
                 st.markdown("---")
                 st.markdown("##### Analyse détaillée d'un trajet")
-                st.caption("Sélectionnez un trajet ci-dessous pour voir la carte de ses arrêts, le graphique d'immobilisation et le tableau complet arrêt par arrêt.")
 
-                trip_labels = [
-                    f"Bus {a['bus']} · {fmt_day(a['day'])} · {a['dir']} · score {a['anomaly_strength']:.2f}"
-                    for a in res["anomalies"]
-                ]
-                sel_idx = st.selectbox(
-                    "Trajet à analyser :", range(len(trip_labels)),
-                    format_func=lambda i: trip_labels[i],
-                    key="an_ex_trip_sel",
-                )
-                sel = res["anomalies"][sel_idx]
+                if not filtered_ex:
+                    st.info("Aucun trajet ne correspond au filtre sélectionné ci-dessus.")
+                    sel, seq_list = None, []
+                else:
+                    st.caption("Sélectionnez un trajet ci-dessous pour voir la carte de ses arrêts, le graphique d'immobilisation et le tableau complet arrêt par arrêt.")
 
-                # Fetch per-trip sequence on demand (cached)
-                detail = get_trip_detail(company, line, sel["bus"], sel["day"], sel["trip_id"])
-                seq_list = (detail or {}).get("sequence", [])
+                    trip_labels = [
+                        f"Bus {a['bus']} · {fmt_day(a['day'])} · {a['dir']} · score {a['anomaly_strength']:.2f}"
+                        for a in filtered_ex
+                    ]
+                    sel_idx = st.selectbox(
+                        "Trajet à analyser :", range(len(trip_labels)),
+                        format_func=lambda i: trip_labels[i],
+                        key="an_ex_trip_sel",
+                    )
+                    sel = filtered_ex[sel_idx]
+
+                    # Fetch per-trip sequence on demand (cached)
+                    detail = get_trip_detail(company, line, sel["bus"], sel["day"], sel["trip_id"])
+                    seq_list = (detail or {}).get("sequence", [])
 
                 if seq_list:
                     seq = pd.DataFrame(seq_list)
@@ -679,66 +864,8 @@ elif selected == "Détection d'anomalies":
                     tc[3].caption("Score calculé par le modèle Isolation Forest. Plus il est élevé, plus le comportement du bus s'écarte de la normale.")
 
                     # ── Carte des arrêts ──────────────────────────────────────
-                    map_rows = [s for s in seq_list if s.get("lat") and s.get("lon")]
-                    if map_rows:
-                        st.markdown("###### Carte du trajet")
-                        st.caption(
-                            "Chaque cercle représente un arrêt. La taille reflète la durée d'immobilisation + perte de signal. "
-                            "🟢 Normal · 🔵 Immobilisation longue (≥10 min) · 🟡 Perte de signal (≥5 min) · 🔴 Arrêt non desservi (bus jamais passé)"
-                        )
-                        mdf = pd.DataFrame(map_rows)
-
-                        def _scolor(row):
-                            if not row["matched"]: return "#ef4444"
-                            if row.get("dark_min", 0) >= 5: return "#f59e0b"
-                            if row.get("dwell_min", 0) >= 10: return "#2563eb"
-                            return "#22c55e"
-
-                        mdf["color"] = mdf.apply(_scolor, axis=1)
-                        mdf["msize"] = (mdf["dwell_min"] + mdf.get("dark_min", 0)).clip(8, 28)
-                        mdf["hover"] = (
-                            "<b>" + mdf["seq"].astype(str) + " : " + mdf["stop"] + "</b><br>" +
-                            "Immobilisation réelle : " + mdf["dwell_min"].apply(lambda v: f"{v:.1f} min") + "<br>" +
-                            "Signal perdu : " + mdf["dark_min"].apply(lambda v: f"{v:.1f} min") + "<br>" +
-                            "Distance de l'arrêt attendu : " + mdf["dist_m"].apply(lambda v: f"{v:.0f} m") + "<br>" +
-                            "Suivi GPS : " + mdf["matched"].map({True: "Oui", False: "Non"})
-                        )
-
-                        fig_map = go.Figure()
-                        fig_map.add_trace(go.Scattermapbox(
-                            lat=mdf["lat"].tolist(), lon=mdf["lon"].tolist(),
-                            mode="lines", line=dict(width=3, color="#94a3b8"),
-                            name="Itinéraire prévu", hoverinfo="skip",
-                        ))
-                        for color, label in [
-                            ("#22c55e", "Arrêt normal"),
-                            ("#2563eb", "Immobilisation longue"),
-                            ("#f59e0b", "Perte de signal GPS"),
-                            ("#ef4444", "Arrêt non desservi"),
-                        ]:
-                            sub = mdf[mdf["color"] == color]
-                            if sub.empty:
-                                continue
-                            fig_map.add_trace(go.Scattermapbox(
-                                lat=sub["lat"].tolist(), lon=sub["lon"].tolist(),
-                                mode="markers",
-                                marker=dict(size=sub["msize"].tolist(), color=color),
-                                name=label,
-                                text=sub["hover"].tolist(),
-                                hovertemplate="%{text}<extra></extra>",
-                            ))
-                        fig_map.update_layout(
-                            mapbox=dict(
-                                style="open-street-map",
-                                center=dict(lat=float(mdf["lat"].mean()), lon=float(mdf["lon"].mean())),
-                                zoom=10,
-                            ),
-                            margin=dict(l=0, r=0, t=0, b=0), height=500,
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                        )
-                        st.plotly_chart(fig_map, use_container_width=True)
-                    else:
-                        st.info("Coordonnées GPS non disponibles pour les arrêts de cette ligne.")
+                    st.markdown("###### Carte du trajet")
+                    render_trip_map(seq_list, key="an_ex_detail_map", direction=sel.get("dir"))
 
                     # ── Graphique immobilisation par arrêt ────────────────────
                     st.markdown("###### Immobilisation et perte de signal par arrêt")
@@ -783,7 +910,7 @@ elif selected == "Détection d'anomalies":
                     tbl["dark_min"] = tbl["dark_min"].apply(lambda v: f"{v:.1f} min" if v > 0 else "—")
                     tbl.columns = ["Arrêt", "Suivi GPS", "Immob. réelle", "Signal perdu", "Distance arrêt"]
                     st.dataframe(tbl, hide_index=True, use_container_width=True)
-                else:
+                elif sel is not None:
                     st.info("Aucune donnée de séquence disponible pour ce trajet.")
 
     with tab_patterns:

@@ -1,0 +1,23 @@
+# WiniCari AI layer — SLIM anomaly-only deployment (free tiers: Render, etc.).
+# Pair with ENABLED_MODULES=anomaly. No torch (src/models/anomaly.py degrades
+# gracefully: Isolation Forest live scoring + the precomputed LSTM scores already in
+# trips_scored.parquet), no prophet, no chatbot stack — resident RAM ~200-250 MB vs
+# ~1-1.5 GB for the full layer, which is what makes a 512 MB free instance viable.
+# See docs/DEPLOYMENT.md § "Render / free-tier (anomaly only)".
+
+# API / serving
+fastapi==0.138.0
+uvicorn==0.49.0
+pydantic==2.13.4
+
+# Data (pymongo stays: src/data/db.py + foundation.py import it at module level;
+# the anomaly endpoints never open a Mongo connection at runtime)
+pymongo==4.17.0
+pandas==2.3.3
+numpy==2.4.6
+pyarrow==24.0.0
+python-dotenv==1.2.2
+
+# Modeling — Isolation Forest only
+scikit-learn==1.9.0
+joblib==1.5.3

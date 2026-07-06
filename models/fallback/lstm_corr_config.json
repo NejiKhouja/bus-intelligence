@@ -1,1 +1,1 @@
-{"window": 40, "n_feats": 4, "hidden": 32, "n_days": 50, "n_pings": 22203}
+{"window": 10, "n_feats": 4, "hidden": 32, "n_days": 5, "n_pings": 3929}

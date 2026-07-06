@@ -437,9 +437,24 @@ def derive_arrivals(g: pd.DataFrame, trip: pd.Series, stops: pd.DataFrame, cfg: 
             d_arr, j_local, matched = np.inf, None, False
         else:
             d = haversine(lat[ptr:], lon[ptr:], st["lat"], st["lon"])
-            j_local = int(np.argmin(d)) + ptr
-            d_arr = float(d.min())
-            matched = d_arr <= cfg.arrival_thresh_m
+            # Premier passage dans le rayon, pas le minimum global : le minimum global
+            # peut tomber tard dans le trajet (bruit GPS près des terminus, géométrie
+            # en aller-retour) et faire sauter `ptr` au-delà des pings nécessaires aux
+            # arrêts suivants — qui deviennent alors tous « non desservis » à tort.
+            within = np.where(d <= cfg.arrival_thresh_m)[0]
+            if len(within):
+                k0 = int(within[0])                     # premier ping dans le rayon
+                k1 = k0                                 # fin de la fenêtre contiguë
+                while k1 + 1 < len(d) and d[k1 + 1] <= cfg.arrival_thresh_m:
+                    k1 += 1
+                k_best = k0 + int(np.argmin(d[k0:k1 + 1]))   # ping le plus proche de CE passage
+                j_local = k_best + ptr
+                d_arr = float(d[k_best])
+                matched = True
+            else:
+                j_local = None
+                d_arr = float(d.min())
+                matched = False
 
         departure, dwell_s, dark_s, had_gap = pd.NaT, None, 0.0, False
         if matched:

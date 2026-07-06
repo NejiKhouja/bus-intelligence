@@ -40,6 +40,27 @@ _model_version_info = mv.read_version_file()
 API_KEY = os.getenv("API_KEY")  # None = auth désactivée (dev local uniquement)
 ENABLE_CHATBOT = os.getenv("ENABLE_CHATBOT", "false").lower() == "true"
 
+# Sélection des modules à charger : ENABLED_MODULES="anomaly" ou "delay,anomaly" ou "all".
+# Défaut = comportement historique (tout sauf le chatbot, qui reste piloté par
+# ENABLE_CHATBOT pour compatibilité). Un module non chargé ne coûte AUCUNE RAM : les
+# imports lourds (torch, prophet, chromadb...) sont locaux aux fonctions load() de chaque
+# module — c'est ce qui permet un déploiement anomaly-only sur 512 Mo (voir DEPLOYMENT.md).
+ALL_MODULES = ("delay", "fallback", "anomaly", "chatbot")
+_modules_env = os.getenv("ENABLED_MODULES", "").strip().lower()
+if _modules_env in ("", None):
+    ENABLED_MODULES = {"delay", "fallback", "anomaly"} | ({"chatbot"} if ENABLE_CHATBOT else set())
+elif _modules_env == "all":
+    ENABLED_MODULES = set(ALL_MODULES)
+else:
+    ENABLED_MODULES = {m.strip() for m in _modules_env.split(",") if m.strip()}
+    _unknown = ENABLED_MODULES - set(ALL_MODULES)
+    if _unknown:
+        print(f"  ! ENABLED_MODULES contient des modules inconnus, ignorés : {sorted(_unknown)} "
+              f"(valides : {', '.join(ALL_MODULES)})")
+        ENABLED_MODULES -= _unknown
+    if ENABLE_CHATBOT:
+        ENABLED_MODULES.add("chatbot")
+
 _allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
 if _allowed_origins_env:
     ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
@@ -96,6 +117,7 @@ class ModelManager:
     _foundation_data = None
     _stops_data = {}
     _stop_coords = {}   # f"{societe}_{line}" -> {stop_name: (lat, lon)}
+    _stop_reliability = {}   # f"{societe}_{line}" -> {stop_name: chronic match rate}
     _latest_day = None
 
     def __new__(cls):
@@ -146,22 +168,18 @@ class ModelManager:
         except Exception as e:
             print(f"Failed to load foundation data: {e}")
 
-        model_names = ["delay", "fallback", "anomaly"]
-        if ENABLE_CHATBOT:
-            model_names.append("chatbot")
-        else:
-            print("  - Chatbot disabled (ENABLE_CHATBOT=false) -- skipped, not loaded")
+        loaders = {"delay": delay.load, "fallback": gps_fallback.load,
+                   "anomaly": anomaly.load, "chatbot": chatbot.load}
+        disabled = [m for m in ALL_MODULES if m not in ENABLED_MODULES]
+        if disabled:
+            print(f"  - Modules désactivés (ENABLED_MODULES) : {', '.join(disabled)} "
+                  f"-- non chargés, leurs endpoints répondront 503")
 
-        for model_name in model_names:
+        for model_name in ALL_MODULES:
+            if model_name not in ENABLED_MODULES:
+                continue
             try:
-                if model_name == "delay":
-                    self._models[model_name] = delay.load()
-                elif model_name == "fallback":
-                    self._models[model_name] = gps_fallback.load()
-                elif model_name == "anomaly":
-                    self._models[model_name] = anomaly.load()
-                elif model_name == "chatbot":
-                    self._models[model_name] = chatbot.load()
+                self._models[model_name] = loaders[model_name]()
                 print(f"{model_name.capitalize()} models loaded")
             except Exception as e:
                 print(f"Failed to load {model_name} models: {e}")
@@ -170,6 +188,9 @@ class ModelManager:
 
     def get(self, model_name: str) -> Dict:
         if model_name not in self._models:
+            if model_name not in ENABLED_MODULES:
+                raise KeyError(f"Module '{model_name}' désactivé sur ce déploiement "
+                               f"(ENABLED_MODULES={','.join(sorted(ENABLED_MODULES))})")
             raise KeyError(f"Model '{model_name}' not loaded")
         return self._models[model_name]
 
@@ -183,6 +204,27 @@ class ModelManager:
     def get_stop_coords(self, societe: str, line: str) -> dict:
         """Maps stop_name -> (lat, lon) for a given line."""
         return self._stop_coords.get(f"{societe}_{line}", {})
+
+    def get_stop_reliability(self, societe: str, line: str) -> dict:
+        """Maps stop_name -> chronic match rate across ALL trips of the line.
+
+        A stop that is (almost) never matched by any bus over hundreds of trips is
+        not being 'skipped' — its geocoded coordinates are wrong. This lets the API
+        distinguish a genuine 'stop not served' anomaly from a bad-data stop.
+        """
+        key = f"{societe}_{line}"
+        if key not in self._stop_reliability and self._foundation_data is not None:
+            sub = self._foundation_data[
+                (self._foundation_data["societe"] == societe) &
+                (self._foundation_data["line"] == line)
+            ]
+            grp = sub.groupby("stop")["matched"].agg(["mean", "size"])
+            # Only judge stops with enough observations to be statistically meaningful
+            self._stop_reliability[key] = {
+                str(stop): float(row["mean"])
+                for stop, row in grp.iterrows() if row["size"] >= 20
+            }
+        return self._stop_reliability.get(key, {})
 
     def get_latest_day(self) -> Optional[str]:
         """Demo 'today' most recent day present in the foundation data."""
@@ -302,6 +344,7 @@ async def health_check():
         "status": "healthy",
         "models_loaded": model_manager.is_loaded(),
         "models": model_manager.get_loaded_models(),
+        "enabled_modules": sorted(ENABLED_MODULES),
         "foundation_data": df is not None,
         "rows": len(df) if df is not None else 0,
         "latest_day": model_manager.get_latest_day(),
@@ -473,7 +516,7 @@ async def get_route_info(
     bus_data = df[
         (df["societe"] == societe) &
         (df["line"] == line) &
-        (df["bus"] == str(bus)) &
+        (df["bus"].astype(str) == str(bus)) &
         (df["day"] == day)
     ].sort_values("trip_start")
     
@@ -540,7 +583,7 @@ async def get_bus_status(
     bus_data = df[
         (df["societe"] == societe) &
         (df["line"] == line) &
-        (df["bus"] == str(bus)) &
+        (df["bus"].astype(str) == str(bus)) &
         (df["day"] == day)
     ].sort_values("trip_start")
     
@@ -609,7 +652,7 @@ def _filter_trips(societe: str, line: Optional[str] = None,
     if line:
         mask &= trips["line"] == line
     if bus is not None:
-        mask &= trips["bus"] == str(bus)
+        mask &= trips["bus"].astype(str) == str(bus)
     if day:
         mask &= trips["day"] == day
     return models, trips[mask].copy()
@@ -641,6 +684,7 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
             "severity": str(r["severity"]),
             "anomaly_strength": float(r["anomaly_strength"]),
             "reasons": list(r["reasons"]),
+            "top_feature": r.get("top_feature"),
             "max_dwell_min": round(float(r["max_dwell_s"]) / 60, 1),
             "max_dark_min": round(float(r.get("max_dark_s", 0) or 0) / 60, 1),
             "worst_dwell_stop": r.get("worst_dwell_stop"),
@@ -773,12 +817,18 @@ async def get_current_anomalies(
 
 
 def _trip_sequence(df, societe, line, bus, day, trip_id):
-    """Per-stop sequence rows for one trip, with lat/lon for map rendering."""
+    """Per-stop sequence rows for one trip, with lat/lon for map rendering.
+
+    `coord_suspect` marks stops that are unmatched on (almost) every trip of the
+    line — the stop's geocoded coordinates are wrong, so an unmatched flag there
+    says nothing about THIS trip.
+    """
     seqdf = df[
-        (df["societe"] == societe) & (df["line"] == line) & (df["bus"] == str(bus)) &
+        (df["societe"] == societe) & (df["line"] == line) & (df["bus"].astype(str) == str(bus)) &
         (df["day"] == day) & (df["trip_id"] == trip_id)
     ].sort_values("seq")
     coord_map = model_manager.get_stop_coords(societe, line)
+    reliability = model_manager.get_stop_reliability(societe, line)
     seq = []
     for _, s in seqdf.iterrows():
         dwell = float(s["dwell_s"]) if pd.notna(s.get("dwell_s")) else 0.0
@@ -793,6 +843,7 @@ def _trip_sequence(df, societe, line, bus, day, trip_id):
             "had_gap":   bool(s.get("had_gap", False)),
             "dist_m": round(dist, 0),
             "matched": bool(s["matched"]),
+            "coord_suspect": reliability.get(stop_name, 1.0) < 0.10,
             "lat": lat,
             "lon": lon,
         })
@@ -815,10 +866,16 @@ def _problem_stops(seq):
         out["signal_loss_stop"] = {"stop": worst_gap["stop"],
                                    "dark_min": worst_gap["dark_min"]}
         out["signal_loss_count"] = len(gap_stops)
-    offroute = [s["stop"] for s in seq if not s["matched"]]
+    # Genuinely unserved stops only — chronically-unmatched stops (bad coordinates)
+    # would otherwise appear as "non desservi" on every single trip of the line.
+    offroute = [s["stop"] for s in seq if not s["matched"] and not s.get("coord_suspect")]
     if offroute:
         out["off_route_stops"] = offroute[:5]
         out["off_route_count"] = len(offroute)
+    suspect = [s["stop"] for s in seq if s.get("coord_suspect")]
+    if suspect:
+        out["suspect_coord_stops"] = suspect[:5]
+        out["suspect_coord_count"] = len(suspect)
     # Only flag matched stops that were still far — unmatched stops trivially have large dist_m
     # (they were simply never reached), and that info is already in off_route_stops.
     far = [s for s in seq if s["matched"] and s["dist_m"] >= 800]
@@ -1054,7 +1111,7 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
                 (foundation["day"] == request.day) &
                 (foundation["line"] == request.line) &
                 (foundation["societe"] == request.societe) &
-                (foundation["bus"] == str(request.bus))
+                (foundation["bus"].astype(str) == str(request.bus))
             ]
             if len(exists) == 0:
                 available = foundation[
@@ -1080,7 +1137,7 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
                 (foundation["day"] == request.day) &
                 (foundation["line"] == request.line) &
                 (foundation["societe"] == request.societe) &
-                (foundation["bus"] == str(request.bus))
+                (foundation["bus"].astype(str) == str(request.bus))
             ]
             
             if len(foundation_data) > 0:
@@ -1144,8 +1201,8 @@ async def chatbot_ask(request: ChatbotRequest):
             "tokens_used": result.get("tokens_used", 0)
         }
     except KeyError:
-        detail = ("Chatbot disabled in this deployment (ENABLE_CHATBOT=false)"
-                  if not ENABLE_CHATBOT else "Chatbot models not loaded")
+        detail = ("Chatbot disabled in this deployment (see ENABLED_MODULES / ENABLE_CHATBOT)"
+                  if "chatbot" not in ENABLED_MODULES else "Chatbot models not loaded")
         raise HTTPException(status_code=503, detail=detail)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1401,7 +1458,7 @@ def _bus_status_at(societe: str, line: str, bus: int, day: str,
     if df is None:
         return None
     sub = df[(df["societe"] == societe) & (df["line"] == line) &
-             (df["bus"] == str(bus)) & (df["day"] == day)].copy()
+             (df["bus"].astype(str) == str(bus)) & (df["day"] == day)].copy()
     if len(sub) == 0:
         return None
 

@@ -43,6 +43,7 @@ from pymongo import MongoClient
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 from src.data import foundation as fdn
+from src.data import reference_db as rdb
 
 ROOT = Path(__file__).resolve().parents[2]
 SHARD_DIR = ROOT / "data" / "processed" / "shards"
@@ -52,10 +53,17 @@ OUT = ROOT / "data" / "processed" / "foundation_arrivals_full.parquet"
 def build(since: str = None, until: str = None, mongo_url: str = "mongodb://localhost:27017"):
     cfg = fdn.Config()
     client = MongoClient(mongo_url, serverSelectionTimeoutMS=8000)
-    win, gps = client["winicari"], client["Historique_pos"]
+    gps = client["Historique_pos"]
 
     SHARD_DIR.mkdir(parents=True, exist_ok=True)
-    usable = fdn.build_usable_lines(win, cfg)
+    # Géométrie de ligne/arrêts depuis la reference DB (résolution 6 niveaux, 216 lignes) au
+    # lieu de fdn.build_usable_lines (3 niveaux ad-hoc sur Mongo en direct, 143 lignes) --
+    # même trip-reconstruction ensuite (reconstruct_bus_day), juste de meilleures coordonnées.
+    conn = rdb.init_db()
+    try:
+        usable = rdb._usable_lines_from_line_stops(conn)
+    finally:
+        conn.close()
     days = fdn.gps_days(gps, cfg)
     months = sorted({d[1:7] for d in days})
     if since:

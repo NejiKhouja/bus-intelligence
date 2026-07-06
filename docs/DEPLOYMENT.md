@@ -157,9 +157,65 @@ MONGO_URL=mongodb://<real-mongo-host>:27017   # shape A: usually mongodb://local
 API_KEY=<generate a long random secret, e.g. `openssl rand -hex 32`>
 ALLOWED_ORIGINS=https://your-php-platform-domain.tn
 API_DOMAIN=api.yourdomain.tn      # only used by caddy -- irrelevant in shape A, no caddy there
+ENABLED_MODULES=                  # empty = delay,fallback,anomaly (see next section)
 ENABLE_CHATBOT=false
 GROQ_API_KEY=            # unused while chatbot is disabled, leave blank
 ```
+
+### Choosing which modules to load — `ENABLED_MODULES`
+
+Whoever deploys this repo picks the modules; nothing else changes. Valid names:
+`delay`, `fallback`, `anomaly`, `chatbot` (comma-separated), or `all`.
+
+```bash
+ENABLED_MODULES=                    # unset/empty -> delay,fallback,anomaly (historic default;
+                                    #   chatbot still controlled by ENABLE_CHATBOT for back-compat)
+ENABLED_MODULES=anomaly             # anomaly-only (free-tier deployments, see below)
+ENABLED_MODULES=delay,anomaly       # any subset
+ENABLED_MODULES=all                 # everything incl. chatbot (needs GROQ_API_KEY)
+```
+
+What a disabled module costs: **nothing**. The heavy libraries (torch, prophet,
+chromadb/sentence-transformers) are imported lazily inside each module's `load()`, so a
+module that isn't in the list never brings its stack into memory. Its endpoints return
+`503` with an explicit "module disabled" message; `/health` reports both
+`enabled_modules` (config) and `models` (actually loaded) so you can tell a disabled
+module from a failed load at a glance. Dev is unaffected: with nothing set you get the
+same three modules as before, and the dashboard tabs for any disabled module just show
+their normal "API unavailable" state.
+
+One nuance for slim installs: with `requirements-anomaly.txt` (no torch), the anomaly
+module itself degrades gracefully — Isolation Forest handles live scoring, and the LSTM
+scores served from `trips_scored.parquet` are the ones precomputed at training time.
+Install the full `requirements.txt` if you want live LSTM-AE rescoring too.
+
+## 2bis. Hosting without a company VM (free tiers)
+
+If the company can't provide a VM, two realistic free paths, in order of preference:
+
+**Oracle Cloud "Always Free" (recommended — it IS the VM, just yours):** the Always
+Free tier includes up to 4 ARM (Ampere A1) OCPUs + 24 GB RAM permanently — not the
+30-day $300 trial credit, which is separate and one-time. That's enough for the FULL
+layer (`ENABLED_MODULES=all` minus chatbot if you like) using the normal Shape B steps
+above — nothing special needed, it's just a VPS you don't pay for. Caveats: ARM capacity
+is often "out of stock" in popular regions (retry / pick another home region at signup —
+the home region cannot be changed later), and torch/prophet install fine on aarch64.
+Live GPS fallback still requires network access to the company MongoDB from the VM —
+that's a data-access question for the company, not a hosting one.
+
+**Render (or similar PaaS) free tier — anomaly only:** 512 MB RAM rules out the full
+stack, but the anomaly module needs no torch, no prophet, and **no MongoDB at runtime**
+(it serves from static artifacts baked into the image). Use the dedicated image:
+
+```bash
+docker build -f Dockerfile.render -t winicari-anomaly .   # ENABLED_MODULES=anomaly baked in
+```
+
+On Render: "New Web Service" -> connect the repo -> Docker runtime -> point it at
+`Dockerfile.render`, and set `API_KEY`/`ALLOWED_ORIGINS` in the Render env settings.
+Artifacts are COPYed into the image (free tier has no persistent disk), so refreshing
+models = retrain locally, commit/push artifacts, redeploy — same workflow as §6.
+Expect ~200-250 MB resident and a cold start of ~30-60 s after the 15-min idle spin-down.
 
 Give the `API_KEY` value to the PHP team out-of-band (not via a ticket/chat that gets
 logged in plaintext forever) — it's what `docs/PHP_INTEGRATION.md` expects in the

@@ -182,9 +182,19 @@ def train(foundation_path: str | Path,
 
 # Chargement
 def load(save_dir: str | Path = SAVE_DIR) -> dict:
-    """Charge les modèles d'anomalie entraînés depuis save_dir."""
+    """Charge les modèles d'anomalie entraînés depuis save_dir.
+
+    Fonctionne aussi SANS torch installé (déploiement slim, voir
+    requirements-anomaly.txt) : l'autoencodeur LSTM est alors ignoré et seul
+    l'Isolation Forest sert au scoring en ligne. Les scores LSTM PRÉ-CALCULÉS de
+    trips_scored.parquet restent disponibles — ils datent de l'entraînement.
+    """
     import joblib
-    import torch
+    try:
+        import torch
+    except ImportError:
+        torch = None
+        print("  torch non installé -- autoencodeur LSTM ignoré (scoring IF uniquement)")
 
     save_dir = Path(save_dir)
 
@@ -207,41 +217,44 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     global_sc = np.load(save_dir / "if_scaler.npz")
     if_models["_global"] = (global_m, global_sc["mean"], global_sc["std"])
 
-    # LSTM AE par société (+ repli global) -- même schéma que l'IF
+    # LSTM AE par société (+ repli global) -- même schéma que l'IF ; sauté sans torch
     lstm_models: dict[str, tuple] = {}
-    lstm_index_path = save_dir / "lstm_company_models.json"
-    if lstm_index_path.exists():
-        with open(lstm_index_path) as f:
-            lstm_company_index = json.load(f)
-        for safe, soc in lstm_company_index.items():
-            cfg_path = save_dir / f"{safe}_lstm_ae_config.json"
-            model_path = save_dir / f"{safe}_lstm_ae.pt"
-            thr_path = save_dir / f"{safe}_lstm_threshold.npy"
-            if cfg_path.exists() and model_path.exists() and thr_path.exists():
-                with open(cfg_path) as f:
-                    ae_cfg_soc = json.load(f)
-                m = _an._make_lstm_autoencoder(ae_cfg_soc["seq_pad"], ae_cfg_soc["n_feats"], ae_cfg_soc["hidden"])
-                m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
-                m.eval()
-                lstm_models[soc] = (m, float(np.load(thr_path)))
+    lstm_ae, threshold = None, None
+    if torch is not None:
+        lstm_index_path = save_dir / "lstm_company_models.json"
+        if lstm_index_path.exists():
+            with open(lstm_index_path) as f:
+                lstm_company_index = json.load(f)
+            for safe, soc in lstm_company_index.items():
+                cfg_path = save_dir / f"{safe}_lstm_ae_config.json"
+                model_path = save_dir / f"{safe}_lstm_ae.pt"
+                thr_path = save_dir / f"{safe}_lstm_threshold.npy"
+                if cfg_path.exists() and model_path.exists() and thr_path.exists():
+                    with open(cfg_path) as f:
+                        ae_cfg_soc = json.load(f)
+                    m = _an._make_lstm_autoencoder(ae_cfg_soc["seq_pad"], ae_cfg_soc["n_feats"], ae_cfg_soc["hidden"])
+                    m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+                    m.eval()
+                    lstm_models[soc] = (m, float(np.load(thr_path)))
 
-    with open(save_dir / "lstm_ae_config.json") as f:
-        ae_cfg = json.load(f)
-    lstm_ae = _an._make_lstm_autoencoder(
-        ae_cfg["seq_pad"], ae_cfg["n_feats"], ae_cfg["hidden"]
-    )
-    lstm_ae.load_state_dict(torch.load(save_dir / "lstm_ae.pt", map_location="cpu",
-                                       weights_only=True))
-    lstm_ae.eval()
+        with open(save_dir / "lstm_ae_config.json") as f:
+            ae_cfg = json.load(f)
+        lstm_ae = _an._make_lstm_autoencoder(
+            ae_cfg["seq_pad"], ae_cfg["n_feats"], ae_cfg["hidden"]
+        )
+        lstm_ae.load_state_dict(torch.load(save_dir / "lstm_ae.pt", map_location="cpu",
+                                           weights_only=True))
+        lstm_ae.eval()
 
-    threshold = float(np.load(save_dir / "lstm_ae_threshold.npy"))
-    lstm_models["_global"] = (lstm_ae, threshold)
+        threshold = float(np.load(save_dir / "lstm_ae_threshold.npy"))
+        lstm_models["_global"] = (lstm_ae, threshold)
+
     trips = pd.read_parquet(save_dir / "trips_scored.parquet")
 
     n_co = len(if_models) - 1
-    n_co_lstm = len(lstm_models) - 1
-    print(f"Modèles d'anomalie chargés ({n_co} opérateur(s) IF + {n_co_lstm} opérateur(s) LSTM + "
-          f"repli global, seuil IF global={threshold:.5f})")
+    n_co_lstm = max(len(lstm_models) - 1, 0)
+    lstm_note = f"{n_co_lstm} opérateur(s) LSTM" if torch is not None else "LSTM désactivé (pas de torch)"
+    print(f"Modèles d'anomalie chargés ({n_co} opérateur(s) IF + {lstm_note} + repli global)")
     return {
         "if_models": if_models,
         # backward-compat keys used by explain_trips fallback
@@ -273,10 +286,13 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
 
     trips = pd.concat(parts, ignore_index=True) if parts else trips
 
-    # Score LSTM par société (modèle dédié si disponible, sinon repli global)
-    lstm_models = models.get("lstm_models", {"_global": (models["lstm_ae"], models["threshold"])})
+    # Score LSTM par société (modèle dédié si disponible, sinon repli global).
+    # Vide en déploiement slim sans torch -> scoring IF uniquement.
+    lstm_models = models.get("lstm_models") or (
+        {"_global": (models["lstm_ae"], models["threshold"])}
+        if models.get("lstm_ae") is not None else {})
     lstm_rows = []
-    for soc, soc_fa in fa.groupby("societe"):
+    for soc, soc_fa in (fa.groupby("societe") if lstm_models else ()):
         X, ids = _an.build_sequences(soc_fa, cfg)
         if len(X) == 0:
             continue
