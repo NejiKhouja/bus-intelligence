@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 # Import model modules
-from src.models import delay, gps_fallback, anomaly, chatbot
+from src.models import delay, gps_fallback, anomaly, chatbot, ticket_anomaly
 from src.data import foundation as fdn
 from src.data import reference_db as rdb
 from src.data import model_version as mv
@@ -45,10 +45,11 @@ ENABLE_CHATBOT = os.getenv("ENABLE_CHATBOT", "false").lower() == "true"
 # ENABLE_CHATBOT pour compatibilité). Un module non chargé ne coûte AUCUNE RAM : les
 # imports lourds (torch, prophet, chromadb...) sont locaux aux fonctions load() de chaque
 # module — c'est ce qui permet un déploiement anomaly-only sur 512 Mo (voir DEPLOYMENT.md).
-ALL_MODULES = ("delay", "fallback", "anomaly", "chatbot")
+ALL_MODULES = ("delay", "fallback", "anomaly", "ticket_anomaly", "chatbot")
 _modules_env = os.getenv("ENABLED_MODULES", "").strip().lower()
 if _modules_env in ("", None):
-    ENABLED_MODULES = {"delay", "fallback", "anomaly"} | ({"chatbot"} if ENABLE_CHATBOT else set())
+    ENABLED_MODULES = {"delay", "fallback", "anomaly", "ticket_anomaly"} | (
+        {"chatbot"} if ENABLE_CHATBOT else set())
 elif _modules_env == "all":
     ENABLED_MODULES = set(ALL_MODULES)
 else:
@@ -98,6 +99,21 @@ class AnomalyLiveScoreRequest(BaseModel):
     line: str
     societe: str
     bus: int
+
+class TicketDayRow(BaseModel):
+    """One (societe, line, bus, day) ticket-sales total -- same grain/fields as
+    winicari.details, already aggregated. Filled in by whoever fetched them (your own
+    code calling a company webservice, or the company pushing them directly) -- this
+    endpoint never talks to a database itself, see docs/WEBSERVICES_NEEDED.md."""
+    societe: str
+    line: str
+    bus: str
+    day: str
+    nbr_ticket: int
+    recette: float
+
+class TicketAnomalyScoreRequest(BaseModel):
+    rows: List[TicketDayRow]
 
 class ChatbotRequest(BaseModel):
     query: str
@@ -169,7 +185,8 @@ class ModelManager:
             print(f"Failed to load foundation data: {e}")
 
         loaders = {"delay": delay.load, "fallback": gps_fallback.load,
-                   "anomaly": anomaly.load, "chatbot": chatbot.load}
+                   "anomaly": anomaly.load, "ticket_anomaly": ticket_anomaly.load,
+                   "chatbot": chatbot.load}
         disabled = [m for m in ALL_MODULES if m not in ENABLED_MODULES]
         if disabled:
             print(f"  - Modules désactivés (ENABLED_MODULES) : {', '.join(disabled)} "
@@ -695,6 +712,152 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
             "trip_end": r["trip_end"].isoformat() if pd.notna(r["trip_end"]) else None,
         })
     return rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ticket/billing anomaly -- COMPLEMENTARY signal to the GPS one above, not merged
+# with it. Daily grain (societe, line, bus, day), not per-trip -- see
+# src/data/ticket_anomaly.py for why. Static history comes from days_scored.parquet
+# (computed at training time); score-live takes rows the CALLER already fetched (this
+# deployment never talks to MongoDB itself, see docs/WEBSERVICES_NEEDED.md).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _filter_ticket_days(societe: str, line: Optional[str] = None,
+                        bus: Optional[str] = None, day: Optional[str] = None):
+    """Filter the precomputed scored-days table. Returns (models, days_df)."""
+    models = model_manager.get("ticket_anomaly")
+    days = models["days"]
+    mask = days["societe"] == societe
+    if line:
+        mask &= days["line"] == line
+    if bus is not None:
+        mask &= days["bus"].astype(str) == str(bus)
+    if day:
+        mask &= days["day"] == day
+    return models, days[mask].copy()
+
+
+def _ticket_rows_with_reasons(models, days, anomalies_only: bool = True,
+                              limit: Optional[int] = None) -> List[Dict]:
+    """Attach human-readable reasons to (anomalous) ticket-days and serialize to dicts."""
+    if anomalies_only:
+        days = days[days["anomaly"]]
+    if len(days) == 0:
+        return []
+    # if_score: higher = more normal (score_samples convention) -> most anomalous first
+    ex = ticket_anomaly.explain(models, days).sort_values("if_score")
+    if limit:
+        ex = ex.head(limit)
+    rows = []
+    for _, r in ex.iterrows():
+        rows.append({
+            "societe": r["societe"], "line": r["line"], "bus": str(r["bus"]), "day": r["day"],
+            "nbr_ticket": int(r["nbr_ticket"]),
+            "recette": round(float(r["recette"]), 2),
+            "avg_fare": round(float(r["avg_fare"]), 2),
+            "if_score": round(float(r["if_score"]), 3),
+            "anomaly": bool(r["anomaly"]),
+            "reasons": list(r["reasons"]),
+        })
+    return rows
+
+
+@app.get("/api/ticket-anomaly-history")
+async def ticket_anomaly_history(
+    societe: str,
+    line: Optional[str] = None,
+    bus: Optional[str] = None,
+    limit: int = 30
+):
+    """Historical ticket/billing anomalies (precomputed at training time)."""
+    try:
+        models, days = _filter_ticket_days(societe, line, bus)
+        anomalies = _ticket_rows_with_reasons(models, days, anomalies_only=True, limit=limit)
+        return {"anomalies": anomalies, "total": len(anomalies), "total_days": int(len(days))}
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting ticket anomalies: {str(e)}")
+
+
+@app.get("/api/ticket-anomaly-explain")
+async def ticket_anomaly_explain(
+    societe: str,
+    line: Optional[str] = None,
+    bus: Optional[str] = None,
+    day: Optional[str] = None
+):
+    """All ticket-days for a scope, with anomalies flagged + explained."""
+    try:
+        models, days = _filter_ticket_days(societe, line, bus, day)
+        rows = _ticket_rows_with_reasons(models, days, anomalies_only=False)
+        anomalous = [r for r in rows if r["anomaly"]]
+        return {
+            "societe": societe, "line": line, "bus": bus, "day": day,
+            "days": rows, "anomalies": anomalous,
+            "total_days": len(rows), "anomaly_count": len(anomalous),
+        }
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error explaining ticket anomalies: {str(e)}")
+
+
+@app.get("/api/ticket-anomaly-patterns")
+async def ticket_anomaly_patterns(societe: str, line: Optional[str] = None):
+    """Anomaly-RATE aggregations by line and by bus (no hour/direction -- daily grain)."""
+    try:
+        _models, days = _filter_ticket_days(societe, line)
+        if len(days) == 0:
+            return {"societe": societe, "line": line, "total_days": 0,
+                    "total_anomalies": 0, "overall_rate": 0.0, "by_line": [], "by_bus": []}
+
+        def rate_by(col):
+            g = days.groupby(col).agg(
+                days=("anomaly", "size"), anomalies=("anomaly", "sum")).reset_index()
+            g["anomalies"] = g["anomalies"].astype(int)
+            g["rate"] = (g["anomalies"] / g["days"]).round(3)
+            return g
+
+        by_line = rate_by("line").sort_values("rate", ascending=False)
+        by_bus = rate_by("bus")
+        by_bus = by_bus[by_bus["days"] >= 5].sort_values(
+            ["rate", "anomalies"], ascending=False).head(15)
+
+        return {
+            "societe": societe, "line": line,
+            "total_days": int(len(days)),
+            "total_anomalies": int(days["anomaly"].sum()),
+            "overall_rate": round(float(days["anomaly"].mean()), 3),
+            "by_line": by_line.to_dict("records"),
+            "by_bus": by_bus.to_dict("records"),
+        }
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error computing ticket patterns: {str(e)}")
+
+
+@app.post("/api/ticket-anomaly/score-live")
+async def ticket_anomaly_score_live(request: TicketAnomalyScoreRequest):
+    """Score ticket-days that AREN'T in the precomputed history yet.
+
+    Unlike /api/anomaly/score-live, this never touches a database itself -- pass in
+    rows already fetched from wherever they came from (a company webservice, or your
+    own glue code). See docs/WEBSERVICES_NEEDED.md for the exact source fields.
+    """
+    try:
+        models = model_manager.get("ticket_anomaly")
+        if not request.rows:
+            return {"days": [], "anomaly_count": 0}
+        day_rows = pd.DataFrame([r.model_dump() for r in request.rows])
+        scored = ticket_anomaly.score(models, day_rows)
+        rows = _ticket_rows_with_reasons(models, scored, anomalies_only=False)
+        return {"days": rows, "anomaly_count": sum(1 for r in rows if r["anomaly"])}
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error scoring live ticket data: {str(e)}")
 
 
 @app.post("/api/anomaly/score-live")

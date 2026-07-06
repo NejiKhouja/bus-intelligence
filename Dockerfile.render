@@ -1,7 +1,9 @@
 # WiniCari AI — slim anomaly-only image for free-tier hosting (Render & co.).
 # Differences vs Dockerfile.api:
 #   - requirements-anomaly.txt (no torch/prophet/chatbot stack -> fits 512 MB RAM)
-#   - ENABLED_MODULES=anomaly baked in (delay/fallback/chatbot endpoints answer 503)
+#   - ENABLED_MODULES=anomaly,ticket_anomaly baked in (delay/fallback/chatbot endpoints
+#     answer 503) -- ticket_anomaly is just as light as anomaly (sklearn/joblib only,
+#     no torch), so it comes along for free RAM-wise
 #   - static artifacts COPYed INTO the image (free tiers have no persistent disk;
 #     "retrain locally -> redeploy" is already this project's artifact workflow)
 #   - binds to $PORT, which Render injects at runtime (defaults to 8000 locally)
@@ -21,10 +23,11 @@ COPY src/ ./src/
 # a clone, not your working tree, so COPYing it here would break the build. It's optional:
 # read_version_file() returns None when absent and /health degrades gracefully.
 COPY models/anomaly/ ./models/anomaly/
+COPY models/ticket_anomaly/ ./models/ticket_anomaly/
 COPY data/processed/foundation_arrivals_full.parquet ./data/processed/foundation_arrivals_full.parquet
 COPY data/reference/winicari_reference.db ./data/reference/winicari_reference.db
 
-ENV ENABLED_MODULES=anomaly
+ENV ENABLED_MODULES=anomaly,ticket_anomaly
 
 # $PORT is provided by Render; the ${PORT:-8000} fallback keeps `docker run` working locally
 CMD ["sh", "-c", "uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

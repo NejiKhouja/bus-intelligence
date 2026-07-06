@@ -22,7 +22,6 @@ requirements-dev.txt
 models/delay/
 models/fallback/
 models/cache/
-models/ticket_anomaly/
 data/processed/shards/
 data/processed/chroma_kb/
 data/raw/

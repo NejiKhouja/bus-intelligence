@@ -115,3 +115,22 @@ def score(models: dict, day_rows: pd.DataFrame) -> pd.DataFrame:
         m, mean, std = if_models.get(soc, if_models.get("_global"))
         parts.append(_ta.score_days(m, mean, std, grp))
     return pd.concat(parts, ignore_index=True) if parts else day_rows
+
+
+def explain(models: dict, scored: pd.DataFrame) -> pd.DataFrame:
+    """Ajoute des raisons explicables en langage clair (voir `_ta.explain_days`).
+
+    Comme `anomaly.explain_trips` : compare chaque jour à la normale DE SA PROPRE société
+    quand un modèle dédié existe, sinon replie sur les stats du modèle global -- une
+    société sans historique suffisant pour un IF dédié obtient quand même des raisons.
+    """
+    if_models = models.get("if_models", {})
+    _, g_mean, g_std = if_models.get("_global", (None, None, None))
+    if_mean_by_soc: dict[str, tuple] = {}
+    for soc in scored["societe"].unique():
+        if soc in if_models:
+            _, mean, std = if_models[soc]
+        else:
+            mean, std = g_mean, g_std
+        if_mean_by_soc[soc] = (mean, std)
+    return _ta.explain_days(scored, if_mean_by_soc)
