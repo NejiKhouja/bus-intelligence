@@ -1,0 +1,35 @@
+# Dockerfile.render-specific ignore file. BuildKit prefers <dockerfile>.dockerignore
+# over the shared .dockerignore when building with `-f Dockerfile.render` -- this lets
+# this build keep models/ and data/ visible (it deliberately BAKES specific artifacts
+# into the image, since Render's free tier has no persistent disk) while the shared
+# .dockerignore keeps excluding them entirely for Dockerfile.api (which relies on
+# docker-compose volume mounts instead and must NOT bake them in). See docs/DEPLOYMENT.md.
+
+.env
+.env.*
+
+notebooks/
+src/dashboard/
+docs/
+requirements.txt
+requirements-dev.txt
+.claude
+.git
+.github
+
+# Not COPYed by Dockerfile.render -- excluded here only to keep the upload context
+# small, not for correctness (explicit COPYs below would skip them regardless).
+models/delay/
+models/fallback/
+models/cache/
+models/ticket_anomaly/
+data/processed/shards/
+data/processed/chroma_kb/
+data/raw/
+data/synthetic/
+logs/
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
