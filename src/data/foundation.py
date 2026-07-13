@@ -693,10 +693,17 @@ def _nearest_stop_name(stops: pd.DataFrame, s_val: float) -> str:
     return str(stops.loc[idx, "name"])
 
 
-def reconstruct_bus_day(gps_db: Database, day: str, line: str, societe, bus,
-                        stops: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """Pipeline complet pour un (jour, ligne, societe, bus). Retourne les lignes d'arrivée aux arrêts."""
-    raw = load_pings(gps_db, day, line, bus)
+def reconstruct_bus_day(gps_db: Optional[Database], day: str, line: str, societe, bus,
+                        stops: pd.DataFrame, cfg: Config,
+                        raw_pings: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Pipeline complet pour un (jour, ligne, societe, bus). Retourne les lignes d'arrivée aux arrêts.
+
+    `raw_pings` (optionnel) : pings déjà en main (colonnes t/lat/lon/speed/voyage, même forme
+    que `load_pings`) -- évite la requête MongoDB, pour le scoring en direct depuis des pings
+    fournis par l'appelant (voir api.main /api/anomaly/score-live, qui ne doit PAS dépendre
+    d'un accès MongoDB sur le déploiement slim). `gps_db` peut alors être `None`.
+    """
+    raw = raw_pings if raw_pings is not None else load_pings(gps_db, day, line, bus)
     if len(raw):
         # Rejette les pings dont l'horodatage tombe loin du jour calendaire de la collection
         # (horloges d'appareil corrompues -- constaté : pings estampillés 6 MOIS plus tard

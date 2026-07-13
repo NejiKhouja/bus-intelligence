@@ -94,11 +94,24 @@ class AnomalyRequest(BaseModel):
     societe: str
     bus: Optional[int] = None
 
+class GpsPingRow(BaseModel):
+    """One raw GPS ping. Filled in by whoever fetched them (your own code calling
+    getPingsForDay, see docs/WEBSERVICES_NEEDED.md service 1) -- this endpoint never
+    talks to MongoDB itself, same principle as TicketDayRow below. `t` is an ISO
+    timestamp string; `voyage` is the raw service.voyage field when your source has
+    it (used to disambiguate ALLER/RETOUR), omit it if unavailable."""
+    t: str
+    lat: float
+    lon: float
+    speed: Optional[float] = None
+    voyage: Optional[int] = None
+
 class AnomalyLiveScoreRequest(BaseModel):
     day: str
     line: str
     societe: str
     bus: int
+    pings: List[GpsPingRow]
 
 class TicketDayRow(BaseModel):
     """One (societe, line, bus, day) ticket-sales total -- same grain/fields as
@@ -1348,11 +1361,17 @@ async def ticket_anomaly_score_live(request: TicketAnomalyScoreRequest):
 
 @app.post("/api/anomaly/score-live")
 async def anomaly_score_live(request: AnomalyLiveScoreRequest):
-    """Score a trip in REAL TIME from live GPS pings -- for an in-progress or just-finished
+    """Score a trip in REAL TIME from GPS pings -- for an in-progress or just-finished
     trip that isn't in the precomputed `trips_scored.parquet` yet (see /api/anomaly-history
     for previously-scored trips). Reuses the exact same reconstruction + scoring pipeline
     `populate_trips`/`anomaly.train()` already use, just on-demand for one bus-day instead of
     a full offline batch -- no separate model or logic path.
+
+    Like /api/ticket-anomaly/score-live, this never touches a database itself -- pass in
+    pings already fetched from wherever they came from (getPingsForDay, see
+    docs/WEBSERVICES_NEEDED.md). Fixed 2026-07-13: this used to call MongoDB directly
+    (get_db("Historique_pos")), which doesn't work on a deployment that was specifically
+    set up to avoid a live Mongo dependency -- see reconstruct_bus_day's `raw_pings` param.
     """
     try:
         models = model_manager.get("anomaly")
@@ -1362,10 +1381,18 @@ async def anomaly_score_live(request: AnomalyLiveScoreRequest):
             raise HTTPException(status_code=404, detail=f"Line {request.line} geometry not found")
         stops = usable[key]
 
+        raw_pings = pd.DataFrame([p.model_dump() for p in request.pings])
+        if len(raw_pings):
+            # format="mixed" : constaté sur données réelles -- certains pings ont des
+            # microsecondes ("...T06:00:20.123456"), d'autres non ("...T06:00:20"), un
+            # format unique ferait échouer le parsing dès le premier ping non conforme.
+            raw_pings["t"] = pd.to_datetime(raw_pings["t"], format="mixed")
+            raw_pings = raw_pings.dropna(subset=["t", "lat", "lon"]).sort_values("t").reset_index(drop=True)
+
         cfg = fdn.Config()
-        gps_db = get_db("Historique_pos")
-        fa = fdn.reconstruct_bus_day(gps_db, f"d{request.day}", request.line,
-                                     request.societe, request.bus, stops, cfg)
+        fa = fdn.reconstruct_bus_day(None, f"d{request.day}", request.line,
+                                     request.societe, request.bus, stops, cfg,
+                                     raw_pings=raw_pings)
         if fa.empty:
             raise HTTPException(
                 status_code=404,
