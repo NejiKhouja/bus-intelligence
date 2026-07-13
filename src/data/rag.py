@@ -129,7 +129,12 @@ def build_chroma(docs: list[str], ids: list[str], metas: list[dict],
 
     model = SentenceTransformer(embed_model)
     embeddings = model.encode(docs, show_progress_bar=True, batch_size=64).tolist()
-    col.add(documents=docs, embeddings=embeddings, ids=ids, metadatas=metas)
+    # ChromaDB plafonne un `add` à ~5 461 éléments (constaté : ValueError à 5 761 docs
+    # après l'expansion de la fondation) -- insérer par tranches, pas en un seul appel.
+    chunk = min(5000, getattr(client, "get_max_batch_size", lambda: 5000)())
+    for i in range(0, len(docs), chunk):
+        col.add(documents=docs[i:i+chunk], embeddings=embeddings[i:i+chunk],
+                ids=ids[i:i+chunk], metadatas=metas[i:i+chunk])
     print(f"ChromaDB : {col.count()} documents indexés dans {persist_dir}")
     return col, model
 

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: sans-serif; }
+  #map { width: 100%; height: 560px; }
+  #status { position: absolute; top: 8px; left: 8px; z-index: 5; background: rgba(255,255,255,0.9);
+            padding: 4px 10px; border-radius: 6px; font-size: 13px; color: #b91c1c; display: none; }
+</style>
+</head>
+<body>
+<div id="status"></div>
+<div id="map"></div>
+<script>
+/* ── Pont Streamlit brut (postMessage), sans dépendre d'un CDN externe pour
+   streamlit-component-lib -- protocole stable documenté par Streamlit :
+   componentReady -> le parent commence à envoyer des événements "render" ;
+   setComponentValue -> ce que Python reçoit comme valeur de retour du composant ;
+   setFrameHeight -> ajuste la hauteur de l'iframe. */
+function stSend(type, extra) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*");
+}
+function stSetValue(value) { stSend("streamlit:setComponentValue", {value: value}); }
+
+let currentArgs = null;
+let map, directionsService, directionsRenderer;
+let markers = [];
+let stops = [];  // {lat, lng}
+let lastClearSignal = null;
+let lastUndoSignal = null;
+
+function showStatus(msg) {
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.style.display = msg ? "block" : "none";
+}
+
+function sendState(legs) {
+  stSetValue({stops: stops, legs: legs || null});
+}
+
+function relabelMarkers() {
+  markers.forEach((m, i) => {
+    const label = i === 0 ? "T" : String(i);
+    m.setLabel({text: label, color: "#fff", fontWeight: "bold"});
+  });
+}
+
+function addStop(latLng) {
+  stops.push({lat: latLng.lat(), lng: latLng.lng()});
+  const marker = new google.maps.Marker({
+    position: latLng, map: map,
+    label: {text: stops.length === 1 ? "T" : String(stops.length - 1), color: "#fff", fontWeight: "bold"},
+    draggable: false,
+  });
+  markers.push(marker);
+  if (directionsRenderer) directionsRenderer.setDirections({routes: []});
+  sendState(null);
+}
+
+function undoStop() {
+  if (!stops.length) return;
+  stops.pop();
+  const m = markers.pop();
+  if (m) m.setMap(null);
+  if (directionsRenderer) directionsRenderer.setDirections({routes: []});
+  sendState(null);
+}
+
+function clearStops() {
+  stops = [];
+  markers.forEach(m => m.setMap(null));
+  markers = [];
+  if (directionsRenderer) directionsRenderer.setDirections({routes: []});
+  sendState(null);
+}
+
+function computeDirections() {
+  if (stops.length < 2) { sendState(null); return; }
+  const origin = stops[0];
+  const destination = stops[stops.length - 1];
+  const waypoints = stops.slice(1, -1).map(s => ({location: new google.maps.LatLng(s.lat, s.lng), stopover: true}));
+  directionsService.route({
+    origin: origin, destination: destination, waypoints: waypoints,
+    optimizeWaypoints: false, travelMode: google.maps.TravelMode.DRIVING,
+  }, (result, status) => {
+    if (status === "OK") {
+      directionsRenderer.setDirections(result);
+      const legs = result.routes[0].legs.map(l => ({
+        distance_m: l.distance ? l.distance.value : null,
+        duration_s: l.duration ? l.duration.value : null,
+      }));
+      showStatus("");
+      sendState(legs);
+    } else {
+      showStatus("Itinéraire indisponible (" + status + ") -- vérifiez la clé/les quotas API.");
+      sendState(null);
+    }
+  });
+}
+
+function initMap() {
+  const center = {lat: currentArgs.center_lat, lng: currentArgs.center_lon};
+  map = new google.maps.Map(document.getElementById("map"), {
+    center: center, zoom: 8, streetViewControl: false, mapTypeControl: false,
+  });
+  directionsRenderer = new google.maps.DirectionsRenderer({map: map, suppressMarkers: true});
+  directionsService = new google.maps.DirectionsService();
+  stSend("streamlit:setFrameHeight", {height: 580});
+
+  (currentArgs.existing_stops || []).forEach(s => addStop(new google.maps.LatLng(s.lat, s.lng)));
+
+  map.addListener("click", (e) => addStop(e.latLng));
+}
+
+function loadGoogleMaps(apiKey) {
+  if (window.google && window.google.maps) { initMap(); return; }
+  const script = document.createElement("script");
+  script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(apiKey) + "&callback=__routeMapInit";
+  script.async = true;
+  script.onerror = () => showStatus("Échec du chargement de Google Maps -- clé API invalide ?");
+  window.__routeMapInit = initMap;
+  document.head.appendChild(script);
+}
+
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (!data || data.type !== "streamlit:render") return;
+  const args = data.args || {};
+  const firstRender = currentArgs === null;
+  const prevKey = currentArgs ? currentArgs.api_key : null;
+  currentArgs = args;
+
+  if (lastClearSignal === null) lastClearSignal = args.clear_signal || 0;
+  if (lastUndoSignal === null) lastUndoSignal = args.undo_signal || 0;
+
+  if (firstRender) {
+    if (!args.api_key) {
+      showStatus("Aucune clé Google Maps API configurée -- voir les instructions ci-dessous.");
+      return;
+    }
+    loadGoogleMaps(args.api_key);
+    return;
+  }
+  if (args.api_key && args.api_key !== prevKey && !(window.google && window.google.maps)) {
+    loadGoogleMaps(args.api_key);
+    return;
+  }
+  if (!(window.google && window.google.maps)) return;  // clic/action avant chargement de la carte
+
+  if (args.clear_signal && args.clear_signal !== lastClearSignal) {
+    lastClearSignal = args.clear_signal;
+    clearStops();
+  }
+  if (args.undo_signal && args.undo_signal !== lastUndoSignal) {
+    lastUndoSignal = args.undo_signal;
+    undoStop();
+  }
+  if (args.compute_directions) {
+    computeDirections();
+  }
+});
+
+stSend("streamlit:componentReady", {apiVersion: 1});
+stSend("streamlit:setFrameHeight", {height: 580});
+</script>
+</body>
+</html>

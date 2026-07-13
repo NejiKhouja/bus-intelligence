@@ -1,0 +1,94 @@
+Objet : Demande de trois web services pour la détection d'anomalies (IA WiniCari)
+
+Bonjour,
+
+Pour la détection d'anomalies (trajets GPS et billetterie, y compris par arrêt), l'équipe
+IA a besoin d'accéder chaque jour aux données de la veille. Plutôt qu'un accès direct à la
+base MongoDB, on voudrait vous demander trois web services simples, dans le même style
+que ceux déjà en place (ex. getServiceSoc).
+
+Bonne nouvelle : pas besoin de filtrer les champs ni de faire de traitement de votre côté --
+la collection brute du jour demandé suffit. Ça reste un accès simple et contrôlé de votre
+côté (vous gardez la main sur qui peut l'appeler, et vous pouvez le limiter à une société
+ou une ligne si vous préférez commencer petit).
+
+Ces services ne seront appelés qu'UNE FOIS PAR JOUR (pas en continu) -- les données ne sont
+de toute façon écrites qu'une fois par nuit, donc pas besoin d'un accès en temps réel.
+
+------------------------------------------------------------
+1) Pings GPS d'une journée
+
+Collection source : Historique_pos (une collection par jour, ex. d20260706)
+
+URL suggérée :
+GET /Service/getPingsForDay?day=20260706
+
+Si vous préférez limiter à une société/ligne pour commencer :
+GET /Service/getPingsForDay?day=20260706&societe=S.R.T.K&line=217
+
+Réponse souhaitée : la collection brute du jour demandé (tous les champs, pas besoin de
+trier ou filtrer).
+
+Utile aussi (facultatif) : un moyen de savoir si le traitement de nuit est terminé pour ce
+jour, pour éviter d'interroger pour rien :
+GET /Service/isDayReady?day=20260706   -> {"ready": true}
+(sinon, dites-nous simplement à quelle heure le traitement de nuit se termine
+habituellement, et on appellera juste après)
+
+------------------------------------------------------------
+2) Totaux de tickets/billetterie d'une journée
+
+Collection source : winicari.details (les totaux journaliers déjà agrégés -- pas besoin des
+tickets individuels)
+
+URL suggérée :
+GET /Service/getTicketTotalsForDay?day=2026-07-05
+
+Réponse souhaitée : la collection brute du jour demandé.
+
+Petite précision utile : si cette collection contient des doublons (même société/ligne/bus/
+jour répété plusieurs fois), dites-le nous simplement -- on gère déjà ça de notre côté.
+
+------------------------------------------------------------
+3) Détail des tickets individuels d'une journée (pour repérer PAR ARRÊT, pas juste par bus)
+
+Collection source : Historique_Tickets.Ticket{année} (ex. Ticket2026) -- les tickets
+individuels cette fois, car c'est la seule source qui indique l'arrêt de départ de chaque
+ticket. Le service 2 ci-dessus reste utile tel quel, celui-ci vient en complément pour
+aller plus loin (détecter une anomalie sur un arrêt précis d'une ligne, pas juste sur le
+bus entier).
+
+URL suggérée :
+GET /Service/getTicketDetailsForDay?day=2026-07-05
+
+Réponse souhaitée : la collection brute du jour demandé (comme pour les deux autres,
+tous les champs, pas besoin de trier ou filtrer).
+
+Trois précisions utiles pour éviter les erreurs de notre côté :
+- Le code de ligne à utiliser est CodeRoute -- on a remarqué qu'il existe aussi un champ
+  Codeligne sur les mêmes documents, mais celui-là est un code de catégorie (valeurs "00"/
+  "99"), pas le numéro de ligne.
+- Pour le jour, on utilisera jour_service (format "YYYY/MM/DD") -- il y a plusieurs autres
+  champs de date sur le même document (date, date_ticket, date_service...) qui ne
+  correspondent pas exactement au même jour de service, donc si jour_service venait à
+  changer de nom ou de format de votre côté, ce serait utile de nous prévenir.
+- Une question sur le champ requisition ("O"/"N") : on a remarqué qu'en excluant les
+  tickets requisition="O" du total (mais en les gardant dans le nombre de tickets), on
+  retombe exactement sur la recette de winicari.details pour certains bus-jours -- mais
+  pas tous. Est-ce que requisition désigne des trajets pris en charge par un organisme
+  (donc pas payés directement par le passager) ? Et y a-t-il une autre raison qui
+  expliquerait un écart entre le prix additionné des tickets et la recette officielle sur
+  certains jours ?
+
+Comme pour les tickets, il s'agit uniquement du tarif + arrêt de départ + ligne/bus/jour --
+rien qui identifie un passager ou un moyen de paiement.
+
+------------------------------------------------------------
+Pour démarrer, on propose de commencer avec une seule société (S.R.T.K) plutôt que toutes
+d'un coup, le temps de valider que tout fonctionne bien. Le service 3 en particulier
+représente un volume plus important par jour que les deux autres (plusieurs tickets par
+arrêt plutôt qu'une ligne par bus) -- raison de plus pour commencer petit.
+
+N'hésitez pas si vous avez des questions ou si vous préférez une autre façon de faire.
+
+Merci beaucoup,

@@ -133,7 +133,8 @@ class ModelManager:
     _foundation_data = None
     _stops_data = {}
     _stop_coords = {}   # f"{societe}_{line}" -> {stop_name: (lat, lon)}
-    _stop_reliability = {}   # f"{societe}_{line}" -> {stop_name: chronic match rate}
+    _stop_coord_suspect = {}   # f"{societe}_{line}" -> {stop_name: bool, chronically wrong coords}
+    _gps_trip_counts = None   # (societe, line, str(bus), day) -> n_trips, see get_gps_trip_count
     _latest_day = None
 
     def __new__(cls):
@@ -222,26 +223,58 @@ class ModelManager:
         """Maps stop_name -> (lat, lon) for a given line."""
         return self._stop_coords.get(f"{societe}_{line}", {})
 
-    def get_stop_reliability(self, societe: str, line: str) -> dict:
-        """Maps stop_name -> chronic match rate across ALL trips of the line.
+    def get_gps_trip_count(self, societe: str, line: str, bus: str, day: str) -> int:
+        """Nombre de trajets GPS réels pour ce (société, ligne, bus, jour) exact.
 
-        A stop that is (almost) never matched by any bus over hundreds of trips is
-        not being 'skipped' — its geocoded coordinates are wrong. This lets the API
-        distinguish a genuine 'stop not served' anomaly from a bad-data stop.
+        Sert à distinguer une panne de machine à tickets (le bus a bien circulé --
+        confirmé côté GPS -- mais quasi aucun ticket enregistré) d'une vraie anomalie de
+        recette/fraude, voir `_ticket_rows_with_reasons`. Lazy + mise en cache : construit
+        au premier appel à partir de `foundation_arrivals_full.parquet` (déjà chargé en
+        mémoire), pas de nouvelle lecture disque par requête.
+        """
+        if self._gps_trip_counts is None:
+            fa = self.get_foundation_data()
+            if fa is None:
+                self._gps_trip_counts = {}
+            else:
+                counts = (fa.assign(bus=fa["bus"].astype(str))
+                          .groupby(["societe", "line", "bus", "day"])["trip_id"].nunique())
+                self._gps_trip_counts = counts.to_dict()
+        return int(self._gps_trip_counts.get((societe, line, str(bus), day), 0))
+
+    def get_coord_suspect(self, societe: str, line: str) -> dict:
+        """Maps stop_name -> True when its geocoded coordinates are chronically wrong.
+
+        A raw match-rate threshold alone misses the mixed case: a stop matched on ~40%
+        of trips but tens of km off the other ~60% (confirmed on S.R.T.K "EL GARAA" --
+        the same stop name resolves to a good coordinate on some lines but one that's
+        tens of km off on most others, and lands at ~40% match / ~11-20 km miss distance
+        on a couple of lines in between). A bare match-rate cutoff misses that middle
+        ground; requiring a large mean miss-distance too catches it -- but only once
+        there are enough misses to trust the average (n_unmatched >= 10), otherwise a
+        line with just a handful of observations and one stray far ping (e.g. a partial
+        trip fragment) gets wrongly condemned.
         """
         key = f"{societe}_{line}"
-        if key not in self._stop_reliability and self._foundation_data is not None:
+        if key not in self._stop_coord_suspect and self._foundation_data is not None:
             sub = self._foundation_data[
                 (self._foundation_data["societe"] == societe) &
                 (self._foundation_data["line"] == line)
             ]
-            grp = sub.groupby("stop")["matched"].agg(["mean", "size"])
-            # Only judge stops with enough observations to be statistically meaningful
-            self._stop_reliability[key] = {
-                str(stop): float(row["mean"])
-                for stop, row in grp.iterrows() if row["size"] >= 20
+            grp = sub.groupby("stop").agg(
+                match_rate=("matched", "mean"), n=("matched", "size"))
+            unmatched = sub[~sub["matched"]].groupby("stop")["dist_m"]
+            grp = grp.join(unmatched.mean().rename("miss_dist_m"))
+            grp = grp.join(unmatched.size().rename("n_unmatched"))
+            self._stop_coord_suspect[key] = {
+                str(stop): bool(row["match_rate"] < 0.10
+                               or (row["match_rate"] < 0.50
+                                   and row.get("n_unmatched", 0) >= 10
+                                   and pd.notna(row["miss_dist_m"])
+                                   and row["miss_dist_m"] > 3000))
+                for stop, row in grp.iterrows() if row["n"] >= 20
             }
-        return self._stop_reliability.get(key, {})
+        return self._stop_coord_suspect.get(key, {})
 
     def get_latest_day(self) -> Optional[str]:
         """Demo 'today' most recent day present in the foundation data."""
@@ -660,8 +693,122 @@ async def get_bus_status(
         }
 
 # Anomaly Detection — served from precomputed trip scores, with explainability
+# ── Classification qualité des trajets (bug de données vs artefact de suivi vs réel) ──
+# Trois classes masquées par défaut côté service (l'admin les affiche via
+# include_data_bugs=true) ; ce qui reste visible est jugeable en confiance :
+#
+#   is_data_bug      -- durée > 24h : PROUVABLEMENT corrompu (les pings viennent d'UNE
+#                       collection journalière ; constaté : « trajet » de 4 668h dans
+#                       d20230603). Correction racine dans foundation.reconstruct_bus_day
+#                       (filtre fenêtre-jour) -- effective au prochain rebuild.
+#   is_fragment      -- durée < 30% de la médiane de la ligne ET <= 4 arrêts suivis : le
+#                       GPS n'a vu qu'un éclat du service ; incomparable à un trajet complet.
+#   is_dark_inflated -- durée > 1.5x la médiane de la ligne ET dont > 50% est un trou de
+#                       signal : le bus a pu finir normalement traceur éteint -- durée non
+#                       fiable. NB : un trajet long dont l'excès est CORROBORÉ par une
+#                       immobilisation observée (pings présents, bus immobile, ex. 204 min
+#                       à SFAX) reste AFFICHÉ -- c'est une vraie anomalie opérationnelle,
+#                       pas un artefact.
+#   is_implausible   -- durée > 2x la médiane de la ligne SANS observation GPS qui la
+#                       corrobore (immobilisation + perte de signal observées < 50% de
+#                       l'excès) : l'excès s'est produit hors de tout arrêt reconnu --
+#                       stationnement terminus/dépôt fondu dans le trajet (corrigé à la
+#                       racine par le rognage/la coupe stationnaire de foundation.py au
+#                       prochain rebuild). Un trajet long dont l'excès EST corroboré
+#                       (ex. 204 min immobile observées à SFAX) reste affiché : c'est un
+#                       vrai incident, précisément ce que le module doit montrer.
+#   is_partial_coverage -- nettement moins d'arrêts couverts que la normale pour cette
+#                       ligne/direction (ex. 5 arrêts vs 11 médians) : le bus a réellement
+#                       parcouru une distance plus courte, donc une durée plus courte est
+#                       NORMALE pour CE trajet -- ce n'est pas une anomalie de vitesse.
+#                       Détecté empiriquement (2026-07-08, ligne 212/S.R.T.K) : les trajets
+#                       à faible n_stops ont une durée médiane ~153 min contre ~210 min pour
+#                       les trajets à couverture complète -- les comparer à la médiane pleine
+#                       ligne les signalait à tort comme « anormalement rapides ».
+DATA_BUG_TRIP_MIN = 24 * 60.0
+FRAGMENT_FRAC = 0.30
+FRAGMENT_MAX_STOPS = 4
+DARK_INFLATED_MIN_FRAC = 1.5
+DARK_DOMINANT_SHARE = 0.5
+IMPLAUSIBLE_MIN_FRAC = 2.0
+CORROBORATION_SHARE = 0.5
+PARTIAL_COVERAGE_FRAC = 0.6
+
+_line_median: Optional[pd.DataFrame] = None
+
+
+def _trip_quality_flags(trips: pd.DataFrame, models) -> pd.DataFrame:
+    """Ajoute is_data_bug / is_fragment / is_dark_inflated / is_implausible /
+    is_partial_coverage (voir constantes ci-dessus).
+
+    Médianes calculées PAR DIRECTION (societe, line, dir) -- un trajet ALLER et son RETOUR
+    peuvent couvrir des distances/temps différents ; les mélanger biaiserait la comparaison
+    dans les deux sens.
+    """
+    global _line_median
+    if _line_median is None:
+        allt = models["trips"]
+        ok = allt[allt["total_elapsed"] <= DATA_BUG_TRIP_MIN]
+        # Un trajet PARTIEL (couverture réduite, voir `full` dans foundation.segment_trips)
+        # a intrinsèquement une durée/un nombre d'arrêts plus faible qu'un trajet complet --
+        # confirmé empiriquement : médiane 30.6 min / 4 arrêts (partiel) contre 39.0 min /
+        # 14 arrêts (complet). Les mélanger dans la référence de la ligne tire la médiane vers
+        # le bas et fausse is_fragment/is_dark_inflated/is_implausible/is_partial_coverage --
+        # un trajet complet un peu long se comparerait à tort à une référence "partielle".
+        # Repli sur tous les trajets (comme `full` en boucle = None) si trop peu de trajets
+        # complets pour une (societe, line, dir) donnée -- même seuil que `reference_trip`.
+        full_only = ok[ok["full"] == True]  # noqa: E712 -- `full` est nullable (lignes en boucle)
+        med_full = (full_only.groupby(["societe", "line", "dir"])
+                    .agg(line_median_elapsed=("total_elapsed", "median"),
+                         line_median_n_stops=("n_stops", "median"),
+                         n_full=("total_elapsed", "size"))
+                    .reset_index())
+        med_all = (ok.groupby(["societe", "line", "dir"])
+                   .agg(line_median_elapsed=("total_elapsed", "median"),
+                        line_median_n_stops=("n_stops", "median"))
+                   .reset_index())
+        merged = med_all.merge(med_full, on=["societe", "line", "dir"], how="left",
+                               suffixes=("_all", "_full"))
+        enough_full = merged["n_full"].fillna(0) >= 3
+        merged["line_median_elapsed"] = merged["line_median_elapsed_full"].where(
+            enough_full, merged["line_median_elapsed_all"])
+        merged["line_median_n_stops"] = merged["line_median_n_stops_full"].where(
+            enough_full, merged["line_median_n_stops_all"])
+        _line_median = merged[["societe", "line", "dir", "line_median_elapsed", "line_median_n_stops"]]
+    t = trips.merge(_line_median, on=["societe", "line", "dir"], how="left")
+    med = t["line_median_elapsed"]
+    med_stops = t["line_median_n_stops"]
+    dark_min = t.get("max_dark_s", pd.Series(0.0, index=t.index)).fillna(0) / 60
+    t["is_data_bug"] = t["total_elapsed"] > DATA_BUG_TRIP_MIN
+    t["is_fragment"] = (~t["is_data_bug"] & med.notna()
+                        & (t["total_elapsed"] < FRAGMENT_FRAC * med)
+                        & (t["n_stops"] <= FRAGMENT_MAX_STOPS))
+    # Distinction clé : l'immobilisation OBSERVÉE (pings présents, bus immobile) corrobore
+    # une durée longue -- un vrai incident. Un trou de signal ne corrobore RIEN : c'est du
+    # temps inconnu. Excès expliqué surtout par du noir -> durée non fiable (dark_inflated) ;
+    # excès expliqué par rien du tout -> stationnement fondu dans le trajet (implausible).
+    dwell_min = t.get("max_dwell_s", pd.Series(0.0, index=t.index)).fillna(0) / 60
+    excess = t["total_elapsed"] - med
+    long_trip = med.notna() & (t["total_elapsed"] > DARK_INFLATED_MIN_FRAC * med)
+    t["is_dark_inflated"] = (~t["is_data_bug"] & long_trip
+                             & ((dark_min > DARK_DOMINANT_SHARE * t["total_elapsed"])
+                                | (dark_min > CORROBORATION_SHARE * excess)))
+    t["is_implausible"] = (~t["is_data_bug"] & ~t["is_dark_inflated"] & med.notna()
+                           & (t["total_elapsed"] > IMPLAUSIBLE_MIN_FRAC * med)
+                           & (dwell_min < CORROBORATION_SHARE * excess))
+    # Restreint aux trajets pas plus longs que la médiane pleine ligne : moins d'arrêts
+    # explique une durée COURTE, pas une durée LONGUE -- un trajet à couverture réduite qui
+    # est QUAND MÊME anormalement long (ex. immobilisé sur son court trajet) reste une vraie
+    # anomalie et ne doit pas être masqué sous prétexte de couverture partielle.
+    t["is_partial_coverage"] = (~t["is_data_bug"] & ~t["is_fragment"] & med_stops.notna()
+                                & (t["n_stops"] < PARTIAL_COVERAGE_FRAC * med_stops)
+                                & (med.notna() & (t["total_elapsed"] <= med)))
+    return t
+
+
 def _filter_trips(societe: str, line: Optional[str] = None,
-                  bus: Optional[int] = None, day: Optional[str] = None):
+                  bus: Optional[int] = None, day: Optional[str] = None,
+                  include_data_bugs: bool = False, dir: Optional[str] = None):
     """Filter the precomputed scored-trips table. Returns (models, trips_df)."""
     models = model_manager.get("anomaly")
     trips = models["trips"]
@@ -672,7 +819,20 @@ def _filter_trips(societe: str, line: Optional[str] = None,
         mask &= trips["bus"].astype(str) == str(bus)
     if day:
         mask &= trips["day"] == day
-    return models, trips[mask].copy()
+    if dir:
+        mask &= trips["dir"] == dir
+    trips = _trip_quality_flags(trips[mask].copy(), models)
+    if not include_data_bugs:
+        # Décision utilisateur (2026-07-07) : les trajets longs douteux (dark_inflated,
+        # implausible) restent VISIBLES par défaut, avec leur explication -- masqués sans
+        # explication, l'admin conclut que le modèle/la segmentation est cassé ; expliqués
+        # (« le boîtier GPS a continué d'émettre après la fin du service »), ils deviennent
+        # un signal opérationnel compréhensible. Seuls restent masqués : les bugs de données
+        # prouvés (>24h), les fragments trop courts pour être jugés, et les trajets à
+        # couverture partielle (2026-07-08 : durée courte non comparable à un trajet complet,
+        # voir is_partial_coverage -- pas une vraie anomalie, juste une distance différente).
+        trips = trips[~(trips["is_data_bug"] | trips["is_fragment"] | trips["is_partial_coverage"])]
+    return models, trips
 
 
 def _rows_with_reasons(models, trips, anomalies_only: bool = True,
@@ -687,9 +847,27 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
     if limit:
         ex = ex.head(limit)
 
+    # Isolation Forest est entraîné PAR OPÉRATEUR (>=30 trajets, voir models/anomaly.py
+    # train()), l'autoencodeur LSTM PAR OPÉRATEUR aussi mais avec un seuil plus haut
+    # (>=200, un autoencodeur a plus de paramètres à apprendre) -- EN DESSOUS, repli sur un
+    # modèle GLOBAL entraîné sur TOUTES les sociétés/lignes confondues. Dans les deux cas,
+    # même un modèle "dédié" à un opérateur reste entraîné sur TOUTES ses lignes poolées
+    # ensemble, jamais sur une ligne seule -- il n'y a pas de modèle par ligne. Exposé ici
+    # pour que le dashboard puisse avertir : "ce résultat compare au réseau global / à
+    # l'opérateur entier, pas à cette ligne spécifiquement, et s'affinera avec plus de
+    # données" plutôt que de laisser croire à une comparaison fine qui n'existe pas encore.
+    if_models = models.get("if_models", {})
+    lstm_models = models.get("lstm_models", {})
+
     rows = []
     for _, r in ex.iterrows():
+        soc = r.get("societe")
+        if_dedicated = soc in if_models
+        lstm_dedicated = soc in lstm_models
         rows.append({
+            "model_if_dedicated": bool(if_dedicated),
+            "model_lstm_dedicated": bool(lstm_dedicated),
+            "model_low_data": not (if_dedicated and lstm_dedicated),
             "day": r["day"],
             "trip_id": int(r["trip_id"]),
             "bus": int(r["bus"]),
@@ -701,15 +879,60 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
             "severity": str(r["severity"]),
             "anomaly_strength": float(r["anomaly_strength"]),
             "reasons": list(r["reasons"]),
+            "reason_features": list(r.get("reason_features", [])),
             "top_feature": r.get("top_feature"),
             "max_dwell_min": round(float(r["max_dwell_s"]) / 60, 1),
             "max_dark_min": round(float(r.get("max_dark_s", 0) or 0) / 60, 1),
+            # Arrêts encadrant le plus grand trou de signal EN ROUTE (voir
+            # foundation.derive_arrivals / anomaly.trip_features) -- None si le trou (s'il y en
+            # a un) est capté par le scan par-arrêt classique (déjà visible via problem_stops).
+            "dark_gap_before_stop": (r.get("trip_dark_before_stop")
+                                     if pd.notna(r.get("trip_dark_before_stop")) else None),
+            "dark_gap_after_stop": (r.get("trip_dark_after_stop")
+                                    if pd.notna(r.get("trip_dark_after_stop")) else None),
             "worst_dwell_stop": r.get("worst_dwell_stop"),
             "trip_duration_min": round(float(r["total_elapsed"]), 1),
             "total_elapsed_min": round(float(r["total_elapsed"]), 1),  # kept for back-compat
             "n_stops": int(r["n_stops"]),
             "trip_start": r["trip_start"].isoformat() if pd.notna(r["trip_start"]) else None,
             "trip_end": r["trip_end"].isoformat() if pd.notna(r["trip_end"]) else None,
+            # classes qualité (voir _trip_quality_flags) -- visibles seulement quand
+            # l'admin a demandé include_data_bugs=true, sinon filtrées en amont.
+            # Repli sur le seul critère prouvable quand les colonnes manquent (score-live).
+            "is_data_bug": bool(r.get("is_data_bug", float(r["total_elapsed"]) > DATA_BUG_TRIP_MIN)),
+            "is_fragment": bool(r.get("is_fragment", False)),
+            "is_dark_inflated": bool(r.get("is_dark_inflated", False)),
+            "is_implausible": bool(r.get("is_implausible", False)),
+            "is_partial_coverage": bool(r.get("is_partial_coverage", False)),
+            "line_median_n_stops": (round(float(r["line_median_n_stops"]), 1)
+                                    if pd.notna(r.get("line_median_n_stops")) else None),
+            # Durée totale moins les blocs immobiles/noirs DÉTECTÉS (max par arrêt) --
+            # estimation basse du vrai temps de conduite pour contextualiser les durées
+            # gonflées. Le stationnement hors de tout arrêt reconnu reste invisible ici
+            # (corrigé à la racine au prochain rebuild).
+            "driving_time_est_min": round(max(
+                0.0, float(r["total_elapsed"])
+                     - float(r["max_dwell_s"]) / 60
+                     - float(r.get("max_dark_s", 0) or 0) / 60), 1),
+            # médiane de la ligne (jours sains) -- permet au client de ne contextualiser
+            # QUE les durées gonflées : soustraire l'immobilisation d'un trajet déjà court
+            # produirait un temps « plus rapide que physiquement possible », trompeur
+            "line_median_elapsed_min": (round(float(r["line_median_elapsed"]), 1)
+                                        if pd.notna(r.get("line_median_elapsed")) else None),
+            "match_rate": round(float(r["match_rate"]), 3),
+            "terminus_idle_min": round(float(r.get("terminus_idle_min", 0) or 0), 1),
+            # Détail par terminus (voir foundation.segment_trips) -- nomme LEQUEL des deux
+            # termini et donne l'heure réelle de départ/arrivée, pour remplacer un chiffre
+            # sans repère ("84 min au terminus") par quelque chose de vérifiable (« immobile
+            # à MAHDIA de 13h54 à 15h18, départ effectif à 15h18 »).
+            "origin_idle_min": round(float(r.get("origin_idle_min", 0) or 0), 1),
+            "origin_idle_stop": r.get("origin_idle_stop") if pd.notna(r.get("origin_idle_stop")) else None,
+            "origin_idle_from": (r["origin_idle_from"].isoformat()
+                                 if pd.notna(r.get("origin_idle_from")) else None),
+            "end_idle_min": round(float(r.get("end_idle_min", 0) or 0), 1),
+            "end_idle_stop": r.get("end_idle_stop") if pd.notna(r.get("end_idle_stop")) else None,
+            "end_idle_to": (r["end_idle_to"].isoformat()
+                           if pd.notna(r.get("end_idle_to")) else None),
         })
     return rows
 
@@ -738,27 +961,87 @@ def _filter_ticket_days(societe: str, line: Optional[str] = None,
 
 
 def _ticket_rows_with_reasons(models, days, anomalies_only: bool = True,
-                              limit: Optional[int] = None) -> List[Dict]:
-    """Attach human-readable reasons to (anomalous) ticket-days and serialize to dicts."""
+                              limit: Optional[int] = None,
+                              client_safe: bool = False) -> List[Dict]:
+    """Attach human-readable reasons to (anomalous) ticket-days and serialize to dicts.
+
+    `client_safe` : n'inclut que les jours dont l'anomalie n'est PAS explicable par un
+    problème de NOTRE côté -- voir `is_machine_issue`/`is_no_service` ci-dessous. Pensé
+    pour une démo/présentation client : un volume de tickets à zéro parce que la machine
+    est probablement tombée en panne (le bus a bien roulé, confirmé GPS) n'est pas un
+    signal de fraude/recette à montrer comme tel. La vue admin (`client_safe=False`,
+    défaut) garde tout, avec ces jours marqués plutôt que cachés.
+    """
     if anomalies_only:
         days = days[days["anomaly"]]
     if len(days) == 0:
         return []
     # if_score: higher = more normal (score_samples convention) -> most anomalous first
     ex = ticket_anomaly.explain(models, days).sort_values("if_score")
-    if limit:
-        ex = ex.head(limit)
+
+    def _opt(r, col, ndigits=2):
+        v = r.get(col)
+        return round(float(v), ndigits) if v is not None and pd.notna(v) else None
+
     rows = []
     for _, r in ex.iterrows():
+        nbr_ticket = int(r["nbr_ticket"])
+        # Croisement avec les trajets GPS réels de ce bus-jour EXACT (voir
+        # ModelManager.get_gps_trip_count) -- distingue "la machine n'a probablement pas
+        # fonctionné" (service confirmé, ~0 ticket) de "aucun service ce jour-là" (pas de
+        # trajet GPS du tout -- férié/grève/bus hors service), deux causes différentes,
+        # ni l'une ni l'autre une vraie anomalie de recette/fraude.
+        gps_trip_count = model_manager.get_gps_trip_count(
+            r["societe"], r["line"], str(r["bus"]), str(r["day"]))
+        is_no_service = gps_trip_count == 0
+        # Seuil <=2 plutôt que ==0 : tolère un ticket manuel/réédité isolé sans perdre le
+        # signal -- un vrai jour normal a des dizaines/centaines de tickets, pas 1 ou 2.
+        is_machine_issue = (not is_no_service) and nbr_ticket <= 2
+        if client_safe and (is_machine_issue or is_no_service):
+            continue
+        # Bonne vs mauvaise anomalie : la recette du jour a-t-elle dépassé la normale de
+        # CE bus (repli ligne si pas assez d'historique pour ce bus) ? Une recette
+        # au-dessus de la normale reste une anomalie statistique (le modèle la signale
+        # quand même) mais n'est PAS un problème -- plus d'argent rentré que d'habitude
+        # est une bonne nouvelle, pas un signal à traiter comme la recette anormalement
+        # BASSE. None quand aucune référence n'est disponible (pas encore de médiane).
+        recette = float(r["recette"])
+        recette_baseline = r.get("bus_median_recette")
+        if recette_baseline is None or pd.isna(recette_baseline):
+            recette_baseline = r.get("line_median_recette")
+        is_good_anomaly = (bool(recette > recette_baseline)
+                           if recette_baseline is not None and pd.notna(recette_baseline)
+                           else None)
         rows.append({
             "societe": r["societe"], "line": r["line"], "bus": str(r["bus"]), "day": r["day"],
-            "nbr_ticket": int(r["nbr_ticket"]),
-            "recette": round(float(r["recette"]), 2),
+            "nbr_ticket": nbr_ticket,
+            "recette": round(recette, 2),
             "avg_fare": round(float(r["avg_fare"]), 2),
             "if_score": round(float(r["if_score"]), 3),
             "anomaly": bool(r["anomaly"]),
             "reasons": list(r["reasons"]),
+            "severity": r.get("severity", "medium"),
+            "gps_trip_count": gps_trip_count,
+            "is_machine_issue": is_machine_issue,
+            "is_no_service": is_no_service,
+            "is_good_anomaly": is_good_anomaly,
+            # contexte de jugement : la valeur du jour ne dit rien seule -- les médianes de
+            # la ligne/du bus + le taux d'anomalie de la ligne permettent de trancher entre
+            # "jour réellement louche" et "ligne structurellement atypique"
+            "line_median_nbr_ticket": _opt(r, "line_median_nbr_ticket", 0),
+            "line_median_recette": _opt(r, "line_median_recette", 0),
+            "line_median_avg_fare": _opt(r, "line_median_avg_fare"),
+            "bus_median_nbr_ticket": _opt(r, "bus_median_nbr_ticket", 0),
+            "bus_median_recette": _opt(r, "bus_median_recette", 0),
+            "bus_median_avg_fare": _opt(r, "bus_median_avg_fare"),
+            "line_anomaly_rate": _opt(r, "line_anomaly_rate", 3),
+            "z_nbr_ticket": _opt(r, "z_nbr_ticket"),
+            "z_recette": _opt(r, "z_recette"),
+            "z_avg_fare": _opt(r, "z_avg_fare"),
+            "model_tier": r.get("model_tier"),
         })
+        if limit and len(rows) >= limit:
+            break
     return rows
 
 
@@ -767,12 +1050,14 @@ async def ticket_anomaly_history(
     societe: str,
     line: Optional[str] = None,
     bus: Optional[str] = None,
-    limit: int = 30
+    limit: int = 30,
+    client_safe: bool = False
 ):
     """Historical ticket/billing anomalies (precomputed at training time)."""
     try:
         models, days = _filter_ticket_days(societe, line, bus)
-        anomalies = _ticket_rows_with_reasons(models, days, anomalies_only=True, limit=limit)
+        anomalies = _ticket_rows_with_reasons(models, days, anomalies_only=True, limit=limit,
+                                              client_safe=client_safe)
         return {"anomalies": anomalies, "total": len(anomalies), "total_days": int(len(days))}
     except KeyError:
         raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
@@ -785,12 +1070,13 @@ async def ticket_anomaly_explain(
     societe: str,
     line: Optional[str] = None,
     bus: Optional[str] = None,
-    day: Optional[str] = None
+    day: Optional[str] = None,
+    client_safe: bool = False
 ):
     """All ticket-days for a scope, with anomalies flagged + explained."""
     try:
         models, days = _filter_ticket_days(societe, line, bus, day)
-        rows = _ticket_rows_with_reasons(models, days, anomalies_only=False)
+        rows = _ticket_rows_with_reasons(models, days, anomalies_only=False, client_safe=client_safe)
         anomalous = [r for r in rows if r["anomaly"]]
         return {
             "societe": societe, "line": line, "bus": bus, "day": day,
@@ -836,6 +1122,170 @@ async def ticket_anomaly_patterns(societe: str, line: Optional[str] = None):
         raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error computing ticket patterns: {str(e)}")
+
+
+def _resolve_station_coords(societe: str, line: str, names: list) -> dict:
+    """Best-effort `station_name -> (lat, lon)` via the SAME per-line stop-coordinate
+    lookup already used for the GPS trip map (`ModelManager.get_stop_coords`) -- ticket
+    station names (`NomFR1`, see `reference_db.populate_tickets_station_daily`) aren't
+    guaranteed to match `stops.primary_name` byte-for-byte (case/accents/whitespace), so
+    this degrades gracefully : unresolved stations simply get no pin, the list/table view
+    still shows them.
+    """
+    coords = model_manager.get_stop_coords(societe, line)
+    norm = {k.strip().upper(): v for k, v in coords.items()}
+    out = {}
+    for name in names:
+        v = norm.get(str(name).strip().upper())
+        if v:
+            out[name] = v
+    return out
+
+
+def _station_breakdown_rows(societe: str, line: str, bus: str, day: str) -> list:
+    """Per-station ticket breakdown for ONE EXACT trip (societe, line, bus, day) -- NOT the
+    whole line-day. Constaté (2026-07-11) : avant l'ajout de `bus` au grain de
+    `tickets_station_daily`, cet appel sommait les ventes de TOUS les bus de la ligne ce
+    jour-là, ce qui ne pouvait pas se recouper avec la recette du bus-jour signalé affiché
+    ailleurs -- voir la note dans `reference_db.populate_tickets_station_daily`. Retourne
+    une ligne par arrêt d'origine desservi PAR CE BUS ce jour-là (lat/lon best-effort).
+    """
+    models = model_manager.get("ticket_anomaly")
+    station_models = models.get("stations") or {}
+    days = station_models.get("days")
+    if days is None or len(days) == 0 or "bus" not in days.columns:
+        return []
+    mask = ((days["societe"] == societe) & (days["line"] == line)
+           & (days["bus"].astype(str) == str(bus)) & (days["day"] == day))
+    sub = days[mask].copy()
+    if len(sub) == 0:
+        return []
+    ex = ticket_anomaly.explain_stations(station_models, sub)
+    coords = _resolve_station_coords(societe, line, ex["station"].tolist())
+    rows = []
+    for _, r in ex.iterrows():
+        lat, lon = coords.get(r["station"], (None, None))
+        # Bonne vs mauvaise anomalie -- même logique que _ticket_rows_with_reasons, au
+        # grain arrêt : recette de CET arrêt ce jour-là au-dessus de sa normale (repli
+        # ligne si pas assez d'historique pour cet arrêt) ? La normale d'un arrêt reste
+        # une propriété de L'ARRÊT (pas du bus qui le dessert ce jour-là précis).
+        recette = float(r["recette"])
+        recette_baseline = r.get("station_median_recette")
+        if recette_baseline is None or pd.isna(recette_baseline):
+            recette_baseline = r.get("line_median_recette")
+        is_good_anomaly = (bool(recette > recette_baseline)
+                           if recette_baseline is not None and pd.notna(recette_baseline)
+                           else None)
+        rows.append({
+            "station": r["station"], "nbr_ticket": int(r["nbr_ticket"]),
+            "recette": round(recette, 2),
+            "avg_fare": round(float(r["avg_fare"]), 2),
+            "anomaly": bool(r["anomaly"]), "severity": r.get("severity", "medium"),
+            "reasons": list(r["reasons"]), "lat": lat, "lon": lon,
+            "is_good_anomaly": is_good_anomaly,
+        })
+    rows.sort(key=lambda r: (not r["anomaly"], -r["recette"]))
+    return rows
+
+
+def _station_trip_breakdown(societe: str, line: str, bus: str, day: str) -> dict:
+    """Répartition ALLER/RETOUR des ventes par arrêt pour CE trajet -- lit
+    `tickets_station_trip_daily` (voir reference_db.populate_tickets_station_trip_daily),
+    une table SÉPARÉE du modèle d'anomalie (décision utilisateur 2026-07-11 : direction
+    reste un raffinement d'AFFICHAGE, pas un nouveau grain de détection). Retourne
+    {"ALLER": [...], "RETOUR": [...]} quand la direction est connue pour ce bus-jour
+    (voyage suivi par l'appareil), ou {} si tout est 'UNKNOWN' (appareil ne suit pas
+    voyage) -- dans ce cas l'appelant doit garder la vue combinée existante plutôt que
+    d'afficher un faux ALLER seul.
+    """
+    conn = rdb.init_db()
+    try:
+        rows = conn.execute(
+            """SELECT t.direction, t.station_name, t.nbr_ticket, t.recette
+               FROM tickets_station_trip_daily t
+               JOIN companies c ON c.company_id = t.company_id
+               JOIN lines l ON l.line_id = t.line_id
+               WHERE c.canonical_name = ? AND l.line_code = ? AND t.bus = ? AND t.day = ?""",
+            (societe, line, str(bus), day),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows or all(r[0] == "UNKNOWN" for r in rows):
+        return {}
+    by_dir: dict = {"ALLER": [], "RETOUR": []}
+    all_stations = [r[1] for r in rows if r[0] != "UNKNOWN"]
+    coords = _resolve_station_coords(societe, line, all_stations)
+    for direction, station, nbr_ticket, recette in rows:
+        if direction not in by_dir:
+            continue  # UNKNOWN résiduel mélangé à des lignes connues -- ignoré, pas deviné
+        lat, lon = coords.get(station, (None, None))
+        avg_fare = round(recette / nbr_ticket, 2) if nbr_ticket else 0.0
+        by_dir[direction].append({
+            "station": station, "nbr_ticket": int(nbr_ticket), "recette": round(recette, 2),
+            "avg_fare": avg_fare, "lat": lat, "lon": lon,
+        })
+    for d in by_dir:
+        by_dir[d].sort(key=lambda r: -r["recette"])
+    return by_dir
+
+
+@app.get("/api/ticket-anomaly-stations")
+async def ticket_anomaly_stations(societe: str, line: str, bus: str, day: str):
+    """Per-station ticket breakdown for ONE EXACT trip (societe, line, bus, day) -- Phase 2
+    drill-down from a flagged bus-day card (see docs/WEBSERVICES_NEEDED.md service 3 and
+    the `recursive-bubbling-curry` plan). Returns one row per origin station with lat/lon
+    (best-effort) + its own anomaly flag, for the map/table view.
+    """
+    try:
+        rows = _station_breakdown_rows(societe, line, bus, day)
+        by_direction = _station_trip_breakdown(societe, line, bus, day)
+        return {"societe": societe, "line": line, "bus": bus, "day": day, "stations": rows,
+               "by_direction": by_direction}
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting station breakdown: {str(e)}")
+
+
+@app.get("/api/ticket-anomaly-reference")
+async def ticket_anomaly_reference(societe: str, line: str):
+    """A NORMAL (non-anomalous) bus-day for this line, with its per-station ticket
+    breakdown -- companion to `/api/reference-trip` (GPS), so the admin can compare a
+    flagged trip's per-station sales against what a normal trip's sales look like, not
+    just against an abstract median number. Picked the same way as the GPS reference
+    trip: closest to the line's median `recette` among non-anomalous bus-days.
+    """
+    try:
+        models, days = _filter_ticket_days(societe, line)
+        if len(days) == 0:
+            raise HTTPException(status_code=404, detail="No ticket data for this line")
+        ex = ticket_anomaly.explain(models, days)
+        normal = ex[~ex["anomaly"]]
+        if len(normal) == 0:
+            normal = ex
+        med = float(ex["recette"].median())
+        best = normal.iloc[(normal["recette"] - med).abs().argsort().iloc[0]]
+        bus, day = str(best["bus"]), str(best["day"])
+        stations = _station_breakdown_rows(societe, line, bus, day)
+        by_direction = _station_trip_breakdown(societe, line, bus, day)
+        return {
+            "societe": societe, "line": line,
+            "trip": {
+                "bus": bus, "day": day,
+                "nbr_ticket": int(best["nbr_ticket"]),
+                "recette": round(float(best["recette"]), 2),
+                "avg_fare": round(float(best["avg_fare"]), 2),
+                "line_median_recette": round(med, 2),
+            },
+            "stations": stations,
+            "by_direction": by_direction,
+        }
+    except HTTPException:
+        raise
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Ticket anomaly models not loaded")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting reference trip: {str(e)}")
 
 
 @app.post("/api/ticket-anomaly/score-live")
@@ -907,11 +1357,13 @@ async def get_anomaly_history(
     societe: str,
     line: Optional[str] = None,
     bus: Optional[int] = None,
-    limit: int = 30
+    limit: int = 30,
+    include_data_bugs: bool = False,
+    dir: Optional[str] = None
 ):
     """Historical anomalies for a company/line/bus, with plain-language reasons."""
     try:
-        models, trips = _filter_trips(societe, line, bus)
+        models, trips = _filter_trips(societe, line, bus, include_data_bugs=include_data_bugs, dir=dir)
         anomalies = _rows_with_reasons(models, trips, anomalies_only=True, limit=limit)
         return {
             "anomalies": anomalies,
@@ -929,11 +1381,12 @@ async def check_bus_anomalies(
     societe: str,
     line: str,
     bus: int,
-    day: Optional[str] = None
+    day: Optional[str] = None,
+    include_data_bugs: bool = False
 ):
     """Check a specific bus for anomalies, optionally on a specific day."""
     try:
-        models, trips = _filter_trips(societe, line, bus, day)
+        models, trips = _filter_trips(societe, line, bus, day, include_data_bugs=include_data_bugs)
         if len(trips) == 0:
             return {
                 "bus": bus, "line": line, "societe": societe, "day": day,
@@ -958,12 +1411,13 @@ async def check_bus_anomalies(
 @app.get("/api/current-anomalies")
 async def get_current_anomalies(
     societe: str,
-    line: Optional[str] = None
+    line: Optional[str] = None,
+    dir: Optional[str] = None
 ):
     """Anomalies for the latest day the selected scope actually operated."""
     today = latest_day_for(societe, line)
     try:
-        models, trips = _filter_trips(societe, line, day=today)
+        models, trips = _filter_trips(societe, line, day=today, dir=dir)
         anomalies = _rows_with_reasons(models, trips, anomalies_only=True)
         return {
             "date": today,
@@ -991,7 +1445,7 @@ def _trip_sequence(df, societe, line, bus, day, trip_id):
         (df["day"] == day) & (df["trip_id"] == trip_id)
     ].sort_values("seq")
     coord_map = model_manager.get_stop_coords(societe, line)
-    reliability = model_manager.get_stop_reliability(societe, line)
+    coord_suspect = model_manager.get_coord_suspect(societe, line)
     seq = []
     for _, s in seqdf.iterrows():
         dwell = float(s["dwell_s"]) if pd.notna(s.get("dwell_s")) else 0.0
@@ -999,6 +1453,8 @@ def _trip_sequence(df, societe, line, bus, day, trip_id):
         dist  = float(s["dist_m"])  if pd.notna(s.get("dist_m"))  else 0.0
         stop_name = s["stop"]
         lat, lon = coord_map.get(stop_name, (None, None))
+        arrival = pd.Timestamp(s["arrival"]) if pd.notna(s.get("arrival")) else None
+        departure = pd.Timestamp(s["departure"]) if pd.notna(s.get("departure")) else None
         seq.append({
             "seq": int(s["seq"]), "stop": stop_name,
             "dwell_min": round(dwell / 60, 1),
@@ -1006,9 +1462,13 @@ def _trip_sequence(df, societe, line, bus, day, trip_id):
             "had_gap":   bool(s.get("had_gap", False)),
             "dist_m": round(dist, 0),
             "matched": bool(s["matched"]),
-            "coord_suspect": reliability.get(stop_name, 1.0) < 0.10,
+            "coord_suspect": coord_suspect.get(stop_name, False),
             "lat": lat,
             "lon": lon,
+            # horodatages réels du passage (None si arrêt non suivi) -- affichés sur la
+            # carte pour que l'admin voie QUAND le bus a réellement atteint chaque arrêt
+            "arrival": arrival.isoformat() if arrival is not None else None,
+            "departure": departure.isoformat() if departure is not None else None,
         })
     return seq
 
@@ -1021,7 +1481,9 @@ def _problem_stops(seq):
     worst_dwell = max(seq, key=lambda s: s["dwell_min"])
     if worst_dwell["dwell_min"] >= 5:
         out["longest_stop"] = {"stop": worst_dwell["stop"],
-                               "dwell_min": worst_dwell["dwell_min"]}
+                               "dwell_min": worst_dwell["dwell_min"],
+                               "arrival": worst_dwell.get("arrival"),
+                               "lat": worst_dwell.get("lat"), "lon": worst_dwell.get("lon")}
     # signal-loss stops: stops where a GPS gap interrupted the dwell scan
     gap_stops = [s for s in seq if s.get("had_gap") and s.get("dark_min", 0) >= 5]
     if gap_stops:
@@ -1048,17 +1510,67 @@ def _problem_stops(seq):
     return out
 
 
+def _detect_start_detour(g, trip_start, longest_stop, cfg, detour_thresh_m: float = 1000.0):
+    """Bus leaves right after `trip_start`, drives well away, then comes back to ~the same
+    spot before settling into `longest_stop`'s long dwell -- an unofficial side-trip
+    (errand/positioning) bookending the genuine idle time, not GPS noise near the stop.
+
+    Only fires when the bus ENDS UP back close to where it started (`idle_trim_m`) -- if it
+    ends up somewhere else, that's just normal driving toward the next stop, not a detour.
+    """
+    if not longest_stop or not longest_stop.get("arrival"):
+        return None
+    t_start = pd.Timestamp(trip_start)
+    t_end = pd.Timestamp(longest_stop["arrival"])
+    if t_end <= t_start:
+        return None
+    seg = g[(g["t"] >= t_start) & (g["t"] <= t_end)].reset_index(drop=True)
+    if len(seg) < 3:
+        return None
+    s0 = float(seg["s"].iloc[0])
+    s_end = float(seg["s"].iloc[-1])
+    delta = seg["s"] - s0
+    excursion_m = float(delta.abs().max())
+    if excursion_m < detour_thresh_m or abs(s_end - s0) > cfg.idle_trim_m:
+        return None
+    idx_far = int(delta.abs().idxmax())
+
+    def _points(a: int, b: int):
+        return [{"lat": round(float(r["lat"]), 6), "lon": round(float(r["lon"]), 6),
+                  "t": r["t"].isoformat()} for _, r in seg.iloc[a:b + 1].iterrows()]
+
+    # Scindé en aller (départ -> point le plus éloigné) et retour (point le plus éloigné ->
+    # retour) pour que l'admin puisse suivre les deux trajets séparément sur la carte, plutôt
+    # qu'un seul tracé qui superpose les deux passages.
+    leg_out = _points(0, idx_far)
+    leg_back = _points(idx_far, len(seg) - 1)
+    return {
+        "distance_km": round(excursion_m / 1000, 1),
+        "left_at": seg["t"].iloc[0].isoformat(),
+        "farthest_at": seg["t"].iloc[idx_far].isoformat(),
+        "returned_at": seg["t"].iloc[-1].isoformat(),
+        "duration_min": round((seg["t"].iloc[-1] - seg["t"].iloc[0]).total_seconds() / 60, 1),
+        "leg_out_duration_min": round((seg["t"].iloc[idx_far] - seg["t"].iloc[0]).total_seconds() / 60, 1),
+        "leg_back_duration_min": round((seg["t"].iloc[-1] - seg["t"].iloc[idx_far]).total_seconds() / 60, 1),
+        "leg_out": leg_out,
+        "leg_back": leg_back,
+        "track": leg_out + leg_back[1:],   # conservé pour compat -- chemin complet dans l'ordre chronologique
+    }
+
+
 @app.get("/api/anomaly-explain")
 async def anomaly_explain(
     societe: str,
     line: str,
     bus: Optional[int] = None,
-    day: Optional[str] = None
+    day: Optional[str] = None,
+    include_data_bugs: bool = False,
+    dir: Optional[str] = None
 ):
     """Per-trip explanations + WHERE (which stops) the anomaly happened."""
     df = model_manager.get_foundation_data()
     try:
-        models, trips = _filter_trips(societe, line, bus, day)
+        models, trips = _filter_trips(societe, line, bus, day, include_data_bugs=include_data_bugs, dir=dir)
         rows = _rows_with_reasons(models, trips, anomalies_only=False)
         anomalous = [r for r in rows if r["severity"] != "low"]
 
@@ -1110,15 +1622,139 @@ async def anomaly_explain(
 async def trip_detail(
     societe: str, line: str, bus: int, day: str, trip_id: int
 ):
-    """Sequence + problem stops for one specific trip (used for per-trip map/chart)."""
+    """Sequence + problem stops for one specific trip (used for per-trip map/chart).
+
+    Also looks for an "unofficial detour" -- the bus leaving right after the trip
+    officially starts, driving off, and coming back to ~the same spot before its long
+    dwell (e.g. an errand before really departing) -- and returns the raw GPS path for
+    it so the admin can see the actual route driven, not just the straight stop-to-stop
+    line. Best-effort: needs a live MongoDB read, so any failure here just omits the
+    detour rather than failing the whole request.
+    """
     df = model_manager.get_foundation_data()
     if df is None:
         raise HTTPException(status_code=503, detail="Foundation data not loaded")
     seq = _trip_sequence(df, societe, line, bus, day, trip_id)
+    problem_stops = _problem_stops(seq)
+    longest_stop = problem_stops.get("longest_stop")
+    if longest_stop and longest_stop.get("arrival"):
+        try:
+            trip_row = df[
+                (df["societe"] == societe) & (df["line"] == line) &
+                (df["bus"].astype(str) == str(bus)) & (df["day"] == day) &
+                (df["trip_id"] == trip_id)
+            ].iloc[0]
+            built = _build_gps_track(societe, line, bus, day)
+            if built is not None:
+                g, _stops, _route_len = built
+                detour = _detect_start_detour(g, trip_row["trip_start"], longest_stop, fdn.Config())
+                if detour:
+                    problem_stops["unofficial_detour"] = detour
+        except Exception:
+            pass
     return {
         "sequence": seq,
-        "problem_stops": _problem_stops(seq),
+        "problem_stops": problem_stops,
     }
+
+
+@app.get("/api/reference-trip")
+async def reference_trip(societe: str, line: str):
+    """LE trajet « témoin » d'une ligne, PAR DIRECTION : un trajet réel, non anormal, bien
+    suivi, de durée proche de la médiane -- affiché au-dessus des anomalies comme référence
+    (« voici à quoi ressemble un trajet normal sur cette ligne »). Renforce la confiance : le
+    modèle sait ce qu'est un trajet normal, les anomalies sont des écarts à CETTE norme.
+
+    ALLER et RETOUR PAIRÉS quand possible : même jour, même bus, le RETOUR étant le
+    premier à suivre CET aller -- pour que le stationnement terminus affiché illustre la
+    VRAIE pause d'UN cycle complet (arrivée -> pause -> redépart), pas deux jours sans
+    rapport. Constaté (2026-07-11) : sans ce pairage, l'ALLER de référence pouvait montrer
+    ~9 min de pause typique et le RETOUR ~28 min -- des trajets de jours différents, donc
+    la différence ne renseigne en rien sur la pause réelle de CE bus entre son arrivée et
+    son redépart, ce que le contrôleur cherche justement à savoir. Repli sur le meilleur
+    trajet par direction indépendamment (ancien comportement) si aucune paire same-day/
+    same-bus n'est disponible. Inclut aussi le stationnement terminus TYPIQUE de cette
+    direction (médiane sur les trajets normaux, PAS la valeur du trajet choisi) pour
+    donner à l'admin un repère concret : au-delà d'environ 2x cette valeur, un
+    stationnement observé est probablement un service non clôturé plutôt qu'une pause
+    normale.
+    """
+    df = model_manager.get_foundation_data()
+    try:
+        models, trips = _filter_trips(societe, line)   # déjà nettoyé des bugs/fragments
+    except KeyError:
+        raise HTTPException(status_code=503, detail="Anomaly models not loaded")
+    if df is None or len(trips) == 0:
+        raise HTTPException(status_code=404, detail="No trips for this line")
+
+    def _normal(sub: pd.DataFrame) -> pd.DataFrame:
+        normal = sub[(~sub["anomaly"]) & (sub["match_rate"] >= 0.7)]
+        return normal if len(normal) else sub[~sub["anomaly"]]
+
+    normal_by_dir = {d: _normal(trips[trips["dir"] == d]) for d in ("ALLER", "RETOUR")}
+    med_by_dir = {d: float(trips[trips["dir"] == d]["total_elapsed"].median())
+                 for d in ("ALLER", "RETOUR")}
+    idle_by_dir: dict = {}
+    for d in ("ALLER", "RETOUR"):
+        idle_col = (normal_by_dir[d]["terminus_idle_min"]
+                   if "terminus_idle_min" in normal_by_dir[d].columns else pd.Series(dtype=float))
+        idle_by_dir[d] = float(idle_col.median()) if len(idle_col) else None
+
+    def _build(row: pd.Series, direction: str) -> dict:
+        typical_idle = idle_by_dir[direction]
+        seq = _trip_sequence(df, societe, line, row["bus"], row["day"], int(row["trip_id"]))
+        return {
+            "trip": {
+                "bus": str(row["bus"]), "day": row["day"], "dir": direction,
+                "trip_id": int(row["trip_id"]),
+                "duration_min": round(float(row["total_elapsed"]), 1),
+                "line_median_min": round(med_by_dir[direction], 1),
+                "n_stops": int(row["n_stops"]),
+                "match_rate": round(float(row["match_rate"]), 3),
+                "mean_dwell_min": round(float(row["mean_dwell_s"]) / 60, 1),
+                "trip_start": row["trip_start"].isoformat() if pd.notna(row["trip_start"]) else None,
+                "trip_end": row["trip_end"].isoformat() if pd.notna(row["trip_end"]) else None,
+                "typical_terminus_idle_min": (round(typical_idle, 1) if typical_idle is not None else None),
+                "service_not_closed_threshold_min": (round(2 * typical_idle, 1)
+                                                     if typical_idle else None),
+            },
+            "sequence": seq,
+        }
+
+    directions: dict = {}
+    if len(normal_by_dir["ALLER"]) and len(normal_by_dir["RETOUR"]):
+        cols = ["day", "bus", "trip_id", "trip_start", "trip_end", "total_elapsed",
+               "match_rate", "n_stops", "mean_dwell_s"]
+        merged = normal_by_dir["ALLER"][cols].merge(
+            normal_by_dir["RETOUR"][cols], on=["day", "bus"], suffixes=("_a", "_r"))
+        merged = merged[merged["trip_start_r"] > merged["trip_end_a"]]
+        if len(merged):
+            merged["gap_min"] = (merged["trip_start_r"] - merged["trip_end_a"]).dt.total_seconds() / 60
+            # ne garder QUE le retour le plus proche après chaque aller -- un vrai cycle
+            # aller->pause->redépart, pas un retour plus tardif sans rapport le même jour
+            merged = (merged.sort_values("gap_min")
+                     .drop_duplicates(subset=["day", "bus", "trip_id_a"], keep="first"))
+            merged["score"] = ((merged["total_elapsed_a"] - med_by_dir["ALLER"]).abs()
+                               + (merged["total_elapsed_r"] - med_by_dir["RETOUR"]).abs())
+            best_pair = merged.sort_values("score").iloc[0]
+            row_a = pd.Series({c: best_pair.get(f"{c}_a", best_pair.get(c)) for c in cols})
+            row_r = pd.Series({c: best_pair.get(f"{c}_r", best_pair.get(c)) for c in cols})
+            directions = {"ALLER": _build(row_a, "ALLER"), "RETOUR": _build(row_r, "RETOUR")}
+
+    if not directions:
+        for d in ("ALLER", "RETOUR"):
+            normal = normal_by_dir[d]
+            if len(normal) == 0:
+                continue
+            # trajets complets d'abord si disponibles, puis durée la plus proche de la médiane
+            full = normal[normal["full"] == True]  # noqa: E712 -- `full` est nullable (lignes en boucle)
+            pool = full if len(full) >= 3 else normal
+            best = pool.iloc[(pool["total_elapsed"] - med_by_dir[d]).abs().argsort().iloc[0]]
+            directions[d] = _build(best, d)
+
+    if not directions:
+        raise HTTPException(status_code=404, detail="No normal trip found for this line")
+    return {"societe": societe, "line": line, "directions": directions}
 
 
 @app.get("/api/anomaly-patterns")

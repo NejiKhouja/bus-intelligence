@@ -35,13 +35,21 @@ def scalars_only(d: dict) -> dict:
 
 def write_version_file(metrics: dict, out_path: Path = VERSION_FILE) -> dict:
     """metrics : {"delay": {...}, "fallback": {...}, "anomaly": {...}} -- un dict de
-    scalaires par module (voir scalars_only)."""
+    scalaires par module (voir scalars_only).
+
+    Fusionne avec le fichier existant plutôt que de l'écraser : quand
+    train_pipeline.py est lancé avec certains modules commentés (entraînement
+    partiel), les modules absents de `metrics` gardent leur dernière entrée connue
+    au lieu de disparaître alors que leurs artefacts restent sur disque et servent."""
+    out_path = Path(out_path)
+    existing = read_version_file(out_path) or {}
+    modules = dict(existing.get("modules") or {})
+    modules.update(metrics)
     info = {
         "built_at": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
-        "modules": metrics,
+        "modules": modules,
     }
-    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(info, f, indent=2, default=str)

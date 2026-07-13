@@ -77,29 +77,48 @@ def main():
     metrics: dict = {}
 
     # Module 1 : Retard
-    print("\n[1/4] Prédiction de retard  (HistGBM + LSTM + Prophet)")
-    print("-" * 50)
-    from src.models import delay
-    metrics["delay"] = mv.scalars_only(delay.train(FOUNDATION, MODELS_DIR / "delay", epochs=30))
+    # print("\n[1/5] Prédiction de retard  (HistGBM + LSTM + Prophet)")
+    # print("-" * 50)
+    # from src.models import delay
+    # metrics["delay"] = mv.scalars_only(delay.train(FOUNDATION, MODELS_DIR / "delay", epochs=30))
 
     # Module 2 : Repli GPS
-    print("\n[2/4] Repli GPS  (Kalman + correction LSTM)")
-    print("-" * 50)
-    from src.models import gps_fallback
-    metrics["fallback"] = mv.scalars_only(gps_fallback.train(MODELS_DIR / "fallback"))
+    # print("\n[2/5] Repli GPS  (Kalman + correction LSTM)")
+    # print("-" * 50)
+    # from src.models import gps_fallback
+    # metrics["fallback"] = mv.scalars_only(gps_fallback.train(MODELS_DIR / "fallback"))
 
     # Module 3 : Détection d'anomalies
-    print("\n[3/4] Détection d'anomalies  (Isolation Forest + Autoencodeur LSTM)")
+    print("\n[3/5] Détection d'anomalies GPS  (Isolation Forest + Autoencodeur LSTM)")
     print("-" * 50)
     from src.models import anomaly
     metrics["anomaly"] = mv.scalars_only(anomaly.train(FOUNDATION, MODELS_DIR / "anomaly"))
 
-    # Module 4 : Chatbot RAG 
-    print("\n[4/4] Chatbot RAG  (ChromaDB + Llama 3 via Groq)")
+    # Module 3bis : Anomalies billetterie -- lit `tickets_daily` dans le reference DB
+    # (pas le parquet de fondation), d'où la connexion SQLite dédiée ici.
+    print("\n[4/5] Anomalies billetterie  (Isolation Forest par ligne)")
     print("-" * 50)
-    from src.models import chatbot
-    anomaly_trips = MODELS_DIR / "anomaly" / "trips_scored.parquet"
-    chatbot.build(FOUNDATION, LINE_DISTANCES, anomaly_trips)
+    from src.data import reference_db as rdb
+    from src.models import ticket_anomaly
+    conn = rdb.init_db()
+    try:
+        metrics["ticket_anomaly"] = mv.scalars_only(
+            ticket_anomaly.train(conn, MODELS_DIR / "ticket_anomaly"))
+        # Phase 2 -- billetterie PAR ARRÊT (voir ticket_anomaly.train_stations) : modèle
+        # SÉPARÉ, lit tickets_station_daily (pas tickets_daily) -- doit être réentraîné à
+        # chaque fois que tickets_station_daily change, sinon les modèles par arrêt
+        # restent silencieusement périmés vis-à-vis du reste du pipeline.
+        metrics["ticket_anomaly_stations"] = mv.scalars_only(
+            ticket_anomaly.train_stations(conn, MODELS_DIR / "ticket_anomaly"))
+    finally:
+        conn.close()
+
+    # # Module 4 : Chatbot RAG
+    # print("\n[5/5] Chatbot RAG  (ChromaDB + Llama 3 via Groq)")
+    # print("-" * 50)
+    # from src.models import chatbot
+    # anomaly_trips = MODELS_DIR / "anomaly" / "trips_scored.parquet"
+    # chatbot.build(FOUNDATION, LINE_DISTANCES, anomaly_trips)
 
     version_info = mv.write_version_file(metrics, MODELS_DIR / "models_version.json")
 
@@ -112,6 +131,7 @@ def main():
     print(f"  {(MODELS_DIR / 'delay').resolve()}")
     print(f"  {(MODELS_DIR / 'fallback').resolve()}")
     print(f"  {(MODELS_DIR / 'anomaly').resolve()}")
+    print(f"  {(MODELS_DIR / 'ticket_anomaly').resolve()}")
     print(f"  {Path('data/processed/chroma_kb').resolve()}")
     print("\nCharger les modèles pour le service :")
     print("  from src.models import delay; models = delay.load()")

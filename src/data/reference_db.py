@@ -81,7 +81,16 @@ CREATE TABLE IF NOT EXISTS trips (
     mean_dwell_s      REAL,
     total_elapsed_min REAL,
     dist_m_max        REAL,
-    max_dark_s        REAL
+    max_dark_s        REAL,
+    terminus_idle_min REAL,
+    trip_dark_before_stop TEXT,
+    trip_dark_after_stop  TEXT,
+    origin_idle_min   REAL,
+    origin_idle_from  TEXT,
+    origin_idle_stop  TEXT,
+    end_idle_min      REAL,
+    end_idle_to       TEXT,
+    end_idle_stop     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trip_stops (
@@ -108,6 +117,49 @@ CREATE TABLE IF NOT EXISTS tickets_daily (
     PRIMARY KEY (company_id, line_id, bus, day)
 );
 
+-- Billetterie PAR ARRÊT D'ORIGINE (Phase 2 de la détection d'anomalies billetterie, voir
+-- docs/WEBSERVICES_NEEDED.md -- service 3). Source : tickets INDIVIDUELS
+-- (Historique_Tickets.Ticket{annee}, ~5,5M documents), PAS `winicari.details` (qui n'a pas
+-- de grain arrêt) -- voir populate_tickets_station_daily. `station_name` = NomFR1 du ticket
+-- (nom lisible de l'arrêt d'origine), pas un stop_id résolu -- la résolution vers `stops`
+-- (pour la carte) se fait par nom au moment de servir, en best-effort (voir
+-- api.main._resolve_station_coords), certains noms peuvent ne pas correspondre.
+CREATE TABLE IF NOT EXISTS tickets_station_daily (
+    company_id   INTEGER REFERENCES companies(company_id),
+    line_id      INTEGER REFERENCES lines(line_id),
+    bus          TEXT,
+    station_name TEXT,
+    day          TEXT,
+    nbr_ticket   INTEGER,
+    recette      REAL,
+    PRIMARY KEY (company_id, line_id, bus, station_name, day)
+);
+
+-- Répartition ALLER/RETOUR de la même billetterie, voir populate_tickets_station_trip_daily.
+-- Table SÉPARÉE de tickets_station_daily -- PAS lue par le modèle d'anomalie billetterie
+-- (qui reste au grain bus-jour, décision utilisateur 2026-07-11 : découper l'ANOMALIE par
+-- trajet est un changement bien plus gros et casse tout bus-jour dont l'appareil ne
+-- distingue pas les trajets -- voir la colonne `direction`) -- sert UNIQUEMENT à
+-- l'affichage du détail par arrêt (« voir le détail par arrêt » côté dashboard), pour
+-- éviter de mélanger dans une même table un aller et un retour qui n'ont pas la même
+-- pause terminus/normale. `direction` dérivée de la PARITÉ de `voyage` sur le ticket
+-- (pair -> ALLER, impair -> RETOUR) -- MÊME convention que `foundation.
+-- correct_direction_from_voyage` côté GPS (déjà validée), pas une règle inventée pour
+-- l'occasion. Vaut 'UNKNOWN' quand `voyage` est absent/toujours à 0 sur tout le
+-- bus-jour (l'appareil ne le suit pas) -- l'API/dashboard replient alors sur la vue
+-- combinée existante (tickets_station_daily) plutôt que d'afficher un faux ALLER seul.
+CREATE TABLE IF NOT EXISTS tickets_station_trip_daily (
+    company_id   INTEGER REFERENCES companies(company_id),
+    line_id      INTEGER REFERENCES lines(line_id),
+    bus          TEXT,
+    direction    TEXT,
+    station_name TEXT,
+    day          TEXT,
+    nbr_ticket   INTEGER,
+    recette      REAL,
+    PRIMARY KEY (company_id, line_id, bus, direction, station_name, day)
+);
+
 CREATE TABLE IF NOT EXISTS anomaly_scores (
     trip_id         INTEGER REFERENCES trips(trip_id),
     model_version   TEXT NOT NULL,
@@ -126,6 +178,43 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA_SQL)
+    # migration idempotente : colonne ajoutée 2026-07-07 (stationnement terminus rogné,
+    # voir foundation.segment_trips) -- CREATE IF NOT EXISTS n'altère pas une table existante
+    try:
+        conn.execute("ALTER TABLE trips ADD COLUMN terminus_idle_min REAL")
+    except sqlite3.OperationalError:
+        pass  # colonne déjà présente
+    # migration idempotente : colonnes ajoutées 2026-07-09 (repère du trou de signal EN ROUTE
+    # le plus important du trajet, voir foundation.derive_arrivals -- max_dark_s pouvait
+    # rester à 0 sur un trajet contenant plusieurs heures de silence GPS)
+    for col in ("trip_dark_before_stop", "trip_dark_after_stop"):
+        try:
+            conn.execute(f"ALTER TABLE trips ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # colonne déjà présente
+    # migration idempotente : colonnes ajoutées 2026-07-10 (stationnement terminus détaillé
+    # origine/fin -- voir foundation.segment_trips) -- séparé de terminus_idle_min (qui reste
+    # la SOMME) pour pouvoir nommer LEQUEL des deux termini et donner l'heure réelle de
+    # départ/arrivée dans le diagnostic, au lieu d'un seul chiffre sans repère
+    for col in ("origin_idle_min", "end_idle_min"):
+        try:
+            conn.execute(f"ALTER TABLE trips ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError:
+            pass  # colonne déjà présente
+    for col in ("origin_idle_from", "origin_idle_stop", "end_idle_to", "end_idle_stop"):
+        try:
+            conn.execute(f"ALTER TABLE trips ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # colonne déjà présente
+    # migration idempotente : colonne `bus` ajoutée à tickets_station_daily le 2026-07-11
+    # (voir populate_tickets_station_daily) -- change la CLÉ PRIMAIRE, pas ALTER-able en
+    # SQLite. La table est entièrement dérivée/régénérée par populate_tickets_station_daily
+    # (DELETE + réinsertion complète), donc un DROP est sans perte -- CREATE TABLE IF NOT
+    # EXISTS juste avant ne recrée PAS une table déjà existante avec l'ancien schéma.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tickets_station_daily)")}
+    if cols and "bus" not in cols:
+        conn.execute("DROP TABLE tickets_station_daily")
+        conn.executescript(SCHEMA_SQL)
     conn.commit()
     return conn
 
@@ -354,6 +443,21 @@ STOP_CLUSTER_EPS_M = 150.0
 _PLACEHOLDER_NAME_RE = re.compile(r"^(stop\d+|section\d+)$", re.IGNORECASE)
 
 
+# Boîte englobante Maghreb (Tunisie + Algérie) -- PAS juste la Tunisie : EPE-TVE opère des
+# lignes transfrontalières avec une société algérienne, donc des arrêts réels existent bien
+# en Algérie (ex. Alger 36.09°N/4.32°E, région Djelfa/Laghouat 33.64°N/1.01°E -- tous deux
+# initialement signalés à tort comme "hors zone" avant cette correction). Reste assez étroit
+# pour rejeter les ancres `ligne.array_lat_opendata` réellement aberrantes détectées cette
+# session : Égypte (31.04°N/31.38°E), Israël/Jordanie (32.52°N/35.52°E) -- bien au-delà de la
+# frontière libyenne (~25°E), donc aucun risque de rejeter un arrêt maghrébin légitime.
+_MAGHREB_LAT = (28.0, 38.0)
+_MAGHREB_LON = (-9.0, 12.0)
+
+
+def _in_maghreb_bbox(lat: float, lon: float) -> bool:
+    return _MAGHREB_LAT[0] <= lat <= _MAGHREB_LAT[1] and _MAGHREB_LON[0] <= lon <= _MAGHREB_LON[1]
+
+
 def _gather_raw_stop_points(wi_db, od_db) -> list[tuple]:
     """Rassemble TOUS les points géocodés bruts : OpenData (4 collections), winicari.station,
     et les ancres `ligne.array_lat_opendata`. Chaque point garde son nom brut ET sa source,
@@ -376,6 +480,7 @@ def _gather_raw_stop_points(wi_db, od_db) -> list[tuple]:
         if abs(lat) > 1 and abs(lon) > 1 and d.get("stop_name_fr"):
             points.append((lat, lon, d["stop_name_fr"], "winicari.station"))
 
+    n_rejected_oob = 0
     for lg in wi_db["ligne"].find({}, {"array_lat_opendata": 1, "array_lng_opendata": 1, "stationnames": 1}):
         la = lg.get("array_lat_opendata") or []
         lo = lg.get("array_lng_opendata") or []
@@ -385,9 +490,17 @@ def _gather_raw_stop_points(wi_db, od_db) -> list[tuple]:
                 lat, lon = float(la[i]), float(lo[i])
             except (TypeError, ValueError):
                 continue
-            if abs(lat) > 1 and abs(lon) > 1:
-                nm = names[i] if i < len(names) else f"stop{i}"
-                points.append((lat, lon, nm, "ligne.array_lat_opendata"))
+            if not (abs(lat) > 1 and abs(lon) > 1):
+                continue  # (0,0)/nul -- pas une ancre réelle, pas comptée comme "hors zone"
+            # Rejette les ancres clairement hors zone Maghreb (ex. Égypte, Israël/Jordanie
+            # détectés cette session) -- voir _in_maghreb_bbox.
+            if not _in_maghreb_bbox(lat, lon):
+                n_rejected_oob += 1
+                continue
+            nm = names[i] if i < len(names) else f"stop{i}"
+            points.append((lat, lon, nm, "ligne.array_lat_opendata"))
+    if n_rejected_oob:
+        print(f"    (ligne.array_lat_opendata : {n_rejected_oob} ancre(s) hors zone Maghreb rejetée(s))")
     return points
 
 
@@ -762,6 +875,44 @@ def _tier5_ticket_order(ticket_index, stops_od_dict: dict, idx: _StopIndex, soci
     return out if len(out) >= 4 else None
 
 
+# Assignations ligne/arrêt connues comme fausses -- trouvées en vérifiant systématiquement
+# TOUTE la géométrie résolue pour des sauts consécutifs invraisemblables (>50km ET >8x la
+# distance médiane des segments de la ligne), puis en testant le retrait de chaque extrémité
+# du segment pour identifier laquelle des deux fait réellement baisser le ratio de saut de
+# CETTE ligne -- pas une supposition manuelle. Dans TOUS ces cas sauf EL GARAA (qui a deux
+# candidats OpenData réels et distincts, ~24km d'écart), le nom n'a qu'UNE seule coordonnée
+# réelle connue dans TOUTES les sources (OpenData, winicari.station, ligne.array_lat_opendata)
+# -- il n'existe donc pas de "deuxième coordonnée" à garder : soit ce nom est utilisé sur la
+# bonne ligne quelque part (qu'on garde), soit il ne l'est nulle part pour CETTE ligne (qu'on
+# exclut ici plutôt que de fabriquer une coordonnée qu'on n'a pas). N'exclut QUE cette ligne
+# précise -- le stop reste pleinement utilisable sur toute autre ligne où il est cohérent.
+#
+# Clé = (societe, line_code, nom NORMALISÉ via stations.norm) -- PAS stop_id : les stop_id
+# sont regénérés à chaque populate_stops (clustering + autoincrément), un ID épinglé ici
+# casserait silencieusement au premier rebuild dont le clustering change. Le nom normalisé
+# est stable tant que la collision existe -- c'est précisément LA propriété qu'on exclut.
+_KNOWN_BAD_LINE_STOP_ASSIGNMENTS: set[tuple[str, str, str]] = {
+    ("S.R.T.K", "204", "OUEDRAMAL"),      # incohérent avec SBEITLA/EL GONNA sur cette ligne
+    ("S.T.S", "325", "ELKEF"),            # incohérent avec CHEBIKA sur cette ligne
+    ("S.T.S", "227", "SAIDA"),            # homonyme nord (36.83N) sur une ligne région Sousse
+    ("S.T.S", "232", "SAIDA"),            # même homonyme nord, même problème
+    ("S.T.S", "232", "SOUASSI"),          # homonyme nord (36.83N) -- le vrai Souassi est en région Mahdia
+    ("S.R.T.BIZERTE", "550", "DKHILA"),   # homonyme région Monastir (35.52N/10.97E) sur une ligne Tunis/nord
+    ("S.R.T.BIZERTE", "560", "DKHILA"),
+    ("SRT.ELGOUAFEL", "8", "SIDIAHMED"),  # incohérent avec Kalla Khesba sur cette ligne
+    ("SRT.ELGOUAFEL", "57", "ECHIBIKA"),  # collision de nom (homonyme lointain)
+    ("SRT.ELGOUAFEL", "83", "ECHIBIKA"),
+    ("SRT.ELGOUAFEL", "97", "ECHIBIKA"),
+    ("SRT.ELGOUAFEL", "66", "GABES"),     # incohérent avec Kbili sur cette ligne précise
+    ("SRT.ELGOUAFEL", "2213", "FATNASSA"),# incohérent avec KM 105 sur cette ligne
+    ("SRT.ELGOUAFEL", "17", "ELGARAA"),   # les DEUX candidats EL GARAA sont à 80-100km du reste
+                                          # de la ligne (GAFSA/Majnni/El Gtar, tous ~34.3-34.4N)
+    ("S.R.T.K", "505", "MADRESSA1"),      # incohérent avec EL BATEN sur ces 3 lignes
+    ("S.R.T.K", "506", "MADRESSA1"),
+    ("S.R.T.K", "507", "MADRESSA1"),
+}
+
+
 def populate_line_stops(conn: sqlite3.Connection, wi_db, od_db, tk_db=None,
                          ticket_index=None) -> dict:
     """Peuple `line_stops` en essayant chaque niveau dans l'ordre de fiabilité, ligne par
@@ -782,6 +933,12 @@ def populate_line_stops(conn: sqlite3.Connection, wi_db, od_db, tk_db=None,
     ligne_by_key = {(d.get("societe"), str(d.get("code")).strip()): d for d in wi_db["ligne"].find({})}
     lines = conn.execute("SELECT line_id, company_id, line_code FROM lines").fetchall()
     company_name = {row[0]: row[1] for row in conn.execute("SELECT company_id, canonical_name FROM companies")}
+
+    # stop_id -> nom normalisé, pour la liste d'exclusions (voir
+    # _KNOWN_BAD_LINE_STOP_ASSIGNMENTS : clé par nom, stable entre rebuilds)
+    from src.data.stations import norm as _norm_name
+    stop_norm_name = {sid: _norm_name(name) for sid, name in
+                      conn.execute("SELECT stop_id, primary_name FROM stops")}
 
     conn.execute("DELETE FROM line_stops")
     tier_counts = {"stop_station": 0, "stop_opendata_code": 0, "stop_names_registry": 0,
@@ -818,6 +975,8 @@ def populate_line_stops(conn: sqlite3.Connection, wi_db, od_db, tk_db=None,
         for r in result:
             if r["seq"] in seen_seq:
                 continue
+            if (societe, line_code, stop_norm_name.get(r["stop_id"], "")) in _KNOWN_BAD_LINE_STOP_ASSIGNMENTS:
+                continue  # voir _KNOWN_BAD_LINE_STOP_ASSIGNMENTS -- assignation vérifiée fausse
             seen_seq.add(r["seq"])
             deduped.append(r)
         conn.executemany(
@@ -836,10 +995,19 @@ def _usable_lines_from_line_stops(conn: sqlite3.Connection) -> dict:
     plus fiables disponibles, voir populate_line_stops) plutôt que sur la logique ad-hoc de
     `foundation.py`. Même forme de sortie que `foundation.stops_frame` + colonne `stop_id`
     supplémentaire pour rattacher chaque arrivée à son arrêt canonique après reconstruction.
+
+    C'est la source de géométrie RÉELLEMENT utilisée par `build_foundation.py` (le script de
+    reconstruction en production) -- `bridge_geometry_outliers` y est donc appliqué comme dans
+    `foundation.stops_frame`/`_stop_station_frame` : un nom d'arrêt partagé entre plusieurs
+    lignes (ex. S.R.T.K "EL GARAA", correcte pour quelques lignes, ~25-27km fausse pour la
+    plupart des autres -- voir `api.main.get_coord_suspect`) gonflait `route_len` de dizaines
+    de km sur les lignes affectées, ce qui faussait tous les seuils dérivés de route_len dans
+    `segment_trips` (`full_frac`/`reversal_frac`/`min_span_frac`) -- confirmé : +55km/21.6% sur
+    S.R.T.K/217 à lui seul, assez pour faire classer "partiel" un trajet réellement complet.
     """
     import numpy as np
     import pandas as pd
-    from src.data.foundation import haversine
+    from src.data.foundation import haversine, bridge_geometry_outliers, Config
 
     rows = conn.execute("""
         SELECT l.line_code, c.canonical_name AS societe, ls.seq, ls.stop_id, s.primary_name, s.lat, s.lon
@@ -854,11 +1022,13 @@ def _usable_lines_from_line_stops(conn: sqlite3.Connection) -> dict:
     for line_code, societe, seq, stop_id, name, lat, lon in rows:
         by_line.setdefault((line_code, societe), []).append((seq, stop_id, name, lat, lon))
 
+    cfg = Config()
     out = {}
     for key, entries in by_line.items():
         entries.sort(key=lambda x: x[0])
         df = pd.DataFrame(entries, columns=["route_seq", "stop_id", "name", "lat", "lon"])
         seg = haversine(df["lat"].values[:-1], df["lon"].values[:-1], df["lat"].values[1:], df["lon"].values[1:])
+        seg = bridge_geometry_outliers(df["lat"].values, df["lon"].values, seg, cfg)
         df["s_m"] = np.concatenate([[0.0], np.cumsum(seg)])
         df.insert(0, "seq", range(len(df)))
         out[key] = df
@@ -911,7 +1081,8 @@ def populate_trips(conn: sqlite3.Connection, gps_db, since_day: str = None, unti
 
     n_candidates = n_busdays_with_trips = n_stop_rows = 0
     frames = []
-    for day in days:
+    from tqdm import tqdm
+    for day in tqdm(days, desc="Trajets GPS", unit="jour"):
         for (dy, line, soc, bus) in fdn.candidates_for_day(gps_db, day, usable, cfg):
             n_candidates += 1
             key = (line, soc)
@@ -946,15 +1117,27 @@ def populate_trips(conn: sqlite3.Connection, gps_db, since_day: str = None, unti
         if is_full is None:
             n_loop_unknown += 1
         n_full += int(is_full) if is_full else 0
+        origin_idle_from = t.get("origin_idle_from")
+        end_idle_to = t.get("end_idle_to")
         cur.execute(
             """INSERT INTO trips (line_id, company_id, bus, day, dir, is_full, trip_start, trip_end,
                                    n_stops, match_rate, max_dwell_s, mean_dwell_s, total_elapsed_min,
-                                   dist_m_max, max_dark_s)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   dist_m_max, max_dark_s, terminus_idle_min,
+                                   trip_dark_before_stop, trip_dark_after_stop,
+                                   origin_idle_min, origin_idle_from, origin_idle_stop,
+                                   end_idle_min, end_idle_to, end_idle_stop)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (line_id, company_id, str(t["bus"]), str(t["day"]), t["dir"], is_full,
              str(t["trip_start"]), str(t["trip_end"]), int(t["n_stops"]), float(t["match_rate"]),
              float(t["max_dwell_s"]), float(t["mean_dwell_s"]), float(t["total_elapsed"]),
-             float(t["dist_m_max"]), float(t["max_dark_s"])),
+             float(t["dist_m_max"]), float(t["max_dark_s"]), float(t.get("terminus_idle_min", 0.0) or 0.0),
+             t.get("trip_dark_before_stop"), t.get("trip_dark_after_stop"),
+             float(t.get("origin_idle_min", 0.0) or 0.0),
+             str(origin_idle_from) if pd.notna(origin_idle_from) else None,
+             t.get("origin_idle_stop"),
+             float(t.get("end_idle_min", 0.0) or 0.0),
+             str(end_idle_to) if pd.notna(end_idle_to) else None,
+             t.get("end_idle_stop")),
         )
         trip_pk = cur.lastrowid
 
@@ -1043,6 +1226,214 @@ def populate_tickets_daily(conn: sqlite3.Connection, wi_db,
             "n_unmatched_company": n_unmatched_company, "n_unmatched_line": n_unmatched_line}
 
 
+def populate_tickets_station_daily(conn: sqlite3.Connection, tk_db,
+                                   canonical_companies: dict[str, list[str]] = None,
+                                   years: list[str] = None) -> dict:
+    """Peuple `tickets_station_daily` depuis les tickets INDIVIDUELS
+    (`Historique_Tickets.Ticket{annee}`, ~5,5M documents au total sur 2019-2026) --
+    seule source qui porte l'arrêt d'ORIGINE par ticket (`origine`/`NomFR1`), absent de
+    `winicari.details` (voir `populate_tickets_daily`).
+
+    Champs vérifiés directement sur des documents réels (pas devinés) :
+    - `CodeRoute` = code de ligne réel (PAS `Codeligne`, qui vaut '00'/'99' -- un code de
+      catégorie, pas la ligne).
+    - `CodeBus` (ex. 6044, même numérotation que le GPS) -- inclus dans le groupement
+      depuis le 2026-07-11 : sans lui, une ligne desservie par plusieurs bus le même jour
+      mélangeait leurs ventes dans UNE seule ligne par (ligne, arrêt, jour), ce qui ne
+      pouvait pas se recouper avec le total d'un bus-jour précis affiché ailleurs
+      (`tickets_daily`) -- constaté : la somme par arrêt d'un jour donné dépassait très
+      largement la recette du bus-jour signalé, parce qu'elle incluait TOUS les bus de la
+      ligne ce jour-là, pas seulement celui affiché.
+    - `jour_service` (format "YYYY/MM/DD") = jour de service, cohérent entre années,
+      même format que `winicari.details.date` -- utilisé plutôt que `date`/`date_ticket`
+      (l'heure d'émission du ticket, pas forcément le même jour calendaire qu'un service
+      commencé juste avant minuit) ou `date_service` (horodatage, pas juste le jour).
+    - `Societe` a les mêmes variantes que `winicari.details` (ex. "S.R.T.K0"), résolues
+      via le même `canonical_companies`/`alias_to_canon` que `populate_tickets_daily`.
+    - `requisition` (\"O\"/\"N\") -- EXCLU de `recette` (mais PAS du compte `nbr_ticket`).
+      Constaté (2026-07-11) en comparant bus-jour par bus-jour contre `winicari.details` :
+      un ticket `requisition=O` est bien ÉMIS (compte dans `nbrTicket` des deux côtés) mais
+      son `Prix` n'entre PAS dans la `recette` de `winicari.details` -- vérifié exact sur
+      plusieurs bus-jours (ex. S.R.T.K/217/6028/20260621 : 94 tickets des deux côtés, somme
+      brute 704.36 DT contre recette réelle 561.26 DT ; en excluant les 15 tickets
+      requisition=O -- 143.10 DT -- on retombe EXACTEMENT sur 561.26 DT). Sans cette
+      exclusion, `recette` par arrêt était gonflée et ne se recoupait pas avec les totaux
+      bus-jour déjà utilisés par le modèle billetterie existant.
+      NOTE : ça ne réconcilie pas 100% des bus-jours (un résidu plus petit subsiste sur
+      certains, cause non identifiée avec les champs disponibles -- voir la note dans
+      docs/WEBSERVICES_NEEDED.md, à clarifier avec l'équipe plateforme plutôt que deviner
+      plus loin) -- mais c'est un progrès net et vérifié, pas une supposition.
+
+    Agrégation faite CÔTÉ MONGO (`$group`) plutôt qu'en ramenant 5,5M documents en Python --
+    un ordre de grandeur plus rapide, et le volume par (ligne, arrêt, jour) est bien plus
+    petit une fois groupé.
+    """
+    canonical_companies = canonical_companies or CANONICAL_COMPANIES
+    alias_to_canon = {alias: canon for canon, aliases in canonical_companies.items() for alias in aliases}
+    company_id_by_name = {row[1]: row[0] for row in conn.execute("SELECT company_id, canonical_name FROM companies")}
+    line_id_by_key = {(row[2], row[1]): row[0] for row in conn.execute(
+        "SELECT l.line_id, c.canonical_name, l.line_code FROM lines l JOIN companies c ON c.company_id = l.company_id")}
+
+    years = years or sorted(c for c in tk_db.list_collection_names() if c.startswith("Ticket"))
+    pipeline = [
+        {"$group": {
+            "_id": {"societe": "$Societe", "line": "$CodeRoute", "bus": "$CodeBus",
+                    "station": "$NomFR1", "day": "$jour_service"},
+            "nbr_ticket": {"$sum": 1},
+            "recette": {"$sum": {"$cond": [{"$eq": ["$requisition", "O"]}, 0, "$Prix"]}},
+        }}
+    ]
+
+    agg: dict = {}
+    n_null_societe = n_unmatched_company = n_unmatched_line = n_null_station = 0
+    for yr in years:
+        for row in tk_db[yr].aggregate(pipeline, allowDiskUse=True):
+            key_raw = row["_id"]
+            raw_soc = key_raw.get("societe")
+            if not raw_soc:
+                n_null_societe += 1
+                continue
+            canon = alias_to_canon.get(raw_soc)
+            company_id = company_id_by_name.get(canon) if canon else None
+            if company_id is None:
+                n_unmatched_company += 1
+                continue
+            line_code = str(key_raw.get("line", "")).strip()
+            line_id = line_id_by_key.get((line_code, canon))
+            if line_id is None:
+                n_unmatched_line += 1
+                continue
+            station = (key_raw.get("station") or "").strip()
+            if not station:
+                n_null_station += 1
+                continue
+            bus = str(key_raw.get("bus", "")).strip()
+            parts = str(key_raw.get("day", "")).split("/")
+            day = f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}" if len(parts) == 3 else None
+            if day is None:
+                continue
+            key = (company_id, line_id, bus, station, day)
+            entry = agg.setdefault(key, {"nbr_ticket": 0, "recette": 0.0})
+            entry["nbr_ticket"] += int(row.get("nbr_ticket") or 0)
+            entry["recette"] += float(row.get("recette") or 0.0)
+
+    conn.execute("DELETE FROM tickets_station_daily")
+    conn.executemany(
+        """INSERT INTO tickets_station_daily (company_id, line_id, bus, station_name, day,
+                                              nbr_ticket, recette)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        [(cid, lid, bus, station, day, v["nbr_ticket"], v["recette"])
+         for (cid, lid, bus, station, day), v in agg.items()],
+    )
+    conn.commit()
+    return {"rows_inserted": len(agg), "years": years, "n_null_societe": n_null_societe,
+            "n_unmatched_company": n_unmatched_company, "n_unmatched_line": n_unmatched_line,
+            "n_null_station": n_null_station}
+
+
+def populate_tickets_station_trip_daily(conn: sqlite3.Connection, tk_db,
+                                        canonical_companies: dict[str, list[str]] = None,
+                                        years: list[str] = None) -> dict:
+    """Peuple `tickets_station_trip_daily` -- même source que `populate_tickets_station_daily`
+    (tickets individuels), mais groupée EN PLUS par direction ALLER/RETOUR, dérivée de la
+    PARITÉ de `voyage` (pair -> ALLER, impair -> RETOUR) -- même convention que
+    `foundation.correct_direction_from_voyage` côté GPS, pas une règle nouvelle.
+
+    Repli 'UNKNOWN' : certains appareils ne suivent pas `voyage` (reste à 0 toute la
+    journée) -- dans ce cas, séparer par parité donnerait un faux ALLER-seul (tout à 0 est
+    pair) qui ferait croire à une info de direction inexistante. Détecté PAR BUS-JOUR
+    (pas par ticket) via une première passe qui vérifie si `voyage` prend au moins une
+    valeur non nulle ce jour-là pour ce bus, toutes lignes confondues -- si non, toutes
+    les lignes de ce bus-jour sont étiquetées 'UNKNOWN' plutôt que 'ALLER'.
+    """
+    canonical_companies = canonical_companies or CANONICAL_COMPANIES
+    alias_to_canon = {alias: canon for canon, aliases in canonical_companies.items() for alias in aliases}
+    company_id_by_name = {row[1]: row[0] for row in conn.execute("SELECT company_id, canonical_name FROM companies")}
+    line_id_by_key = {(row[2], row[1]): row[0] for row in conn.execute(
+        "SELECT l.line_id, c.canonical_name, l.line_code FROM lines l JOIN companies c ON c.company_id = l.company_id")}
+
+    years = years or sorted(c for c in tk_db.list_collection_names() if c.startswith("Ticket"))
+
+    has_voyage_pipeline = [
+        {"$group": {
+            "_id": {"societe": "$Societe", "bus": "$CodeBus", "day": "$jour_service"},
+            "has_voyage": {"$max": {"$cond": [{"$gt": [{"$ifNull": ["$voyage", 0]}, 0]}, 1, 0]}},
+        }}
+    ]
+    trip_pipeline = [
+        {"$group": {
+            "_id": {"societe": "$Societe", "line": "$CodeRoute", "bus": "$CodeBus",
+                    "station": "$NomFR1", "day": "$jour_service",
+                    "parity": {"$mod": [{"$ifNull": ["$voyage", 0]}, 2]}},
+            "nbr_ticket": {"$sum": 1},
+            "recette": {"$sum": {"$cond": [{"$eq": ["$requisition", "O"]}, 0, "$Prix"]}},
+        }}
+    ]
+
+    agg: dict = {}
+    n_null_societe = n_unmatched_company = n_unmatched_line = n_null_station = 0
+    for yr in years:
+        has_voyage: dict = {}
+        for row in tk_db[yr].aggregate(has_voyage_pipeline, allowDiskUse=True):
+            k = row["_id"]
+            soc = k.get("societe")
+            bus_raw = k.get("bus")
+            if not isinstance(soc, str) or isinstance(bus_raw, list):
+                continue  # champ mal formé sur ce doc (rare) -- ignoré, pas deviné
+            parts = str(k.get("day", "")).split("/")
+            day = f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}" if len(parts) == 3 else None
+            if day is None:
+                continue
+            has_voyage[(soc, str(bus_raw or "").strip(), day)] = bool(row["has_voyage"])
+
+        for row in tk_db[yr].aggregate(trip_pipeline, allowDiskUse=True):
+            key_raw = row["_id"]
+            raw_soc = key_raw.get("societe")
+            if not raw_soc:
+                n_null_societe += 1
+                continue
+            canon = alias_to_canon.get(raw_soc)
+            company_id = company_id_by_name.get(canon) if canon else None
+            if company_id is None:
+                n_unmatched_company += 1
+                continue
+            line_code = str(key_raw.get("line", "")).strip()
+            line_id = line_id_by_key.get((line_code, canon))
+            if line_id is None:
+                n_unmatched_line += 1
+                continue
+            station = (key_raw.get("station") or "").strip()
+            if not station:
+                n_null_station += 1
+                continue
+            bus = str(key_raw.get("bus", "")).strip()
+            parts = str(key_raw.get("day", "")).split("/")
+            day = f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}" if len(parts) == 3 else None
+            if day is None:
+                continue
+            if has_voyage.get((raw_soc, bus, day)):
+                direction = "ALLER" if key_raw.get("parity") == 0 else "RETOUR"
+            else:
+                direction = "UNKNOWN"
+            key = (company_id, line_id, bus, direction, station, day)
+            entry = agg.setdefault(key, {"nbr_ticket": 0, "recette": 0.0})
+            entry["nbr_ticket"] += int(row.get("nbr_ticket") or 0)
+            entry["recette"] += float(row.get("recette") or 0.0)
+
+    conn.execute("DELETE FROM tickets_station_trip_daily")
+    conn.executemany(
+        """INSERT INTO tickets_station_trip_daily (company_id, line_id, bus, direction,
+                                                    station_name, day, nbr_ticket, recette)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        [(cid, lid, bus, direction, station, day, v["nbr_ticket"], v["recette"])
+         for (cid, lid, bus, direction, station, day), v in agg.items()],
+    )
+    conn.commit()
+    return {"rows_inserted": len(agg), "years": years, "n_null_societe": n_null_societe,
+            "n_unmatched_company": n_unmatched_company, "n_unmatched_line": n_unmatched_line,
+            "n_null_station": n_null_station}
+
+
 # Export reconstitue la forme `foundation_arrivals_full.parquet` depuis trips/trip_stops
 def export_foundation_parquet(conn: sqlite3.Connection, out_path) -> dict:
     """Reconstruit un parquet avec EXACTEMENT les colonnes de l'ancien
@@ -1063,6 +1454,20 @@ def export_foundation_parquet(conn: sqlite3.Connection, out_path) -> dict:
     df = pd.read_sql("""
         SELECT t.day, l.line_code AS line, c.canonical_name AS societe, t.bus,
                t.trip_id, t.dir, t.is_full AS full, t.trip_start, t.trip_end,
+               COALESCE(t.terminus_idle_min, 0) AS terminus_idle_min,
+               -- max_dark_s DEJA CORRIGE (voir anomaly.trip_features) : ré-exposé ici sous
+               -- trip_dark_s, répété par ligne, pour que le second appel à trip_features() au
+               -- moment de l'entraînement (sur CE parquet) réapplique la même correction au
+               -- lieu de retomber sur le scan par-arrêt seul (qui ratait les trous EN ROUTE).
+               COALESCE(t.max_dark_s, 0) AS trip_dark_s,
+               t.trip_dark_before_stop, t.trip_dark_after_stop,
+               -- Stationnement terminus détaillé (voir foundation.segment_trips) : séparé
+               -- origine/fin + nom du terminus + horodatage réel, pour nommer LEQUEL des
+               -- deux termini et donner l'heure de départ/arrivée réelle dans le diagnostic.
+               COALESCE(t.origin_idle_min, 0) AS origin_idle_min,
+               t.origin_idle_from, t.origin_idle_stop,
+               COALESCE(t.end_idle_min, 0) AS end_idle_min,
+               t.end_idle_to, t.end_idle_stop,
                ts.seq, ts.seq AS route_seq, s.primary_name AS stop,
                ts.arrival, ts.departure, ts.dwell_s, ts.dark_s, ts.had_gap,
                ts.dist_m, ts.matched
@@ -1080,6 +1485,8 @@ def export_foundation_parquet(conn: sqlite3.Connection, out_path) -> dict:
     df["departure"] = pd.to_datetime(df["departure"], format="mixed")
     df["trip_start"] = pd.to_datetime(df["trip_start"], format="mixed")
     df["trip_end"] = pd.to_datetime(df["trip_end"], format="mixed")
+    df["origin_idle_from"] = pd.to_datetime(df["origin_idle_from"], format="mixed")
+    df["end_idle_to"] = pd.to_datetime(df["end_idle_to"], format="mixed")
     df["matched"] = df["matched"].astype(bool)
     df["had_gap"] = df["had_gap"].astype(bool)
     # `full` reste nullable (None = ligne en boucle, voir foundation.detect_loop_route) --

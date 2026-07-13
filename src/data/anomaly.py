@@ -58,7 +58,6 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
         n_stops=("seq", "count"),
         max_dwell_s=("dwell_s", "max"),
         mean_dwell_s=("dwell_s", "mean"),
-        total_elapsed=("elapsed_min", "max"),
         dist_m_max=("dist_m", "max"),
         dir=("dir", "first"),
         full=("full", "first"),
@@ -67,10 +66,57 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
     )
     if "dark_s" in fa.columns:
         agg_dict["max_dark_s"] = ("dark_s", "max")
+    # Trou de signal maximal du trajet ENTIER (indépendant des arrêts, voir
+    # foundation.derive_arrivals) -- combiné plus bas avec max_dark_s par-arrêt via max(), car
+    # un trou EN ROUTE (entre deux arrêts, jamais rattaché à la fenêtre d'attente d'un arrêt
+    # matché) est invisible au scan par-arrêt et pouvait laisser max_dark_s à 0 alors que le
+    # trajet contenait un trou de plusieurs heures (constaté : 4h41 sur 230km, dark_s=0 partout).
+    if "trip_dark_s" in fa.columns:
+        agg_dict["trip_dark_s"] = ("trip_dark_s", "first")
+    # Arrêts encadrant ce trou EN ROUTE -- purement informatif (pas une feature du modèle),
+    # pour qu'une puce d'explication puisse dire « perte de signal entre X et Y » plutôt
+    # qu'un chiffre sans repère géographique.
+    if "trip_dark_before_stop" in fa.columns:
+        agg_dict["trip_dark_before_stop"] = ("trip_dark_before_stop", "first")
+    if "trip_dark_after_stop" in fa.columns:
+        agg_dict["trip_dark_after_stop"] = ("trip_dark_after_stop", "first")
+    # Stationnement terminus rogné du trajet par segment_trips -- constante par trajet.
+    # C'est LE signal « service non clôturé » (ex. 170 min garé à Sousse avant départ) :
+    # il ne gonfle plus la durée mais reste détectable comme anomalie à part entière.
+    if "terminus_idle_min" in fa.columns:
+        agg_dict["terminus_idle_min"] = ("terminus_idle_min", "first")
+    # Détail du stationnement terminus -- séparé origine/fin (pas juste sommé) + horodatage
+    # réel + NOM du terminus concerné. Purement informatif (pas des features du modèle,
+    # `terminus_idle_min` ci-dessus reste la feature) : sert à répondre « stationné OÙ, et
+    # à quelle heure le trajet a-t-il vraiment commencé ? » dans la puce d'explication,
+    # au lieu d'un seul chiffre sans repère (constaté : « 84 min au terminus » sans dire
+    # lequel, alors que c'était nommable -- confusion notamment quand un arrêt nommé montre
+    # une immobilisation séparée et qu'on ne peut pas dire si c'est LE MÊME terminus).
+    for col in ("origin_idle_min", "end_idle_min", "origin_idle_from", "end_idle_to",
+               "origin_idle_stop", "end_idle_stop"):
+        if col in fa.columns:
+            agg_dict[col] = (col, "first")
 
     matched = fa[fa["matched"]].copy()
     trips = matched.groupby(TRIP_KEYS).agg(**agg_dict).reset_index()
     trips = trips.merge(match_rate, on=TRIP_KEYS, how="left")
+    if "trip_dark_s" in trips.columns:
+        # Ne PAS jeter trip_dark_s après fusion : ce trip_features() est appelé DEUX FOIS dans
+        # le pipeline (une fois pour peupler `trips` en base, une fois de plus au moment de
+        # l'entraînement à partir du parquet exporté) -- le second appel a besoin de la même
+        # colonne source pour réappliquer la correction, sinon le fix ne survit pas au
+        # rebuild+export (voir reference_db.export_foundation_parquet).
+        trips["max_dark_s"] = trips[["max_dark_s", "trip_dark_s"]].max(axis=1)
+
+    # BUG CORRIGÉ (2026-07-04) : total_elapsed était max(elapsed_min) sur les arrêts
+    # CORRESPONDUS uniquement -- si le bus perd le signal/sort de tolérance pendant la
+    # majeure partie du trajet (ex. 3 arrêts correspondus sur 28, tous dans les 15 premières
+    # minutes d'un trajet réel de 6h25), ça sous-estime radicalement la durée réelle (mesuré :
+    # 14.8 min rapportés vs 385 min réels pour un trajet complet, s_lo->s_hi couvrant toute la
+    # route). `trip_start`/`trip_end` sont des constantes au niveau du trajet (posées par
+    # `reconstruct_bus_day`), donc fiables même sur le sous-ensemble "matched" -- les utiliser
+    # directement donne la vraie durée, indépendamment du taux de correspondance.
+    trips["total_elapsed"] = (trips["trip_end"] - trips["trip_start"]).dt.total_seconds() / 60
 
     # name of the stop with the worst dwell (for explanation)
     if "dwell_s" in matched.columns and "stop" in matched.columns:
@@ -88,6 +134,16 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
     if "max_dark_s" not in trips.columns:
         trips["max_dark_s"] = 0.0
     trips["max_dark_s"] = trips["max_dark_s"].fillna(0)
+    if "terminus_idle_min" not in trips.columns:
+        trips["terminus_idle_min"] = 0.0   # anciens parquets sans la colonne
+    trips["terminus_idle_min"] = trips["terminus_idle_min"].fillna(0)
+    for col in ("origin_idle_min", "end_idle_min"):
+        if col not in trips.columns:
+            trips[col] = 0.0               # anciens parquets sans la colonne
+        trips[col] = trips[col].fillna(0)
+    for col in ("origin_idle_from", "end_idle_to", "origin_idle_stop", "end_idle_stop"):
+        if col not in trips.columns:
+            trips[col] = None              # anciens parquets sans la colonne
 
     for group_cols, col in [(["societe", "bus"], "elapsed_vs_bus_z"),
                             (["societe", "line"], "elapsed_vs_line_z")]:
@@ -101,7 +157,7 @@ def trip_features(fa: pd.DataFrame, cfg: AnomalyConfig) -> pd.DataFrame:
 
 FEATURES = ["n_stops", "match_rate", "max_dwell_s", "mean_dwell_s",
             "total_elapsed", "dist_m_max", "max_dark_s",
-            "elapsed_vs_bus_z", "elapsed_vs_line_z"]
+            "elapsed_vs_bus_z", "elapsed_vs_line_z", "terminus_idle_min"]
 
 
 def _scale(X: np.ndarray, mean: np.ndarray = None, std: np.ndarray = None):

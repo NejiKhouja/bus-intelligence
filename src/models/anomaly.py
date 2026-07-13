@@ -327,6 +327,7 @@ _REASON_BUILDERS = {
     "max_dark_s":    ("high", lambda v: f"Perte de signal GPS prolongée à un arrêt (~{v/60:.0f} min sans ping)"),
     "elapsed_vs_bus_z":  ("either", lambda v: f"Trajet {'plus long' if v > 0 else 'plus court'} que d'habitude pour CE BUS (z={v:+.1f})"),
     "elapsed_vs_line_z": ("either", lambda v: f"Trajet {'plus long' if v > 0 else 'plus court'} que d'habitude pour CETTE LIGNE (z={v:+.1f})"),
+    "terminus_idle_min": ("high", lambda v: f"Stationnement prolongé au terminus (~{v:.0f} min avant départ/après arrivée — service probablement non clôturé)"),
 }
 
 
@@ -341,7 +342,7 @@ def explain_trips(models: dict, scored: pd.DataFrame, *,
     if_models = models.get("if_models", {})
 
     out = scored.copy()
-    reasons_col, top_col = [], []
+    reasons_col, reason_features_col, top_col = [], [], []
 
     for _, row in out.iterrows():
         # Use company-specific stats so z-scores compare against that operator's baseline
@@ -372,17 +373,21 @@ def explain_trips(models: dict, scored: pd.DataFrame, *,
                 scored_feats.append((signed, f, row[f]))
         scored_feats.sort(reverse=True)
         reasons = [_REASON_BUILDERS[f][1](v) for _, f, v in scored_feats[:max_reasons]]
+        reason_features = [f for _, f, v in scored_feats[:max_reasons]]
 
         # Informational signal-loss note — only when max_dark_s didn't already trigger
         dark = float(row.get("max_dark_s", 0) or 0)
         already_in_reasons = any(f == "max_dark_s" for _, f, _ in scored_feats)
         if dark > 600 and not already_in_reasons and len(reasons) < max_reasons:
             reasons.append(f"Perte de signal GPS à un arrêt (~{dark/60:.0f} min sans ping — non comptée comme immobilisation)")
+            reason_features.append("max_dark_s")
 
         reasons_col.append(reasons)
+        reason_features_col.append(reason_features)
         top_col.append(scored_feats[0][1] if scored_feats else None)
 
     out["reasons"] = reasons_col
+    out["reason_features"] = reason_features_col
     out["top_feature"] = top_col
     out["anomaly_strength"] = (-out["if_score"]).round(3)
     out["severity"] = np.where(out.get("dual_anomaly", False), "high",
