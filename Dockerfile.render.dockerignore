@@ -42,6 +42,13 @@ models/ticket_anomaly/stations/
 # tickets_station_trip_daily), renamed to the expected path in the COPY step below.
 data/reference/winicari_reference.db
 
+# foundation_arrivals_full.parquet -- not COPYed by Dockerfile.render (decision
+# 2026-07-13, see the note there): still OOM'd at 512Mi even after a 5x in-memory
+# shrink, and the endpoints that are actually exposed (anomaly-history,
+# ticket-anomaly-*) read the precomputed trips_scored.parquet/days_scored.parquet
+# instead, not this file. Excluded here for build-context size, not correctness.
+data/processed/foundation_arrivals_full.parquet
+
 __pycache__/
 *.pyc
 .ipynb_checkpoints/

@@ -242,14 +242,21 @@ class ModelManager:
         """Maps stop_name -> (lat, lon) for a given line."""
         return self._stop_coords.get(f"{societe}_{line}", {})
 
-    def get_gps_trip_count(self, societe: str, line: str, bus: str, day: str) -> int:
-        """Nombre de trajets GPS réels pour ce (société, ligne, bus, jour) exact.
+    def get_gps_trip_count(self, societe: str, line: str, bus: str, day: str) -> Optional[int]:
+        """Nombre de trajets GPS réels pour ce (société, ligne, bus, jour) exact -- ou
+        `None` si le cross-check GPS n'est pas disponible DU TOUT sur ce déploiement
+        (foundation_arrivals_full.parquet absent -- voir Dockerfile.render, exclu du
+        slim anomaly-only pour tenir dans 512 Mo). `None` DOIT rester distinct de `0` :
+        `0` veut dire "vérifié, aucun trajet GPS ce jour-là" (vrai signal, voir
+        is_no_service dans `_ticket_rows_with_reasons`), alors que `None` veut dire "pas
+        vérifiable ici" -- les confondre ferait passer CHAQUE jour-bus signalé pour "pas
+        d'anomalie réelle" et les ferait tous disparaître à tort de la vue client.
 
         Sert à distinguer une panne de machine à tickets (le bus a bien circulé --
         confirmé côté GPS -- mais quasi aucun ticket enregistré) d'une vraie anomalie de
-        recette/fraude, voir `_ticket_rows_with_reasons`. Lazy + mise en cache : construit
-        au premier appel à partir de `foundation_arrivals_full.parquet` (déjà chargé en
-        mémoire), pas de nouvelle lecture disque par requête.
+        recette/fraude. Lazy + mise en cache : construit au premier appel à partir de
+        `foundation_arrivals_full.parquet` (déjà chargé en mémoire), pas de nouvelle
+        lecture disque par requête.
         """
         if self._gps_trip_counts is None:
             fa = self.get_foundation_data()
@@ -259,6 +266,8 @@ class ModelManager:
                 counts = (fa.assign(bus=fa["bus"].astype(str))
                           .groupby(["societe", "line", "bus", "day"], observed=True)["trip_id"].nunique())
                 self._gps_trip_counts = counts.to_dict()
+        if not self._gps_trip_counts and self.get_foundation_data() is None:
+            return None
         return int(self._gps_trip_counts.get((societe, line, str(bus), day), 0))
 
     def get_coord_suspect(self, societe: str, line: str) -> dict:
@@ -1012,10 +1021,18 @@ def _ticket_rows_with_reasons(models, days, anomalies_only: bool = True,
         # ni l'une ni l'autre une vraie anomalie de recette/fraude.
         gps_trip_count = model_manager.get_gps_trip_count(
             r["societe"], r["line"], str(r["bus"]), str(r["day"]))
-        is_no_service = gps_trip_count == 0
-        # Seuil <=2 plutôt que ==0 : tolère un ticket manuel/réédité isolé sans perdre le
-        # signal -- un vrai jour normal a des dizaines/centaines de tickets, pas 1 ou 2.
-        is_machine_issue = (not is_no_service) and nbr_ticket <= 2
+        # `None` = cross-check GPS indisponible sur ce déploiement (voir
+        # ModelManager.get_gps_trip_count) -- reste `None` ici aussi plutôt que de
+        # deviner "pas de service"/"pas de panne" : le confondre avec `0` ferait
+        # disparaître CHAQUE jour signalé de la vue client (is_no_service=True partout).
+        if gps_trip_count is None:
+            is_no_service = None
+            is_machine_issue = None
+        else:
+            is_no_service = gps_trip_count == 0
+            # Seuil <=2 plutôt que ==0 : tolère un ticket manuel/réédité isolé sans perdre
+            # le signal -- un vrai jour normal a des dizaines/centaines de tickets, pas 1 ou 2.
+            is_machine_issue = (not is_no_service) and nbr_ticket <= 2
         if client_safe and (is_machine_issue or is_no_service):
             continue
         # Bonne vs mauvaise anomalie : la recette du jour a-t-elle dépassé la normale de

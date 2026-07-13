@@ -29,9 +29,21 @@ COPY src/ ./src/
 # see the note in Dockerfile.render.dockerignore. The reference DB is the SLIM copy
 # (winicari_reference_slim.db, same schema minus the two large per-arret ticket tables
 # that only the excluded drill-down reads) renamed to the path the app expects.
+#
+# data/processed/foundation_arrivals_full.parquet is deliberately NOT copied (2026-07-13):
+# even after shrinking it in memory (object -> category dtype, ~486MB -> ~98MB, see
+# ModelManager.load_all), the deployment still OOM'd at 512Mi -- and the precomputed
+# history/scoring endpoints (anomaly-history, ticket-anomaly-history/-explain/-patterns)
+# don't need it at all, they read models/anomaly/trips_scored.parquet and
+# models/ticket_anomaly/days_scored.parquet instead. Without it, every
+# get_foundation_data() caller degrades gracefully (empty list / 404 / 503, already
+# guarded throughout main.py) rather than crashing: reference-trip, the per-stop trip
+# sequence view, and the GPS/ticket "machine issue" cross-check simply become
+# unavailable on this slim deployment (get_gps_trip_count returns None -- explicitly
+# distinct from a confirmed "no service", never misreported as a false anomaly -- see
+# ModelManager.get_gps_trip_count and _ticket_rows_with_reasons).
 COPY models/anomaly/ ./models/anomaly/
 COPY models/ticket_anomaly/ ./models/ticket_anomaly/
-COPY data/processed/foundation_arrivals_full.parquet ./data/processed/foundation_arrivals_full.parquet
 COPY data/reference/winicari_reference_slim.db ./data/reference/winicari_reference.db
 
 ENV ENABLED_MODULES=anomaly,ticket_anomaly
