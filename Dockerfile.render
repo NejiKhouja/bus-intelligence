@@ -22,10 +22,17 @@ COPY src/ ./src/
 # by train_pipeline.py) so it does NOT exist in a fresh git clone -- Render builds from
 # a clone, not your working tree, so COPYing it here would break the build. It's optional:
 # read_version_file() returns None when absent and /health degrades gracefully.
+#
+# models/ticket_anomaly/stations/ (per-station drill-down model, 196MB) is excluded via
+# Dockerfile.render.dockerignore -- the COPY below only picks up what survives that
+# filter. /api/ticket-anomaly-stations degrades gracefully (empty result) without it --
+# see the note in Dockerfile.render.dockerignore. The reference DB is the SLIM copy
+# (winicari_reference_slim.db, same schema minus the two large per-arret ticket tables
+# that only the excluded drill-down reads) renamed to the path the app expects.
 COPY models/anomaly/ ./models/anomaly/
 COPY models/ticket_anomaly/ ./models/ticket_anomaly/
 COPY data/processed/foundation_arrivals_full.parquet ./data/processed/foundation_arrivals_full.parquet
-COPY data/reference/winicari_reference.db ./data/reference/winicari_reference.db
+COPY data/reference/winicari_reference_slim.db ./data/reference/winicari_reference.db
 
 ENV ENABLED_MODULES=anomaly,ticket_anomaly
 

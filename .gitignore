@@ -5,3 +5,11 @@ __pycache__/
 .ipynb_checkpoints/
 logs/
 models/models_version.json
+
+# Too large for GitHub (>100MB hard limit) -- see Dockerfile.render for how production
+# gets its artifacts instead (winicari_reference_slim.db + models/ticket_anomaly/*.joblib
+# top-level only, both git-tracked and well under the limit). Regenerate locally via
+# reference_db.populate_tickets_station_daily / populate_tickets_station_trip_daily and
+# models.ticket_anomaly.train_stations() -- see docs/WEBSERVICES_NEEDED.md.
+data/reference/winicari_reference.db
+models/ticket_anomaly/stations/

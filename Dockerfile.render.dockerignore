@@ -28,6 +28,20 @@ data/raw/
 data/synthetic/
 logs/
 
+# Per-station ticket anomaly model (Phase 2 drill-down) -- 196MB, well past GitHub's
+# 100MB hard limit and not part of the exposed ENABLED_MODULES=anomaly,ticket_anomaly
+# surface (decision 2026-07-12: keep it for local/dashboard use, don't ship it to the
+# free-tier image). /api/ticket-anomaly-stations already degrades gracefully to an
+# empty result when this directory is absent -- no code change needed for this to be
+# safe to exclude.
+models/ticket_anomaly/stations/
+
+# Full dev reference DB (114MB, includes the per-arret ticket tables the drill-down
+# above needs) -- NOT git-tracked (see .gitignore) or COPYed here. The image instead
+# gets winicari_reference_slim.db (~57MB, same schema minus tickets_station_daily/
+# tickets_station_trip_daily), renamed to the expected path in the COPY step below.
+data/reference/winicari_reference.db
+
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
