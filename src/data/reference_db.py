@@ -215,6 +215,12 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     if cols and "bus" not in cols:
         conn.execute("DROP TABLE tickets_station_daily")
         conn.executescript(SCHEMA_SQL)
+    # Index ajoutés 2026-07-13 pour query_foundation_slice() : les endpoints qui chargeaient
+    # foundation_arrivals_full.parquet en entier interrogent maintenant trips/trip_stops à la
+    # demande (voir la note dans query_foundation_slice) -- sans ces index, chaque requête
+    # scannerait les 47k lignes de `trips` en entier.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trips_scope ON trips(company_id, line_id, bus, day)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trips_line ON trips(company_id, line_id)")
     conn.commit()
     return conn
 
@@ -1497,3 +1503,93 @@ def export_foundation_parquet(conn: sqlite3.Connection, out_path) -> dict:
     df.to_parquet(out_path, index=False)
     return {"rows": len(df), "trips": df["trip_id"].nunique(), "lines": df["line"].nunique(),
             "companies": df["societe"].nunique(), "out_path": str(out_path)}
+
+
+_FOUNDATION_SLICE_SQL = """
+    SELECT t.day, l.line_code AS line, c.canonical_name AS societe, t.bus,
+           t.trip_id, t.dir, t.is_full AS full, t.trip_start, t.trip_end,
+           COALESCE(t.terminus_idle_min, 0) AS terminus_idle_min,
+           COALESCE(t.max_dark_s, 0) AS trip_dark_s,
+           t.trip_dark_before_stop, t.trip_dark_after_stop,
+           COALESCE(t.origin_idle_min, 0) AS origin_idle_min,
+           t.origin_idle_from, t.origin_idle_stop,
+           COALESCE(t.end_idle_min, 0) AS end_idle_min,
+           t.end_idle_to, t.end_idle_stop,
+           ts.seq, ts.seq AS route_seq, s.primary_name AS stop,
+           ts.arrival, ts.departure, ts.dwell_s, ts.dark_s, ts.had_gap,
+           ts.dist_m, ts.matched
+    FROM trip_stops ts
+    JOIN trips t ON t.trip_id = ts.trip_id
+    JOIN lines l ON l.line_id = t.line_id
+    JOIN companies c ON c.company_id = t.company_id
+    JOIN stops s ON s.stop_id = ts.stop_id
+"""
+
+
+def query_foundation_slice(conn: sqlite3.Connection, societe: str, line: str = None,
+                           bus=None, day: str = None, trip_id: int = None) -> pd.DataFrame:
+    """Même forme EXACTE que `foundation_arrivals_full.parquet` (voir
+    `export_foundation_parquet`), mais interrogée À LA DEMANDE pour un périmètre précis au
+    lieu de charger les 637k lignes en mémoire en permanence -- voir la discussion
+    2026-07-13 : `foundation_arrivals_full.parquet` a été retiré du déploiement Render slim
+    (486 Mo même réduit, encore trop pour 512 Mo) alors que `trips`/`trip_stops` (la même
+    donnée, dérivée en SQL) étaient déjà dans `winicari_reference_slim.db`, déjà poussée en
+    production -- inutile de choisir entre "moins d'historique" et "pas de détail du tout",
+    la BDD relationnelle EST la source, on peut simplement l'interroger au lieu de tout
+    garder en RAM.
+
+    `societe` est obligatoire (toutes les requêtes existantes filtraient déjà au minimum par
+    société) pour ne jamais scanner toute la table par erreur. Index voir
+    `idx_trips_scope`/`idx_trips_day` dans `init_db`.
+    """
+    import pandas as pd
+
+    where = ["c.canonical_name = ?"]
+    params: list = [societe]
+    if line is not None:
+        where.append("l.line_code = ?"); params.append(line)
+    if bus is not None:
+        where.append("t.bus = ?"); params.append(str(bus))
+    if day is not None:
+        where.append("t.day = ?"); params.append(day)
+    if trip_id is not None:
+        where.append("t.trip_id = ?"); params.append(int(trip_id))
+
+    df = pd.read_sql(_FOUNDATION_SLICE_SQL + " WHERE " + " AND ".join(where) +
+                     " ORDER BY t.trip_id, ts.seq", conn, params=params)
+    if len(df) == 0:
+        return df
+    for col in ("arrival", "departure", "trip_start", "trip_end", "origin_idle_from", "end_idle_to"):
+        df[col] = pd.to_datetime(df[col], format="mixed")
+    df["matched"] = df["matched"].astype(bool)
+    df["had_gap"] = df["had_gap"].astype(bool)
+    # `full` reste nullable (None = ligne en boucle) -- pas de cast direct en bool, ça
+    # écraserait le signal "inconnu" en False (même remarque que export_foundation_parquet)
+    df["full"] = df["full"].map({1: True, 0: False}, na_action="ignore")
+    df["bus"] = df["bus"].astype(int)
+    return df
+
+
+def query_trip_scopes(conn: sqlite3.Connection, societe: str = None, line: str = None) -> pd.DataFrame:
+    """Trip-level metadata only (societe, line, bus, day, dir) -- no `trip_stops` join, for
+    the "list available lines/buses/days" endpoints (options, lines-ranked, buses-for-line,
+    etc.) that never needed the per-stop detail `query_foundation_slice` joins in for.
+    Reads `trips` alone (47k rows, vs the 558k-row `trip_stops` join) -- `societe` is
+    optional here (unlike `query_foundation_slice`) since listing "all companies" is a
+    real, lightweight use case at this grain.
+    """
+    import pandas as pd
+
+    where, params = [], []
+    if societe is not None:
+        where.append("c.canonical_name = ?"); params.append(societe)
+    if line is not None:
+        where.append("l.line_code = ?"); params.append(line)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    return pd.read_sql(f"""
+        SELECT c.canonical_name AS societe, l.line_code AS line, t.bus, t.day, t.dir, t.trip_id
+        FROM trips t
+        JOIN lines l ON l.line_id = t.line_id
+        JOIN companies c ON c.company_id = t.company_id
+        {where_sql}
+    """, conn, params=params).assign(bus=lambda d: d["bus"].astype(int))

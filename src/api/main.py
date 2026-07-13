@@ -143,12 +143,12 @@ class ListResponse(BaseModel):
 class ModelManager:
     _instance = None
     _models = {}
-    _foundation_data = None
     _stops_data = {}
     _stop_coords = {}   # f"{societe}_{line}" -> {stop_name: (lat, lon)}
     _stop_coord_suspect = {}   # f"{societe}_{line}" -> {stop_name: bool, chronically wrong coords}
-    _gps_trip_counts = None   # (societe, line, str(bus), day) -> n_trips, see get_gps_trip_count
+    _gps_trip_counts = {}   # societe -> {(line, str(bus), day): n_trips}, see get_gps_trip_count
     _latest_day = None
+    _trips_count = 0
 
     def __new__(cls):
         if cls._instance is None:
@@ -157,65 +157,48 @@ class ModelManager:
 
     def load_all(self):
         print("Loading models...")
-        
+
+        # Trip/stop detail (route_seq<->stop, lat/lon, "today", per-trip sequences) used to
+        # come from foundation_arrivals_full.parquet loaded whole into memory (~486MB even
+        # after shrinking -- see git history 2026-07-13) -- it never needed to be a
+        # permanently-resident DataFrame, since trips/trip_stops (the same data, and the
+        # ACTUAL source _load_usable_lines/line_stops already reads for route geometry) are
+        # already in the reference DB. Per-request detail now comes from
+        # `_foundation_slice()` (queries trips/trip_stops on demand, see
+        # reference_db.query_foundation_slice); what's built here at startup is just the
+        # small, line-geometry-shaped pieces (stop names/order/coords), from `line_stops`
+        # directly -- not per-trip observations, and not requiring foundation data at all.
         try:
-            foundation_path = Path("data/processed/foundation_arrivals_full.parquet")
-            if foundation_path.exists():
-                self._foundation_data = pd.read_parquet(foundation_path)
-                # Mesuré (2026-07-13) : ces colonnes sont des chaînes Python (object) avec
-                # très peu de valeurs distinctes sur 637k lignes (ex. `dir` = 2 valeurs mais
-                # 39.8 MB en mémoire) -- category ramène ça à quelques centaines de Ko/colonne
-                # sans rien changer au comportement (égalité/groupby/tri identiques). C'est
-                # ~397 Mo des ~486 Mo de ce DataFrame, la cause principale du dépassement des
-                # 512 Mo sur le déploiement Render slim. `day` reste ORDERED (categories
-                # triées) car `.max()` est utilisé dessus (horloge démo) -- .max() lève une
-                # erreur sur une categorical NON ordonnée.
-                _low_card_cols = ["stop", "origin_idle_stop", "end_idle_stop", "dir",
-                                  "societe", "line", "full", "trip_dark_before_stop",
-                                  "trip_dark_after_stop"]
-                for col in _low_card_cols:
-                    if col in self._foundation_data.columns:
-                        self._foundation_data[col] = self._foundation_data[col].astype("category")
-                if "day" in self._foundation_data.columns:
-                    day_cat = pd.CategoricalDtype(
-                        categories=sorted(self._foundation_data["day"].unique()), ordered=True)
-                    self._foundation_data["day"] = self._foundation_data["day"].astype(day_cat)
-                print(f"Foundation data loaded ({len(self._foundation_data):,} rows, "
-                      f"{round(self._foundation_data.memory_usage(deep=True).sum()/1e6, 1)} MB in memory)")
-                
-                # Build stops mapping for each line
-                for societe in self._foundation_data['societe'].unique():
-                    for line in self._foundation_data[self._foundation_data['societe'] == societe]['line'].unique():
-                        key = f"{societe}_{line}"
-                        stops_data = self._foundation_data[
-                            (self._foundation_data['societe'] == societe) &
-                            (self._foundation_data['line'] == line)
-                        ].sort_values('route_seq')[['route_seq', 'stop']].drop_duplicates()
-                        self._stops_data[key] = stops_data.to_dict('records')
-                
-                print(f"Stops mapping built for {len(self._stops_data)} lines")
-
-                # Build stop lat/lon from the reference DB (used for map view)
-                try:
-                    usable = _load_usable_lines()
-                    for (line_code, soc), sf in usable.items():
-                        key = f"{soc}_{line_code}"
-                        self._stop_coords[key] = {
-                            str(row["name"]): (float(row["lat"]), float(row["lon"]))
-                            for _, row in sf.iterrows()
-                            if pd.notna(row.get("lat")) and pd.notna(row.get("lon"))
-                        }
-                    print(f"Stop coordinates loaded for {len(self._stop_coords)} lines")
-                except Exception as e:
-                    print(f"Stop coordinates not available: {e}")
-
-                # Demo clock: "today" = the most recent day with real data.
-                self._latest_day = str(self._foundation_data["day"].max())
-                print(f"Demo 'today' set to latest data day: {self._latest_day}")
-            else:
-                print("Foundation data not found")
+            usable = _load_usable_lines()
+            for (line_code, soc), sf in usable.items():
+                key = f"{soc}_{line_code}"
+                self._stops_data[key] = (
+                    sf.sort_values("route_seq")[["route_seq", "name"]]
+                    .rename(columns={"name": "stop"}).drop_duplicates().to_dict("records"))
+                self._stop_coords[key] = {
+                    str(row["name"]): (float(row["lat"]), float(row["lon"]))
+                    for _, row in sf.iterrows()
+                    if pd.notna(row.get("lat")) and pd.notna(row.get("lon"))
+                }
+            print(f"Stops mapping + coordinates built for {len(self._stops_data)} lines "
+                  f"(from line_stops, no foundation data needed)")
         except Exception as e:
-            print(f"Failed to load foundation data: {e}")
+            print(f"Stops mapping/coordinates not available: {e}")
+
+        # Demo clock ("today" = most recent day with real data) + trips count for /health --
+        # both computed once here rather than per-request (health checks can be frequent).
+        try:
+            conn = rdb.init_db()
+            try:
+                row = conn.execute("SELECT MAX(day), COUNT(*) FROM trips").fetchone()
+            finally:
+                conn.close()
+            self._latest_day = str(row[0]) if row and row[0] else None
+            self._trips_count = int(row[1]) if row and row[1] else 0
+            print(f"Demo 'today' set to latest data day: {self._latest_day} "
+                  f"({self._trips_count:,} trips in reference DB)")
+        except Exception as e:
+            print(f"Failed to determine latest day/trips count: {e}")
 
         loaders = {"delay": delay.load, "fallback": gps_fallback.load,
                    "anomaly": anomaly.load, "ticket_anomaly": ticket_anomaly.load,
@@ -244,8 +227,42 @@ class ModelManager:
             raise KeyError(f"Model '{model_name}' not loaded")
         return self._models[model_name]
 
-    def get_foundation_data(self) -> Optional[pd.DataFrame]:
-        return self._foundation_data
+    def foundation_slice(self, societe: str, line: str = None, bus=None,
+                        day: str = None, trip_id: int = None) -> Optional[pd.DataFrame]:
+        """Trip/stop detail for a scoped request, queried on demand from `trips`/
+        `trip_stops` (see `reference_db.query_foundation_slice`) -- replaces the old
+        permanently-resident `foundation_arrivals_full.parquet` DataFrame (see git history
+        2026-07-13: it cost ~486MB even after shrinking, more than this deployment's whole
+        512MB budget, while this same data was already sitting in the reference DB).
+        Returns `None` only if the reference DB itself can't be reached (never "empty" --
+        an empty-but-real result is an empty DataFrame, not None; keeps the same
+        `if df is None` guard callers already used for "data unavailable" everywhere).
+        """
+        try:
+            conn = rdb.init_db()
+            try:
+                return rdb.query_foundation_slice(conn, societe, line=line, bus=bus,
+                                                  day=day, trip_id=trip_id)
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"foundation_slice query failed: {e}")
+            return None
+
+    def trip_scopes(self, societe: str = None, line: str = None) -> Optional[pd.DataFrame]:
+        """Lightweight trip metadata (societe/line/bus/day/dir, no per-stop join) for the
+        "list available X" endpoints -- see `reference_db.query_trip_scopes`. Same `None`
+        convention as `foundation_slice`: only for an unreachable DB, not an empty result.
+        """
+        try:
+            conn = rdb.init_db()
+            try:
+                return rdb.query_trip_scopes(conn, societe=societe, line=line)
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"trip_scopes query failed: {e}")
+            return None
 
     def get_stops(self, societe: str, line: str) -> List[Dict]:
         key = f"{societe}_{line}"
@@ -257,9 +274,8 @@ class ModelManager:
 
     def get_gps_trip_count(self, societe: str, line: str, bus: str, day: str) -> Optional[int]:
         """Nombre de trajets GPS réels pour ce (société, ligne, bus, jour) exact -- ou
-        `None` si le cross-check GPS n'est pas disponible DU TOUT sur ce déploiement
-        (foundation_arrivals_full.parquet absent -- voir Dockerfile.render, exclu du
-        slim anomaly-only pour tenir dans 512 Mo). `None` DOIT rester distinct de `0` :
+        `None` si le cross-check GPS n'est pas disponible DU TOUT sur ce déploiement (la
+        BDD de référence est absente/inaccessible). `None` DOIT rester distinct de `0` :
         `0` veut dire "vérifié, aucun trajet GPS ce jour-là" (vrai signal, voir
         is_no_service dans `_ticket_rows_with_reasons`), alors que `None` veut dire "pas
         vérifiable ici" -- les confondre ferait passer CHAQUE jour-bus signalé pour "pas
@@ -267,21 +283,21 @@ class ModelManager:
 
         Sert à distinguer une panne de machine à tickets (le bus a bien circulé --
         confirmé côté GPS -- mais quasi aucun ticket enregistré) d'une vraie anomalie de
-        recette/fraude. Lazy + mise en cache : construit au premier appel à partir de
-        `foundation_arrivals_full.parquet` (déjà chargé en mémoire), pas de nouvelle
-        lecture disque par requête.
+        recette/fraude. Mis en cache PAR SOCIÉTÉ (pas globalement) : une requête SQL sur
+        les trajets de cette société au premier appel, puis des lectures dict pour tous
+        les jours-bus suivants de la même société -- pas de requête par ligne du tableau.
         """
-        if self._gps_trip_counts is None:
-            fa = self.get_foundation_data()
+        if societe not in self._gps_trip_counts:
+            fa = self.foundation_slice(societe)
             if fa is None:
-                self._gps_trip_counts = {}
+                return None  # BDD injoignable -- pas vérifiable, distinct de "0 trajet"
+            if len(fa) == 0:
+                self._gps_trip_counts[societe] = {}
             else:
                 counts = (fa.assign(bus=fa["bus"].astype(str))
-                          .groupby(["societe", "line", "bus", "day"], observed=True)["trip_id"].nunique())
-                self._gps_trip_counts = counts.to_dict()
-        if not self._gps_trip_counts and self.get_foundation_data() is None:
-            return None
-        return int(self._gps_trip_counts.get((societe, line, str(bus), day), 0))
+                          .groupby(["line", "bus", "day"], observed=True)["trip_id"].nunique())
+                self._gps_trip_counts[societe] = counts.to_dict()
+        return int(self._gps_trip_counts[societe].get((line, str(bus), day), 0))
 
     def get_coord_suspect(self, societe: str, line: str) -> dict:
         """Maps stop_name -> True when its geocoded coordinates are chronically wrong.
@@ -297,11 +313,10 @@ class ModelManager:
         trip fragment) gets wrongly condemned.
         """
         key = f"{societe}_{line}"
-        if key not in self._stop_coord_suspect and self._foundation_data is not None:
-            sub = self._foundation_data[
-                (self._foundation_data["societe"] == societe) &
-                (self._foundation_data["line"] == line)
-            ]
+        if key not in self._stop_coord_suspect:
+            sub = self.foundation_slice(societe, line=line)
+            if sub is None or len(sub) == 0:
+                return {}
             grp = sub.groupby("stop", observed=True).agg(
                 match_rate=("matched", "mean"), n=("matched", "size"))
             unmatched = sub[~sub["matched"]].groupby("stop", observed=True)["dist_m"]
@@ -318,10 +333,11 @@ class ModelManager:
         return self._stop_coord_suspect.get(key, {})
 
     def get_latest_day(self) -> Optional[str]:
-        """Demo 'today' most recent day present in the foundation data."""
-        if self._latest_day is None and self._foundation_data is not None:
-            self._latest_day = str(self._foundation_data["day"].max())
+        """Demo 'today' -- most recent day present in `trips`, computed once at startup."""
         return self._latest_day
+
+    def get_trips_count(self) -> int:
+        return self._trips_count
 
     def is_loaded(self) -> bool:
         return len(self._models) > 0
@@ -405,39 +421,38 @@ async def log_requests(request: Request, call_next):
 
 # Helper Functions
 def get_available_options(societe: Optional[str] = None, line: Optional[str] = None) -> Dict:
-    df = model_manager.get_foundation_data()
+    df = model_manager.trip_scopes(societe=None)  # companies list always needs the full scope
     if df is None or len(df) == 0:
         return {"companies": [], "lines": [], "directions": [], "buses": [], "days": []}
-    
+
     result = {}
     result["companies"] = sorted(df["societe"].unique().tolist())
-    
-    df_filtered = df.copy()
+
+    df_filtered = df
     if societe:
         df_filtered = df_filtered[df_filtered["societe"] == societe]
     result["lines"] = sorted(df_filtered["line"].unique().tolist())
-    
+
     if line:
         df_filtered = df_filtered[df_filtered["line"] == line]
     result["directions"] = sorted(df_filtered["dir"].unique().tolist())
     result["buses"] = sorted(df_filtered["bus"].unique().tolist())
     days = sorted(df_filtered["day"].unique().tolist(), reverse=True)
     result["days"] = days[:30]
-    
+
     return result
 
 # Health & Options Endpoints
 @app.get("/")
 @app.get("/health")
 async def health_check():
-    df = model_manager.get_foundation_data()
     return {
         "status": "healthy",
         "models_loaded": model_manager.is_loaded(),
         "models": model_manager.get_loaded_models(),
         "enabled_modules": sorted(ENABLED_MODULES),
-        "foundation_data": df is not None,
-        "rows": len(df) if df is not None else 0,
+        "foundation_data": model_manager.get_latest_day() is not None,
+        "rows": model_manager.get_trips_count(),
         "latest_day": model_manager.get_latest_day(),
         "timestamp": datetime.now().isoformat(),
         "model_version": _model_version_info,
@@ -457,13 +472,10 @@ def latest_day_for(societe: str, line: Optional[str] = None) -> str:
     The literal last calendar day is sparse, so live views snap to the most recent
     day the selected scope has real trips — keeping the 'today' demo populated.
     """
-    df = model_manager.get_foundation_data()
-    if df is None:
+    df = model_manager.trip_scopes(societe, line=line)
+    if df is None or len(df) == 0:
         return demo_today()
-    mask = df["societe"] == societe
-    if line:
-        mask &= df["line"] == line
-    days = df.loc[mask, "day"]
+    days = df["day"]
     return str(days.max()) if len(days) else demo_today()
 
 @app.get("/api/options", response_model=ListResponse)
@@ -482,11 +494,10 @@ async def get_lines(societe: str):
 @app.get("/api/lines-ranked")
 async def get_lines_ranked(societe: str):
     """Lines for an operator, busiest first — so demos default to a line with data."""
-    df = model_manager.get_foundation_data()
-    if df is None:
+    df = model_manager.trip_scopes(societe)
+    if df is None or len(df) == 0:
         return {"lines": []}
-    sub = df[df["societe"] == societe]
-    counts = sub.groupby("line", observed=True)["trip_id"].nunique().sort_values(ascending=False)
+    counts = df.groupby("line")["trip_id"].nunique().sort_values(ascending=False)
     return {"lines": counts.index.tolist()}
 
 @app.get("/api/directions")
@@ -501,10 +512,10 @@ async def get_prophet_lines(societe: str):
         prophet = model_manager.get("delay").get("prophet", {})
     except KeyError:
         return {"societe": societe, "lines": [], "by_line": {}}
-    df = model_manager.get_foundation_data()
-    if df is None:
+    df = model_manager.trip_scopes(societe)
+    if df is None or len(df) == 0:
         return {"societe": societe, "lines": [], "by_line": {}}
-    sub = df[df["societe"] == societe][["line", "dir"]].drop_duplicates()
+    sub = df[["line", "dir"]].drop_duplicates()
     by_line: Dict[str, list] = {}
     for _, r in sub.iterrows():
         if f"{societe}_{r['line']}_{r['dir']}" in prophet:
@@ -522,27 +533,19 @@ async def get_days(
     societe: Optional[str] = Query(None), 
     line: Optional[str] = Query(None)
 ):
-    df = model_manager.get_foundation_data()
-    if df is None:
+    df = model_manager.trip_scopes(societe or None, line=line or None)
+    if df is None or len(df) == 0:
         return {"days": []}
-    
-    df_filtered = df.copy()
-    if societe:
-        df_filtered = df_filtered[df_filtered["societe"] == societe]
-    if line:
-        df_filtered = df_filtered[df_filtered["line"] == line]
-    
-    days = sorted(df_filtered["day"].unique().tolist(), reverse=True)
+    days = sorted(df["day"].unique().tolist(), reverse=True)
     return {"days": days[:30]}
 
 @app.get("/api/buses-for-line")
 async def get_buses_for_line(societe: str, line: str):
     """All unique buses that have ever run on a given line (across all days in the foundation)."""
-    df = model_manager.get_foundation_data()
-    if df is None:
+    df = model_manager.trip_scopes(societe, line=line)
+    if df is None or len(df) == 0:
         return {"buses": []}
-    sub = df[(df["societe"] == societe) & (df["line"] == line)]
-    buses = sorted(int(b) for b in sub["bus"].unique())
+    buses = sorted(int(b) for b in df["bus"].unique())
     return {"buses": buses}
 
 
@@ -552,17 +555,10 @@ async def get_buses_for_day(
     line: str,
     day: str
 ):
-    df = model_manager.get_foundation_data()
-    if df is None:
+    df = model_manager.trip_scopes(societe, line=line)
+    if df is None or len(df) == 0:
         return {"buses": []}
-    
-    filtered = df[
-        (df["societe"] == societe) &
-        (df["line"] == line) &
-        (df["day"] == day)
-    ]
-    
-    buses = sorted(filtered["bus"].unique().tolist())
+    buses = sorted(df.loc[df["day"] == day, "bus"].unique().tolist())
     return {"buses": buses}
 
 @app.get("/api/days-for-line")
@@ -570,16 +566,10 @@ async def get_days_for_line(
     societe: str,
     line: str
 ):
-    df = model_manager.get_foundation_data()
-    if df is None:
+    df = model_manager.trip_scopes(societe, line=line)
+    if df is None or len(df) == 0:
         return {"days": []}
-    
-    filtered = df[
-        (df["societe"] == societe) &
-        (df["line"] == line)
-    ]
-    
-    days = sorted(filtered["day"].unique().tolist(), reverse=True)
+    days = sorted(df["day"].unique().tolist(), reverse=True)
     return {"days": days[:30]}
 
 @app.get("/api/stops")
@@ -599,18 +589,11 @@ async def get_route_info(
     bus: int
 ):
     """Get complete route information for a bus."""
-    df = model_manager.get_foundation_data()
-    if df is None:
+    bus_data = model_manager.foundation_slice(societe, line=line, bus=bus, day=day)
+    if bus_data is None:
         raise HTTPException(status_code=503, detail="Foundation data not loaded")
-    
-    # Get bus data for this day
-    bus_data = df[
-        (df["societe"] == societe) &
-        (df["line"] == line) &
-        (df["bus"].astype(str) == str(bus)) &
-        (df["day"] == day)
-    ].sort_values("trip_start")
-    
+    bus_data = bus_data.sort_values("trip_start")
+
     if len(bus_data) == 0:
         raise HTTPException(status_code=404, detail="No data found for this bus")
     
@@ -667,17 +650,11 @@ async def get_bus_status(
     day: str
 ):
     """Get current status of a bus with stop names."""
-    df = model_manager.get_foundation_data()
-    if df is None:
+    bus_data = model_manager.foundation_slice(societe, line=line, bus=bus, day=day)
+    if bus_data is None:
         raise HTTPException(status_code=503, detail="Foundation data not loaded")
-    
-    bus_data = df[
-        (df["societe"] == societe) &
-        (df["line"] == line) &
-        (df["bus"].astype(str) == str(bus)) &
-        (df["day"] == day)
-    ].sort_values("trip_start")
-    
+    bus_data = bus_data.sort_values("trip_start")
+
     if len(bus_data) == 0:
         raise HTTPException(status_code=404, detail="No data found for this bus")
     
@@ -1496,16 +1473,27 @@ async def get_current_anomalies(
         raise HTTPException(status_code=500, detail=f"Error getting current anomalies: {str(e)}")
 
 
-def _trip_sequence(df, societe, line, bus, day, trip_id):
+def _trip_sequence(df, societe, line, bus, day, trip_start):
     """Per-stop sequence rows for one trip, with lat/lon for map rendering.
+
+    Matched by `trip_start` (exact timestamp), NOT `trip_id` -- `trip_id` in
+    `models["trips"]` (trips_scored.parquet, from anomaly.train()) is a per-bus-day LOCAL
+    index (0, 1, 2... reused across every bus-day, confirmed 2026-07-13: only 28 distinct
+    values total across 47k trips) left over from the pre-SQL-reference-DB pipeline, while
+    `trips`/`trip_stops` here use the DB's own globally-unique trip_id -- the two numbering
+    schemes only coincidentally overlap for small values, so matching on trip_id could
+    silently return a DIFFERENT trip's sequence, not just an empty one. `trip_start` is a
+    real timestamp present in both and reliably identifies one specific trip on a bus-day.
 
     `coord_suspect` marks stops that are unmatched on (almost) every trip of the
     line — the stop's geocoded coordinates are wrong, so an unmatched flag there
     says nothing about THIS trip.
     """
+    ts = pd.Timestamp(trip_start) if trip_start else None
+    match = (df["trip_start"] - ts).abs() < pd.Timedelta(seconds=60) if ts is not None else False
     seqdf = df[
         (df["societe"] == societe) & (df["line"] == line) & (df["bus"].astype(str) == str(bus)) &
-        (df["day"] == day) & (df["trip_id"] == trip_id)
+        (df["day"] == day) & match
     ].sort_values("seq")
     coord_map = model_manager.get_stop_coords(societe, line)
     coord_suspect = model_manager.get_coord_suspect(societe, line)
@@ -1631,7 +1619,7 @@ async def anomaly_explain(
     dir: Optional[str] = None
 ):
     """Per-trip explanations + WHERE (which stops) the anomaly happened."""
-    df = model_manager.get_foundation_data()
+    df = model_manager.foundation_slice(societe, line=line)
     try:
         models, trips = _filter_trips(societe, line, bus, day, include_data_bugs=include_data_bugs, dir=dir)
         rows = _rows_with_reasons(models, trips, anomalies_only=False)
@@ -1641,7 +1629,7 @@ async def anomaly_explain(
         # Use the bus from each row (needed when bus=None means "all buses")
         if df is not None:
             for a in anomalous:
-                seq = _trip_sequence(df, societe, line, int(a["bus"]), a["day"], a["trip_id"])
+                seq = _trip_sequence(df, societe, line, int(a["bus"]), a["day"], a["trip_start"])
                 a["problem_stops"] = _problem_stops(seq)
 
         worst_trip, sequence = None, []
@@ -1649,7 +1637,7 @@ async def anomaly_explain(
             worst = max(anomalous, key=lambda r: r["anomaly_strength"])
             worst_trip = worst
             sequence = _trip_sequence(df, societe, line, int(worst["bus"]),
-                                      worst["day"], worst["trip_id"])
+                                      worst["day"], worst["trip_start"])
 
         # Median trip duration for normal trips on this line (baseline for comparison)
         avg_duration_min = None
@@ -1683,9 +1671,13 @@ async def anomaly_explain(
 
 @app.get("/api/trip-detail")
 async def trip_detail(
-    societe: str, line: str, bus: int, day: str, trip_id: int
+    societe: str, line: str, bus: int, day: str, trip_start: str
 ):
     """Sequence + problem stops for one specific trip (used for per-trip map/chart).
+
+    Identified by `trip_start` (exact timestamp), not `trip_id` -- see the note in
+    `_trip_sequence` for why `trip_id` from an anomaly row can't be trusted to pick the
+    right trip out of the reference DB anymore.
 
     Also looks for an "unofficial detour" -- the bus leaving right after the trip
     officially starts, driving off, and coming back to ~the same spot before its long
@@ -1694,18 +1686,19 @@ async def trip_detail(
     line. Best-effort: needs a live MongoDB read, so any failure here just omits the
     detour rather than failing the whole request.
     """
-    df = model_manager.get_foundation_data()
+    df = model_manager.foundation_slice(societe, line=line, bus=bus, day=day)
     if df is None:
         raise HTTPException(status_code=503, detail="Foundation data not loaded")
-    seq = _trip_sequence(df, societe, line, bus, day, trip_id)
+    seq = _trip_sequence(df, societe, line, bus, day, trip_start)
     problem_stops = _problem_stops(seq)
     longest_stop = problem_stops.get("longest_stop")
     if longest_stop and longest_stop.get("arrival"):
         try:
+            ts = pd.Timestamp(trip_start)
             trip_row = df[
                 (df["societe"] == societe) & (df["line"] == line) &
                 (df["bus"].astype(str) == str(bus)) & (df["day"] == day) &
-                (df["trip_id"] == trip_id)
+                ((df["trip_start"] - ts).abs() < pd.Timedelta(seconds=60))
             ].iloc[0]
             built = _build_gps_track(societe, line, bus, day)
             if built is not None:
@@ -1742,7 +1735,7 @@ async def reference_trip(societe: str, line: str):
     stationnement observé est probablement un service non clôturé plutôt qu'une pause
     normale.
     """
-    df = model_manager.get_foundation_data()
+    df = model_manager.foundation_slice(societe, line=line)
     try:
         models, trips = _filter_trips(societe, line)   # déjà nettoyé des bugs/fragments
     except KeyError:
@@ -1765,7 +1758,7 @@ async def reference_trip(societe: str, line: str):
 
     def _build(row: pd.Series, direction: str) -> dict:
         typical_idle = idle_by_dir[direction]
-        seq = _trip_sequence(df, societe, line, row["bus"], row["day"], int(row["trip_id"]))
+        seq = _trip_sequence(df, societe, line, row["bus"], row["day"], row["trip_start"])
         return {
             "trip": {
                 "bus": str(row["bus"]), "day": row["day"], "dir": direction,
@@ -1966,22 +1959,16 @@ async def predict_delay_manual(request: DelayPredictionManualRequest):
 async def predict_gps_fallback(request: GPSFallbackRequest):
     try:
         models = model_manager.get("fallback")
-        foundation = model_manager.get_foundation_data()
-        
+        foundation = model_manager.foundation_slice(request.societe, line=request.line,
+                                                    bus=request.bus, day=request.day)
+
         if foundation is not None:
-            exists = foundation[
-                (foundation["day"] == request.day) &
-                (foundation["line"] == request.line) &
-                (foundation["societe"] == request.societe) &
-                (foundation["bus"].astype(str) == str(request.bus))
-            ]
-            if len(exists) == 0:
-                available = foundation[
-                    (foundation["line"] == request.line) &
-                    (foundation["societe"] == request.societe)
-                ]
-                available_buses = available["bus"].unique().tolist()
-                available_days = available["day"].unique().tolist()
+            if len(foundation) == 0:
+                available = model_manager.trip_scopes(request.societe, line=request.line)
+                available_buses = (available["bus"].unique().tolist()
+                                   if available is not None and len(available) else [])
+                available_days = (available["day"].unique().tolist()
+                                  if available is not None and len(available) else [])
                 raise HTTPException(
                     status_code=404,
                     detail=f"No data for bus {request.bus} on day {request.day}. "
@@ -1995,13 +1982,10 @@ async def predict_gps_fallback(request: GPSFallbackRequest):
         g = fdn.load_pings(gps_db, mongo_day, request.line, request.bus)
         
         if len(g) == 0:
-            foundation_data = foundation[
-                (foundation["day"] == request.day) &
-                (foundation["line"] == request.line) &
-                (foundation["societe"] == request.societe) &
-                (foundation["bus"].astype(str) == str(request.bus))
-            ]
-            
+            # `foundation` est déjà scopé à ce (societe, line, bus, day) exact -- pas besoin
+            # de refiltrer, juste se prémunir contre None (BDD de référence injoignable).
+            foundation_data = foundation if foundation is not None else pd.DataFrame()
+
             if len(foundation_data) > 0:
                 first_stop = foundation_data.iloc[0]
                 usable = _load_usable_lines()
@@ -2211,11 +2195,11 @@ async def gps_gap_examples(
     Powers the 'Replay a real signal-loss event' button — jumps straight to a
     genuine, dramatic historical case.
     """
-    df = model_manager.get_foundation_data()
+    df = model_manager.trip_scopes(societe, line=line)
     if df is None:
         raise HTTPException(status_code=503, detail="Foundation data not loaded")
 
-    sub = df[(df["societe"] == societe) & (df["line"] == line)][["day", "bus"]].drop_duplicates()
+    sub = df[["day", "bus"]].drop_duplicates()
     if len(sub) == 0:
         return {"societe": societe, "line": line, "examples": [], "scanned": 0}
 
@@ -2262,9 +2246,6 @@ async def active_buses(
     day: Optional[str] = None
 ):
     """Buses running on a line at query_time (active / upcoming / completed)."""
-    df = model_manager.get_foundation_data()
-    if df is None:
-        raise HTTPException(status_code=503, detail="Foundation data not loaded")
     day = day or latest_day_for(societe, line)
     qt = pd.Timestamp(query_time) if query_time else None
     # Re-anchor the wall-clock time-of-day onto the operating day so "active/upcoming"
@@ -2273,7 +2254,9 @@ async def active_buses(
         day_ts = pd.Timestamp(datetime.strptime(day, "%Y%m%d").date())
         qt = day_ts + (qt - qt.normalize())
 
-    sub = df[(df["societe"] == societe) & (df["line"] == line) & (df["day"] == day)]
+    sub = model_manager.foundation_slice(societe, line=line, day=day)
+    if sub is None:
+        raise HTTPException(status_code=503, detail="Foundation data not loaded")
     if len(sub) == 0:
         return {"day": day, "query_time": qt.isoformat() if qt is not None else None, "buses": []}
 
@@ -2316,12 +2299,8 @@ def _bus_status_at(societe: str, line: str, bus: int, day: str,
     the trip in progress at query_time and the last stop reached by then, so the delay
     model can predict forward to the rider's stop. Delay is baseline-driven.
     """
-    df = model_manager.get_foundation_data()
-    if df is None:
-        return None
-    sub = df[(df["societe"] == societe) & (df["line"] == line) &
-             (df["bus"].astype(str) == str(bus)) & (df["day"] == day)].copy()
-    if len(sub) == 0:
+    sub = model_manager.foundation_slice(societe, line=line, bus=bus, day=day)
+    if sub is None or len(sub) == 0:
         return None
 
     day_ts = pd.Timestamp(datetime.strptime(day, "%Y%m%d").date())
@@ -2424,10 +2403,9 @@ async def eta_to_stop(
     # Canonical stop name per baseline seq for this line+direction (predictions carry
     # baseline seq, which differs from a partial trip's own seq numbering).
     name_map = {}
-    df = model_manager.get_foundation_data()
+    df = model_manager.foundation_slice(societe, line=line)
     if df is not None:
-        sub = df[(df["societe"] == societe) & (df["line"] == line) &
-                 (df["dir"] == status["direction"])]
+        sub = df[df["dir"] == status["direction"]]
         if len(sub):
             name_map = sub.groupby("seq")["stop"].agg(
                 lambda s: s.mode().iat[0] if len(s.mode()) else s.iloc[0]).to_dict()

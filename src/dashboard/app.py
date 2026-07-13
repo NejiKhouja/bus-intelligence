@@ -118,8 +118,8 @@ def get_buses_for_line(company, line):
     return d.get("buses", []) if d else []
 
 @st.cache_data(ttl=300)
-def get_trip_detail(company, line, bus, day, trip_id):
-    return _get("/api/trip-detail", societe=company, line=line, bus=bus, day=day, trip_id=trip_id)
+def get_trip_detail(company, line, bus, day, trip_start):
+    return _get("/api/trip-detail", societe=company, line=line, bus=bus, day=day, trip_start=trip_start)
 
 @st.cache_data(ttl=60)
 def get_anomaly_history(company, line=None, limit=50, include_bugs=False, direction=None):
@@ -1077,7 +1077,7 @@ elif selected == "Détection d'anomalies":
                         st.rerun()
                     if shown:
                         detail = get_trip_detail(detail_company, a["line"], a["bus"],
-                                                 a["day"], a["trip_id"])
+                                                 a["day"], a["trip_start"])
                         render_trip_map((detail or {}).get("sequence", []),
                                         key=k + "_map", direction=a.get("dir"),
                                         detour=(detail or {}).get("problem_stops", {}).get("unofficial_detour"))
@@ -1287,7 +1287,7 @@ elif selected == "Détection d'anomalies":
                     sel = filtered_ex[sel_idx]
 
                     # Fetch per-trip sequence on demand (cached)
-                    detail = get_trip_detail(company, line, sel["bus"], sel["day"], sel["trip_id"])
+                    detail = get_trip_detail(company, line, sel["bus"], sel["day"], sel["trip_start"])
                     seq_list = (detail or {}).get("sequence", [])
 
                 if seq_list:

@@ -1,0 +1,30 @@
+Champs necessaires par web service
+====================================
+
+1) getPingsForDay 
+- date
+- localisation.x
+- localisation.y
+- bus.vitesse
+- service.codeLigne
+- service.voyage
+- bus.code
+
+2) getTicketTotalsForDay (totaux billetterie, winicari.details)
+- societe
+- CodeLigne
+- codeBus
+- date
+- nbrTicket
+- recette
+
+3) getTicketDetailsForDay (tickets individuels, Historique_Tickets.Ticket{annee})
+- Societe
+- CodeRoute (pas Codeligne -- ca c'est un code de categorie, pas la ligne)
+- CodeBus
+- NomFR1 (nom de l'arret d'origine)
+- Prix
+- requisition
+- jour_service (pas date / date_ticket / date_service -- ne correspondent pas
+  toujours au meme jour de service)
+- voyage
