@@ -149,7 +149,26 @@ class ModelManager:
             foundation_path = Path("data/processed/foundation_arrivals_full.parquet")
             if foundation_path.exists():
                 self._foundation_data = pd.read_parquet(foundation_path)
-                print(f"Foundation data loaded ({len(self._foundation_data):,} rows)")
+                # Mesuré (2026-07-13) : ces colonnes sont des chaînes Python (object) avec
+                # très peu de valeurs distinctes sur 637k lignes (ex. `dir` = 2 valeurs mais
+                # 39.8 MB en mémoire) -- category ramène ça à quelques centaines de Ko/colonne
+                # sans rien changer au comportement (égalité/groupby/tri identiques). C'est
+                # ~397 Mo des ~486 Mo de ce DataFrame, la cause principale du dépassement des
+                # 512 Mo sur le déploiement Render slim. `day` reste ORDERED (categories
+                # triées) car `.max()` est utilisé dessus (horloge démo) -- .max() lève une
+                # erreur sur une categorical NON ordonnée.
+                _low_card_cols = ["stop", "origin_idle_stop", "end_idle_stop", "dir",
+                                  "societe", "line", "full", "trip_dark_before_stop",
+                                  "trip_dark_after_stop"]
+                for col in _low_card_cols:
+                    if col in self._foundation_data.columns:
+                        self._foundation_data[col] = self._foundation_data[col].astype("category")
+                if "day" in self._foundation_data.columns:
+                    day_cat = pd.CategoricalDtype(
+                        categories=sorted(self._foundation_data["day"].unique()), ordered=True)
+                    self._foundation_data["day"] = self._foundation_data["day"].astype(day_cat)
+                print(f"Foundation data loaded ({len(self._foundation_data):,} rows, "
+                      f"{round(self._foundation_data.memory_usage(deep=True).sum()/1e6, 1)} MB in memory)")
                 
                 # Build stops mapping for each line
                 for societe in self._foundation_data['societe'].unique():
@@ -238,7 +257,7 @@ class ModelManager:
                 self._gps_trip_counts = {}
             else:
                 counts = (fa.assign(bus=fa["bus"].astype(str))
-                          .groupby(["societe", "line", "bus", "day"])["trip_id"].nunique())
+                          .groupby(["societe", "line", "bus", "day"], observed=True)["trip_id"].nunique())
                 self._gps_trip_counts = counts.to_dict()
         return int(self._gps_trip_counts.get((societe, line, str(bus), day), 0))
 
@@ -261,9 +280,9 @@ class ModelManager:
                 (self._foundation_data["societe"] == societe) &
                 (self._foundation_data["line"] == line)
             ]
-            grp = sub.groupby("stop").agg(
+            grp = sub.groupby("stop", observed=True).agg(
                 match_rate=("matched", "mean"), n=("matched", "size"))
-            unmatched = sub[~sub["matched"]].groupby("stop")["dist_m"]
+            unmatched = sub[~sub["matched"]].groupby("stop", observed=True)["dist_m"]
             grp = grp.join(unmatched.mean().rename("miss_dist_m"))
             grp = grp.join(unmatched.size().rename("n_unmatched"))
             self._stop_coord_suspect[key] = {
@@ -445,7 +464,7 @@ async def get_lines_ranked(societe: str):
     if df is None:
         return {"lines": []}
     sub = df[df["societe"] == societe]
-    counts = sub.groupby("line")["trip_id"].nunique().sort_values(ascending=False)
+    counts = sub.groupby("line", observed=True)["trip_id"].nunique().sort_values(ascending=False)
     return {"lines": counts.index.tolist()}
 
 @app.get("/api/directions")
