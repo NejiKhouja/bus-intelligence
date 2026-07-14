@@ -233,9 +233,10 @@ with st.sidebar:
     selected = option_menu(
         menu_title="Navigation",
         options=["Tableau de bord", "ETA en direct", "Repli GPS",
-                 "Détection d'anomalies", "Démo — Créer une ligne", "Assistant", "Prévisions"],
+                 "Détection d'anomalies", "Démo — Créer une ligne", "Démo — Web services",
+                 "Assistant", "Prévisions"],
         icons=["speedometer2", "geo-alt", "broadcast-pin", "shield-exclamation", "map",
-               "chat-left-text", "graph-up-arrow"],
+               "broadcast", "chat-left-text", "graph-up-arrow"],
         menu_icon="layers", default_index=0,
         styles={
             "container": {"padding": "6px!important", "background-color": "#0f172a", "border-radius": "8px"},
@@ -1094,6 +1095,10 @@ elif selected == "Détection d'anomalies":
 
         data = get_current_anomalies(company, line_param, direction=dir_param)
         if data:
+            if data.get("live"):
+                st.caption(f"🟢 {t('live_data_badge')}")
+            else:
+                st.caption(f"🕓 {t('historical_data_badge')}")
             m = st.columns(3)
             m[0].metric(t("metric_operating_day"), fmt_day(data["date"]))
             m[1].metric(t("metric_trips_today"), data["total_trips"])
@@ -1711,6 +1716,15 @@ modèles par ligne après réentraînement). Chaque carte concernée porte un av
 elif selected == "Démo — Créer une ligne":
     from src.dashboard.route_demo import render_route_demo_page
     render_route_demo_page()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Démo -- scoring en direct depuis les vrais web services (pas MongoDB, pas de
+# données précalculées) -- voir webservice_demo.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+elif selected == "Démo — Web services":
+    from src.dashboard.webservice_demo import render_webservice_demo_page
+    render_webservice_demo_page(_post)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Chatbot

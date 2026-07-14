@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -21,6 +21,7 @@ from src.models import delay, gps_fallback, anomaly, chatbot, ticket_anomaly
 from src.data import foundation as fdn
 from src.data import reference_db as rdb
 from src.data import model_version as mv
+from src.data import webservices as ws
 from src.data.db import get_db
 
 _LOG_DIR = Path("logs")
@@ -237,17 +238,37 @@ class ModelManager:
         Returns `None` only if the reference DB itself can't be reached (never "empty" --
         an empty-but-real result is an empty DataFrame, not None; keeps the same
         `if df is None` guard callers already used for "data unavailable" everywhere).
+
+        Also merges in yesterday's LIVE per-stop data when relevant (`day` unspecified or
+        equal to the live day) -- see _score_all_gps_live. Without this, "view details"/the
+        map for a trip flagged from live data would come up empty: that trip was never
+        written to trips/trip_stops, it only exists in the in-memory live cache.
         """
         try:
             conn = rdb.init_db()
             try:
-                return rdb.query_foundation_slice(conn, societe, line=line, bus=bus,
-                                                  day=day, trip_id=trip_id)
+                result = rdb.query_foundation_slice(conn, societe, line=line, bus=bus,
+                                                    day=day, trip_id=trip_id)
             finally:
                 conn.close()
         except Exception as e:
             print(f"foundation_slice query failed: {e}")
             return None
+
+        potential_live_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+        if day is None or day == potential_live_day:
+            live = _score_all_gps_live(societe, potential_live_day)
+            if live is not None and len(live["stops"]):
+                live_stops = live["stops"]
+                if line:
+                    live_stops = live_stops[live_stops["line"] == line]
+                if bus is not None:
+                    live_stops = live_stops[live_stops["bus"].astype(str) == str(bus)]
+                if day == potential_live_day:
+                    result = live_stops
+                elif len(live_stops):
+                    result = pd.concat([result, live_stops], ignore_index=True, sort=False)
+        return result
 
     def trip_scopes(self, societe: str = None, line: str = None) -> Optional[pd.DataFrame]:
         """Lightweight trip metadata (societe/line/bus/day/dir, no per-stop join) for the
@@ -478,6 +499,142 @@ def latest_day_for(societe: str, line: Optional[str] = None) -> str:
     days = df["day"]
     return str(days.max()) if len(days) else demo_today()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scoring EN DIRECT depuis le web service GPS (pas MongoDB) pour "aujourd'hui" (voir
+# docs/webservice_fields.txt) -- "Trajets signalés" doit refléter le VRAI jour courant, pas
+# le dernier jour du dataset précalculé (toujours en retard, voir demo_today() -- constaté
+# 2026-07-13 : dataset arrêté au 21 juin alors que le service GPS a des données du 12
+# juillet). `_current_gps_cache` évite de refaire l'appel webservice + la reconstruction
+# (coûteuse : projection + segmentation par bus) à chaque rerun Streamlit -- TTL court,
+# pas un cache de longue durée comme les artefacts entraînés.
+# ─────────────────────────────────────────────────────────────────────────────
+_current_gps_cache: dict = {}   # (societe, day) -> (timestamp, {"trips":.., "stops":..} ou None)
+_CURRENT_GPS_CACHE_TTL_S = 90
+
+
+def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
+    """Reconstruit + score TOUS les (ligne, bus) que le web service GPS rapporte pour cette
+    société/ce jour -- même pipeline que /api/anomaly/score-live, juste appliqué à chaque
+    bus-jour trouvé plutôt qu'à un seul. Toujours au grain (societe, day) -- PAS filtré par
+    ligne ici (un seul appel webservice couvre déjà toutes les lignes de la société ce
+    jour-là ; filtrer par ligne serait juste un `df[df.line==...]` après coup, pas la peine
+    de refaire l'appel/la reconstruction par ligne).
+
+    Retourne {"trips": <1 ligne/trajet, même forme que models["trips"]>,
+              "stops": <1 ligne/arrêt, même forme que query_foundation_slice>} ou `None` si
+    le web service n'est pas configuré/joignable/pas prêt -- l'appelant retombe alors sur la
+    vue historique. `stops` est ce qui manquait à la version précédente : sans lui, "voir le
+    détail"/la carte d'un trajet EN DIRECT n'avait nulle part où lire la séquence par arrêt
+    (jamais écrite dans trips/trip_stops, ce jour n'existant que dans ce cache en mémoire).
+    """
+    cache_key = (societe, day)
+    cached = _current_gps_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _CURRENT_GPS_CACHE_TTL_S:
+        return cached[1]
+
+    result = None
+    if ws.WEBSERVICE_URL:
+        try:
+            if ws.is_day_ready(day):
+                pings = ws.get_pings_for_day(day, societe=societe)
+                if pings:
+                    groups = ws.group_pings_by_bus_line(pings)
+                    usable = _load_usable_lines()
+                    models = model_manager.get("anomaly")
+                    cfg = fdn.Config()
+                    trip_frames, stop_frames = [], []
+                    for (grp_line, grp_bus), grp_pings in groups.items():
+                        key = (grp_line, societe)
+                        if key not in usable:
+                            continue
+                        rows = ws.pings_to_score_live_rows(grp_pings)
+                        if not rows:
+                            continue
+                        raw_df = pd.DataFrame(rows)
+                        # Le service renvoie des horodatages avec offset (+00:00) -> tz-aware,
+                        # alors que le reste du pipeline (day0 = pd.Timestamp(...) dans
+                        # reconstruct_bus_day) compare avec des Timestamp NAÏFS, comme les
+                        # datetime bruts de pymongo -- confirmé par erreur réelle (2026-07-13,
+                        # "Invalid comparison between dtype=datetime64[ns, UTC] and Timestamp").
+                        # On retire juste l'info de fuseau (les valeurs restent identiques),
+                        # pas de vraie conversion de fuseau nécessaire.
+                        raw_df["t"] = pd.to_datetime(raw_df["t"]).dt.tz_localize(None)
+                        raw_df = raw_df.sort_values("t").reset_index(drop=True)
+                        try:
+                            fa = fdn.reconstruct_bus_day(
+                                None, f"d{day}", grp_line, societe, int(grp_bus),
+                                usable[key], cfg, raw_pings=raw_df)
+                        except Exception as e:
+                            print(f"  live reconstruct failed for {societe}/{grp_line}/{grp_bus}: {e}")
+                            continue
+                        if fa.empty:
+                            continue
+                        try:
+                            trip_frames.append(anomaly.score(models, fa))
+                        except Exception as e:
+                            print(f"  live scoring failed for {societe}/{grp_line}/{grp_bus}: {e}")
+                            continue
+                        stop_frames.append(fa)
+                    if trip_frames:
+                        result = {
+                            "trips": pd.concat(trip_frames, ignore_index=True),
+                            "stops": pd.concat(stop_frames, ignore_index=True),
+                        }
+        except Exception as e:
+            print(f"Live GPS webservice unavailable ({societe}/{day}): {e}")
+
+    _current_gps_cache[cache_key] = (time.time(), result)
+    return result
+
+
+def _live_gps_day(societe: str) -> Optional[str]:
+    """Yesterday's date if the live GPS web service actually has (usable) data for this
+    société, else `None` -- see _score_all_gps_live for why "yesterday" not "today"."""
+    day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    return day if _score_all_gps_live(societe, day) is not None else None
+
+
+_current_ticket_cache: dict = {}   # (societe, day) -> (timestamp, days_df ou None)
+
+
+def _score_all_tickets_live(societe: str, day: str) -> Optional[pd.DataFrame]:
+    """Score la billetterie EN DIRECT depuis getTicketTotalsForDay pour cette société/ce
+    jour -- même pipeline que /api/ticket-anomaly/score-live, appliqué à toutes les lignes
+    de la société d'un coup. `day` au format YYYYMMDD (converti en YYYY-MM-DD pour l'appel,
+    voir docs/webservice_fields.txt -- format différent de getPingsForDay, confirmé sur le
+    service réel). Pas de isDayReady équivalent fourni pour ce service -- on tente l'appel
+    directement et on traite une réponse vide/l'échec comme "pas encore prêt".
+    """
+    cache_key = (societe, day)
+    cached = _current_ticket_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _CURRENT_GPS_CACHE_TTL_S:
+        return cached[1]
+
+    result = None
+    if ws.WEBSERVICE_URL:
+        try:
+            day_dashed = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+            raw = ws.get_ticket_totals_for_day(day_dashed)
+            sub = [r for r in raw if r.get("societe") == societe]
+            rows = ws.ticket_totals_to_rows(sub, day)
+            if rows:
+                models = model_manager.get("ticket_anomaly")
+                result = ticket_anomaly.score(models, pd.DataFrame(rows))
+        except Exception as e:
+            print(f"Live ticket webservice unavailable ({societe}/{day}): {e}")
+
+    _current_ticket_cache[cache_key] = (time.time(), result)
+    return result
+
+
+def _live_ticket_day(societe: str) -> Optional[str]:
+    """Yesterday's date if the live ticket web service has data for this société, else
+    `None` -- same "yesterday, not today" reasoning as _live_gps_day."""
+    day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    return day if _score_all_tickets_live(societe, day) is not None else None
+
+
 @app.get("/api/options", response_model=ListResponse)
 async def get_options(
     societe: Optional[str] = Query(None),
@@ -567,9 +724,17 @@ async def get_days_for_line(
     line: str
 ):
     df = model_manager.trip_scopes(societe, line=line)
-    if df is None or len(df) == 0:
-        return {"days": []}
-    days = sorted(df["day"].unique().tolist(), reverse=True)
+    days = sorted(df["day"].unique().tolist(), reverse=True) if df is not None and len(df) else []
+
+    # Yesterday, if the live GPS web service actually has trips for THIS line -- otherwise
+    # "Expliquer un bus" only ever offers historical days, even when live data exists (see
+    # _live_gps_day) -- an admin has no way to pick it explicitly.
+    live_day = _live_gps_day(societe)
+    if live_day and live_day not in days:
+        live = _score_all_gps_live(societe, live_day)
+        if live is not None and len(live["trips"][live["trips"]["line"] == line]):
+            days = [live_day] + days
+
     return {"days": days[:30]}
 
 @app.get("/api/stops")
@@ -827,9 +992,27 @@ def _trip_quality_flags(trips: pd.DataFrame, models) -> pd.DataFrame:
 def _filter_trips(societe: str, line: Optional[str] = None,
                   bus: Optional[int] = None, day: Optional[str] = None,
                   include_data_bugs: bool = False, dir: Optional[str] = None):
-    """Filter the precomputed scored-trips table. Returns (models, trips_df)."""
+    """Filter the scored-trips table -- precomputed (historical) PLUS, when relevant,
+    yesterday's data scored live from the GPS web service (see _score_all_gps_live).
+
+    Only checks live data when it could actually matter (`day` unspecified, i.e. "show
+    everything", or `day` explicitly equal to yesterday) -- an explicit OTHER historical
+    day never needs a webservice round-trip. `day=None` merges live trips in alongside
+    history (so "Historique récent"/patterns naturally include yesterday); `day=<live
+    day>` returns ONLY the live trips for that exact day (an explicit pick).
+    """
     models = model_manager.get("anomaly")
     trips = models["trips"]
+
+    potential_live_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    if day is None or day == potential_live_day:
+        live = _score_all_gps_live(societe, potential_live_day)
+        if live is not None:
+            if day == potential_live_day:
+                trips = live["trips"]
+            else:
+                trips = pd.concat([trips, live["trips"]], ignore_index=True, sort=False)
+
     mask = trips["societe"] == societe
     if line:
         mask &= trips["line"] == line
@@ -965,9 +1148,22 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
 
 def _filter_ticket_days(societe: str, line: Optional[str] = None,
                         bus: Optional[str] = None, day: Optional[str] = None):
-    """Filter the precomputed scored-days table. Returns (models, days_df)."""
+    """Filter the scored-days table -- precomputed (historical) PLUS, when relevant,
+    yesterday's billetterie scored live from the web service (see
+    _score_all_tickets_live). Same "only check live when it could matter" reasoning as
+    _filter_trips (GPS side)."""
     models = model_manager.get("ticket_anomaly")
     days = models["days"]
+
+    potential_live_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+    if day is None or day == potential_live_day:
+        live = _score_all_tickets_live(societe, potential_live_day)
+        if live is not None:
+            if day == potential_live_day:
+                days = live
+            else:
+                days = pd.concat([days, live], ignore_index=True, sort=False)
+
     mask = days["societe"] == societe
     if line:
         mask &= days["line"] == line
@@ -1454,13 +1650,29 @@ async def get_current_anomalies(
     line: Optional[str] = None,
     dir: Optional[str] = None
 ):
-    """Anomalies for the latest day the selected scope actually operated."""
-    today = latest_day_for(societe, line)
+    """Anomalies for "today". Tries the most recent day the live GPS web service has
+    actually finished processing (see _score_all_gps_live) -- the precomputed dataset is
+    always historical (confirmed 2026-07-13: stuck at 21 juin while the live service
+    already has 12 juillet), so without this, "today" silently meant "whenever the last
+    training snapshot was taken", not today.
+
+    That "most recent ready day" is YESTERDAY, not the literal calendar day -- confirmed
+    2026-07-13 : le traitement de nuit tourne la NUIT SUIVANTE pour la journée qui vient de
+    se terminer, donc `isDayReady` pour le jour calendaire courant reste `false` toute la
+    journée (les données du jour même sont encore en train d'arriver) ; c'est seulement le
+    jour PRÉCÉDENT qui est prêt. Falls back to the historical latest-day view when the web
+    service isn't configured, unreachable, or has nothing ready yet (`live` in the response
+    says which one happened, so the dashboard/PHP page can show it honestly).
+    """
     try:
-        models, trips = _filter_trips(societe, line, day=today, dir=dir)
+        models = model_manager.get("anomaly")
+        live_day = _live_gps_day(societe)
+        today, live = (live_day, True) if live_day else (latest_day_for(societe, line), False)
+        _, trips = _filter_trips(societe, line, day=today, dir=dir)
         anomalies = _rows_with_reasons(models, trips, anomalies_only=True)
         return {
             "date": today,
+            "live": live,
             "societe": societe,
             "line": line,
             "anomalies": anomalies,
