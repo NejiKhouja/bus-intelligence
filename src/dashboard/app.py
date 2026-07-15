@@ -127,9 +127,17 @@ def get_anomaly_history(company, line=None, limit=50, include_bugs=False, direct
                 include_data_bugs=include_bugs, dir=direction)
 
 @st.cache_data(ttl=60)
-def get_anomaly_explain(company, line, bus, day=None, include_bugs=False, direction=None):
+def get_anomaly_explain(company, line, bus, day=None, include_bugs=False, direction=None, check_detours=False):
     return _get("/api/anomaly-explain", societe=company, line=line, bus=bus, day=day,
-                include_data_bugs=include_bugs, dir=direction)
+                include_data_bugs=include_bugs, dir=direction, check_detours=check_detours)
+
+@st.cache_data(ttl=60)
+def get_driver_stats(driver_code, company=None):
+    return _get("/api/driver-stats", driver_code=driver_code, societe=company)
+
+@st.cache_data(ttl=60)
+def get_drivers_ranked(company=None, min_trips=5, limit=50):
+    return _get("/api/drivers-ranked", societe=company, min_trips=min_trips, limit=limit)
 
 @st.cache_data(ttl=60)
 def get_anomaly_patterns(company, line=None):
@@ -173,17 +181,17 @@ def get_forecast(company, line, direction, periods=30):
                  direction=direction, periods=periods)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Demo clock
+# Data freshness
 # ─────────────────────────────────────────────────────────────────────────────
 
 HEALTH = get_health()
+# Dernier jour couvert par le dataset précalculé (reference DB) -- PAS "aujourd'hui" : les
+# pages qui le peuvent (Détection d'anomalies, ETA en direct) préfèrent maintenant le jour
+# des webservices en direct quand il est disponible (voir _live_gps_day côté API) et ne
+# retombent sur cette valeur qu'en repli. Ancien "Mode démo" (jour figé + horloge simulée)
+# retiré (décision utilisateur 2026-07-15) : trompeur maintenant que les webservices
+# alimentent de vraies données en direct.
 LATEST_DAY = HEALTH.get("latest_day") or datetime.now().strftime("%Y%m%d")
-
-def demo_now(day=None):
-    """Current wall-clock time-of-day applied to the demo operating day."""
-    d = day or LATEST_DAY
-    base = datetime.strptime(d, "%Y%m%d").date()
-    return datetime.combine(base, datetime.now().time())
 
 _MOIS_FR = ["janv.", "févr.", "mars", "avr.", "mai", "juin",
             "juil.", "août", "sept.", "oct.", "nov.", "déc."]
@@ -221,8 +229,10 @@ else:
     st.sidebar.error("● API hors ligne — démarrez le serveur FastAPI")
 
 st.sidebar.info(
-    f"🟢 **Mode démo**\n\nSimulation du **{fmt_day(LATEST_DAY)}**, "
-    f"{datetime.now().strftime('%H:%M:%S')}"
+    f"🟢 **Données en direct actives** (webservices)\n\n"
+    f"Historique précalculé jusqu'au **{fmt_day(LATEST_DAY)}** — les pages qui le "
+    f"permettent (anomalies, ETA, billetterie) utilisent le jour le plus récent "
+    f"disponible en direct quand il l'est."
 )
 
 # Moteur de prédiction : on garde le meilleur modèle (HGBM, MAE ~2.7 min vs LSTM ~3.3).
@@ -299,18 +309,22 @@ elif selected == "ETA en direct":
         st.stop()
     line = c2.selectbox("Ligne", lines, key="eta_line")
 
-    # Trouver les bus en service « maintenant » sur le dernier jour d'exploitation
-    qt_iso = demo_now().isoformat()
+    # Trouver les bus en service « maintenant » -- l'heure envoyée est la vraie heure
+    # actuelle ; le JOUR (live via webservice ou repli historique) est résolu côté API
+    # (voir /api/active-buses -- préfère _live_gps_day, `active["live"]` dit lequel).
+    qt_iso = datetime.now().isoformat()
     active = get_active_buses(company, line, qt_iso)
     if not active or not active.get("buses"):
         st.warning(f"La ligne {line} n'a aucun trajet enregistré à simuler.")
         st.stop()
 
     op_day = active["day"]
+    is_live_day = active.get("live", False)
     buses = active["buses"]
     live = [b for b in buses if b["status"] in ("active", "upcoming")] or buses
     _STATUS_FR = {"active": "en service", "upcoming": "à venir", "completed": "terminé", "unknown": "—"}
-    st.caption(f"📅 Jour d'exploitation **{fmt_day(op_day)}** · heure simulée "
+    freshness_badge = "🟢 Données en direct" if is_live_day else "📊 Dernier jour historique disponible"
+    st.caption(f"{freshness_badge} · 📅 Jour d'exploitation **{fmt_day(op_day)}** · heure actuelle "
                f"**{pd.Timestamp(active['query_time']).strftime('%H:%M')}** · "
                f"{sum(b['status']=='active' for b in buses)} bus en circulation")
 
@@ -563,9 +577,10 @@ elif selected == "Détection d'anomalies":
         st.warning("Aucune donnée disponible depuis l'API.")
         st.stop()
 
-    tab_live, tab_explain, tab_patterns, tab_tickets = st.tabs([
+    tab_live, tab_explain, tab_patterns, tab_tickets, tab_drivers = st.tabs([
         f":material/warning: {t('tab_live')}", f":material/search: {t('tab_explain')}",
         f":material/bar_chart: {t('tab_patterns')}", f":material/confirmation_number: {t('tab_tickets')}",
+        f":material/badge: {t('tab_drivers')}",
     ])
 
     # Icônes Material Symbols. `icon=` est un paramètre DÉDIÉ sur st.error/warning/info/
@@ -587,12 +602,13 @@ elif selected == "Détection d'anomalies":
         "duration": ":material/schedule:", "bug": ":material/bug_report:",
         "fragment": ":material/broken_image:", "partial": ":material/straighten:",
         "map": ":material/map:", "hide": ":material/visibility_off:", "info": ":material/info:",
+        "driver": ":material/badge:",
     }
     ICON_COLOR = {
         "parking": "orange", "stopped": "blue", "signal_lost": "orange", "location": "violet",
         "off_route": "red", "suspect": "gray", "detour": "violet", "formula": "blue",
         "duration": "blue", "bug": "red", "fragment": "gray", "partial": "gray",
-        "map": "blue", "hide": "gray", "info": "blue",
+        "map": "blue", "hide": "gray", "info": "blue", "driver": "gray",
     }
 
     def CICON(key: str) -> str:
@@ -632,15 +648,27 @@ elif selected == "Détection d'anomalies":
         "elapsed_vs_bus_z": t("topfeat_elapsed_vs_bus_z"),
         "elapsed_vs_line_z": t("topfeat_elapsed_vs_line_z"),
         None: t("other_uncategorized"),
+        "unofficial_detour": t("topfeat_unofficial_detour"),
     }
     SEV_RANK = {"high": 3, "medium": 2, "low": 1}
 
+    def _row_categories(a):
+        """Catégories d'UNE ligne pour category_filter -- une liste, pas une seule valeur,
+        car has_detour (vérification GPS indépendante, voir check_detours côté API) peut
+        coexister avec le top_feature du modèle plutôt que le remplacer."""
+        cats = [a.get("top_feature")]
+        if a.get("has_detour"):
+            cats.append("unofficial_detour")
+        return cats
+
     def category_filter(anomalies, key):
-        """Multiselect par type de problème dominant -- retourne la liste filtrée.
-        N'affiche le widget que s'il y a au moins 2 catégories parmi lesquelles choisir."""
+        """Multiselect par type de problème (dominant du modèle + détour non-officiel s'il a
+        été détecté) -- retourne la liste filtrée. N'affiche le widget que s'il y a au moins
+        2 catégories parmi lesquelles choisir. Une ligne reste affichée si AU MOINS UNE de
+        ses catégories est cochée (pas besoin des deux à la fois)."""
         if not anomalies:
             return anomalies
-        present = sorted({a.get("top_feature") for a in anomalies},
+        present = sorted({c for a in anomalies for c in _row_categories(a)},
                          key=lambda f: TOP_FEATURE_FR.get(f, str(f)))
         if len(present) < 2:
             return anomalies
@@ -648,7 +676,7 @@ elif selected == "Détection d'anomalies":
         picked = st.multiselect(t("filter_anomaly_type"), options,
                                default=options, key=key)
         picked_features = {f for f in present if TOP_FEATURE_FR.get(f, str(f)) in picked}
-        return [a for a in anomalies if a.get("top_feature") in picked_features]
+        return [a for a in anomalies if picked_features & set(_row_categories(a))]
 
     def _sort_anomalies(anomalies, sort_by="date_desc"):
         """Trie selon le critère choisi par l'admin (widget `sort_by`, voir tab_explain).
@@ -903,12 +931,13 @@ elif selected == "Détection d'anomalies":
         # carte (un appel donné de render_alert_cards correspond toujours à UN seul opérateur,
         # puisque tab_live/tab_explain filtrent déjà par société avant d'appeler cette
         # fonction ; répéter le même avertissement sur chaque carte serait du bruit). Isolation
-        # Forest ET l'autoencodeur LSTM sont entraînés PAR OPÉRATEUR (voir models/anomaly.py) --
-        # même "dédié", un modèle reste entraîné sur TOUTES les lignes de l'opérateur poolées
-        # ensemble, jamais sur une ligne seule. En dessous du seuil de trajets requis
-        # (30 pour l'IF, 200 pour le LSTM), repli sur un modèle GLOBAL entraîné sur TOUTES les
-        # sociétés confondues -- confirmé en base (2026-07) : TUS a un IF dédié mais PAS de LSTM
-        # dédié (repli global), S.R.T.SELIANA n'a ni l'un ni l'autre.
+        # Forest ET l'autoencodeur LSTM ont 3 paliers (voir models/anomaly.py train()) : dédié
+        # à la LIGNE si elle a assez de trajets (>=30 IF, >=200 LSTM) -- sinon dédié à
+        # l'opérateur entier (mêmes seuils, toutes lignes poolées) -- sinon repli GLOBAL
+        # (tout le réseau). `model_if_dedicated`/`model_lstm_dedicated` restent vrais dès le
+        # palier opérateur ; seul `model_low_data` (aucun des deux paliers dédiés) déclenche
+        # encore cet avertissement -- confirmé en base (2026-07) : TUS a un IF dédié mais PAS
+        # de LSTM dédié (repli global), S.R.T.SELIANA n'a ni l'un ni l'autre.
         if anomalies:
             a0 = anomalies[0]
             if a0.get("model_low_data"):
@@ -1068,6 +1097,46 @@ elif selected == "Détection d'anomalies":
                     st.caption(t("chip_suspect_coord", icon=CICON("suspect"), count=ps["suspect_coord_count"]),
                               help=t("chip_suspect_coord_help"))
 
+                # Détour non-officiel confirmé (voir "Vérifier aussi les détours" côté
+                # tab_explain / _detect_start_detour côté API) -- présent seulement quand
+                # l'admin a coché cette case (vérification GPS en direct, volontairement
+                # optionnelle -- voir la note de coût dans anomaly_explain) ; filtrable via
+                # la catégorie "Détour non-officiel" dans "Filtrer par type d'anomalie"
+                # ci-dessus (category_filter), pas via un contrôle séparé.
+                if a.get("has_detour") and a.get("detour"):
+                    dt = a["detour"]
+                    st.caption(t("chip_detour_confirmed", icon=CICON("detour"),
+                                dist=dt.get("distance_km"), min=dt.get("duration_min")),
+                              help=t("chip_detour_confirmed_help"))
+
+                # Départ prévu (horaire publié) vs départ réel -- voir _scheduled_departures
+                # côté API, purement informationnel (pas une feature du modèle), absent quand
+                # la ligne ne publie pas d'horaire (54% des lignes suivies). Seuil 3 min pour
+                # éviter le bruit d'une comparaison à la minute près sur un horaire déjà
+                # approximatif ; `schedule_multi_variant` avertit quand plusieurs horaires
+                # sont publiés pour cette ligne sans qu'on sache lequel s'applique ce jour-là.
+                if a.get("scheduled_departure") and a.get("departure_delay_min") is not None:
+                    delay = a["departure_delay_min"]
+                    if abs(delay) >= 3:
+                        key = "chip_departure_late" if delay > 0 else "chip_departure_early"
+                        st.caption(t(key, icon=CICON("duration"), sched=a["scheduled_departure"],
+                                    dep=_dep, min=abs(delay)),
+                                  help=t("chip_departure_multi_variant") if a.get("schedule_multi_variant")
+                                       else t("chip_departure_help"))
+
+                # Code chauffeur (voir reference_db.attach_driver_codes_to_trips) -- absent
+                # (None) pour tout trajet hors de la fenêtre 2025+ de tickets backfillée, ou
+                # sans session chauffeur correspondante -- pas de valeur devinée dans ce cas.
+                # Code SEUL sur la carte (décision utilisateur 2026-07-15) -- pas de bouton
+                # stats ici, celles-ci vivent uniquement dans l'onglet "Chauffeurs" dédié.
+                # Le disclaimer (au survol) rappelle qu'une corrélation trajet/chauffeur n'est
+                # pas un verdict automatique -- à l'admin d'interpréter (conditions de route,
+                # trafic, panne du bus, etc. peuvent expliquer une anomalie sans faute du
+                # chauffeur).
+                if a.get("driver_code"):
+                    st.caption(t("chip_driver", icon=CICON("driver"), code=a["driver_code"]),
+                              help=t("chip_driver_disclaimer"))
+
                 # Bouton carte : charge la carte du trajet à la demande.
                 if detail_company and a.get("trip_id") is not None:
                     k = f"an_card_{key_prefix}_{i}_{a['bus']}_{a['day']}_{a['trip_id']}"
@@ -1126,7 +1195,9 @@ elif selected == "Détection d'anomalies":
         col = st.columns(6)
         company = col[0].selectbox(t("filter_operator"), companies, key="an_ex_co")
         lines = get_lines(company)
-        line = col[1].selectbox(t("filter_line"), lines, key="an_ex_line") if lines else None
+        line_opts = [t("filter_all_lines")] + lines if lines else []
+        line_label = col[1].selectbox(t("filter_line"), line_opts, key="an_ex_line") if line_opts else None
+        line = None if (not line_label or line_label == t("filter_all_lines")) else line_label
 
         # ── Verdict global de la ligne — visible dès qu'une ligne est choisie ──
         if line:
@@ -1220,12 +1291,31 @@ elif selected == "Détection d'anomalies":
         day_sel = col[3].selectbox(t("filter_day"), days, key="an_ex_day")
         day_param = None if day_sel == t("filter_all_days") else day_sel
 
+        # Saisie manuelle d'une date -- la liste déroulante ci-dessus ne propose QUE les
+        # jours déjà connus (précalculés) ; avec les webservices en direct, un jour tout
+        # juste arrivé peut ne pas encore y figurer. Prioritaire sur le menu déroulant si
+        # renseignée (décision utilisateur 2026-07-15).
+        manual_date = st.date_input(t("filter_manual_date"), value=None, key="an_ex_manual_date",
+                                    help=t("filter_manual_date_help"))
+        if manual_date:
+            day_param = manual_date.strftime("%Y%m%d")
+
         dir_sel = col[4].selectbox(t("filter_direction"),
                                    [t("filter_both_directions"), "ALLER", "RETOUR"], key="an_ex_dir")
         dir_param = None if dir_sel == t("filter_both_directions") else dir_sel
+        analyze_clicked = col[5].button(t("btn_analyze"), type="primary", width='stretch')
 
-        if line and col[5].button(t("btn_analyze"), type="primary", width='stretch'):
-            res = get_anomaly_explain(company, line, bus, day_param, include_bugs=show_bugs, direction=dir_param)
+        # Détour non-officiel toujours vérifié (décision utilisateur 2026-07-15 : chargé
+        # automatiquement, pas de case à cocher séparée à trouver d'abord) -- apparaît comme
+        # UNE catégorie de plus dans "Filtrer par type d'anomalie" (category_filter),
+        # cochable/décochable comme n'importe quelle autre. Ça demande une lecture GPS brute
+        # en direct PAR bus-jour signalé (parallélisée 8 à la fois côté API) donc peut
+        # prendre 30-40s sur une ligne très signalée -- d'où le spinner explicite plutôt que
+        # de laisser croire que "Analyser" est bloqué.
+        if analyze_clicked:
+            with st.spinner(t("analyzing_with_detours")):
+                res = get_anomaly_explain(company, line, bus, day_param, include_bugs=show_bugs,
+                                          direction=dir_param, check_detours=True)
             st.session_state["an_ex_res"] = res
             st.session_state["an_ex_ctx"] = (company, line, bus, day_param, dir_param)
 
@@ -1233,7 +1323,12 @@ elif selected == "Détection d'anomalies":
         ctx = st.session_state.get("an_ex_ctx")
 
         if res and ctx == (company, line, bus, day_param, dir_param):
-            scope = t("scope_bus_line", bus=bus, line=line) if bus else t("scope_line", line=line)
+            if not line:
+                scope = t("scope_all_lines", company=company)
+            elif bus:
+                scope = t("scope_bus_line", bus=bus, line=line)
+            else:
+                scope = t("scope_line", line=line)
             if not res:
                 st.error(t("btn_analyze_fail"))
             elif res["anomaly_count"] == 0:
@@ -1709,6 +1804,73 @@ modèles par ligne après réentraînement). Chaque carte concernée porte un av
                                           "disponible pour lui (bus/jour probablement en dehors de "
                                           "l'historique billetterie par arrêt).")
 
+    with tab_drivers:
+        # Chauffeur identifié via reference_db.attach_driver_codes_to_trips -- couverture
+        # 2025+ uniquement (voir populate_driver_services), donc certains bus-jours plus
+        # anciens n'auront jamais de chauffeur associé ici, ce n'est pas un bug.
+        st.caption(t("drivers_tab_caption"))
+        st.info(t("chip_driver_disclaimer"), icon=":material/info:")
+        d_company = st.selectbox(t("filter_operator"), companies, key="dr_company")
+        min_trips = st.slider(t("drivers_min_trips"), 1, 50, 5, key="dr_min_trips")
+        ranked = get_drivers_ranked(d_company, min_trips=min_trips) or {}
+        drivers_list = ranked.get("drivers") or []
+
+        if not drivers_list:
+            st.info(t("no_drivers_found"))
+        else:
+            st.markdown(f"##### {t('drivers_leaderboard')}")
+            st.dataframe(pd.DataFrame(drivers_list), hide_index=True, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown(f"##### {t('driver_lookup')}")
+        code_input = st.text_input(t("driver_code_input"), key="dr_code_input")
+        if code_input:
+            ds = get_driver_stats(code_input.strip(), company=d_company)
+            if not ds:
+                st.warning(t("driver_stats_unavailable"))
+            else:
+                dcols = st.columns(3)
+                dcols[0].metric(t("metric_driver_trips"), ds["total_trips"])
+                dcols[1].metric(t("metric_driver_anomalies"), ds["total_anomalies"])
+                dcols[2].metric(t("metric_driver_rate"), f"{ds['anomaly_rate']:.1f}%")
+
+                dom = ds.get("dominant_cause")
+                if dom:
+                    label = TOP_FEATURE_FR.get(dom["top_feature"], str(dom["top_feature"]))
+                    st.caption(t("driver_dominant_cause", cause=label, pct=dom["pct"]))
+
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    dist = ds.get("cause_distribution")
+                    if dist:
+                        st.markdown(f"###### {t('driver_cause_distribution')}")
+                        dist_df = pd.DataFrame(dist)
+                        dist_df["label"] = dist_df["top_feature"].map(
+                            lambda f: TOP_FEATURE_FR.get(f, str(f)))
+                        fig = px.bar(dist_df.sort_values("pct", ascending=True),
+                                    x="pct", y="label", orientation="h",
+                                    labels={"pct": "%", "label": ""},
+                                    color="pct", color_continuous_scale="Oranges")
+                        fig.update_layout(template="plotly_white", height=320,
+                                          margin=dict(l=10, r=10, t=10, b=10), coloraxis_showscale=False)
+                        st.plotly_chart(fig, width='stretch')
+                with dc2:
+                    if ds.get("by_line"):
+                        st.markdown(f"###### {t('driver_by_line')}")
+                        bl_df = pd.DataFrame(ds["by_line"])
+                        fig2 = px.bar(bl_df.sort_values("anomaly_rate", ascending=True),
+                                     x="anomaly_rate", y="line", orientation="h",
+                                     labels={"anomaly_rate": "%", "line": ""},
+                                     color="anomaly_rate", color_continuous_scale="Reds")
+                        fig2.update_layout(template="plotly_white", height=320,
+                                           margin=dict(l=10, r=10, t=10, b=10), coloraxis_showscale=False)
+                        st.plotly_chart(fig2, width='stretch')
+                        st.dataframe(bl_df, hide_index=True, use_container_width=True)
+
+                if ds.get("anomalies"):
+                    st.markdown(f"###### {t('driver_flagged_trips')}")
+                    render_alert_cards(ds["anomalies"], detail_company=None, key_prefix="driver")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Démo -- Créer une ligne (Google Maps, rien n'est persisté -- voir route_demo.py)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1812,5 +1974,5 @@ elif selected == "Prévisions":
                 st.plotly_chart(fig, width='stretch')
 
 st.divider()
-st.caption(f"WiniCari AI · Horloge démo {fmt_day(LATEST_DAY)} {datetime.now().strftime('%H:%M:%S')} · "
+st.caption(f"WiniCari AI · {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} · "
            f"FastAPI + Streamlit")

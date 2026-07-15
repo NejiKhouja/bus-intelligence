@@ -223,6 +223,8 @@ def build_sequences(fa: pd.DataFrame, cfg: AnomalyConfig) -> tuple[np.ndarray, l
         seqs.append(arr)
         ids.append(keys)
 
+    if not seqs:
+        return np.empty((0, cfg.seq_pad, len(SEQ_FEATURES)), dtype=np.float32), ids
     return np.stack(seqs), ids
 
 

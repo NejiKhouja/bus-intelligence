@@ -160,6 +160,27 @@ CREATE TABLE IF NOT EXISTS tickets_station_trip_daily (
     PRIMARY KEY (company_id, line_id, bus, direction, station_name, day)
 );
 
+-- Sessions chauffeur (ouverture/fermeture), voir populate_driver_services. Source : tickets
+-- INDIVIDUELS (Historique_Tickets.Ticket{annee}), PAS la collection `service` de MongoDB --
+-- celle-ci ne retient QUE les sessions actuellement ouvertes (14 documents au total au
+-- 2026-07-15, toutes current=True), aucun historique de fermeture n'y est conservé, donc
+-- inutilisable pour du rattachement rétroactif. `service_start`/`service_end` sont dérivées
+-- de `date_debut_service`+`heure_debut_ticket` / `date_fin_service`+`heure_fin_ticket`,
+-- champs dénormalisés identiques sur chaque ticket de la même session -- une approximation
+-- (bornée par le premier/dernier ticket ÉMIS, pas l'instant exact d'ouverture/fermeture)
+-- mais la seule source qui existe.
+CREATE TABLE IF NOT EXISTS driver_services (
+    company_id    INTEGER REFERENCES companies(company_id),
+    line_id       INTEGER REFERENCES lines(line_id),
+    bus           TEXT,
+    day           TEXT,
+    driver_code   TEXT,
+    service_start TEXT,
+    service_end   TEXT,
+    n_tickets     INTEGER,
+    PRIMARY KEY (company_id, line_id, bus, day, driver_code)
+);
+
 CREATE TABLE IF NOT EXISTS anomaly_scores (
     trip_id         INTEGER REFERENCES trips(trip_id),
     model_version   TEXT NOT NULL,
@@ -221,6 +242,15 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     # scannerait les 47k lignes de `trips` en entier.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trips_scope ON trips(company_id, line_id, bus, day)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trips_line ON trips(company_id, line_id)")
+    # migration idempotente : colonne ajoutée 2026-07-15 (rattachement chauffeur, voir
+    # populate_driver_services/attach_driver_codes_to_trips) -- NULL pour tout trajet sans
+    # session chauffeur correspondante (pas de tickets Historique_Tickets couvrant ce
+    # bus-jour, ou hors de la fenêtre d'années ingérée).
+    try:
+        conn.execute("ALTER TABLE trips ADD COLUMN driver_code TEXT")
+    except sqlite3.OperationalError:
+        pass  # colonne déjà présente
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trips_driver ON trips(driver_code)")
     conn.commit()
     return conn
 
@@ -1438,6 +1468,130 @@ def populate_tickets_station_trip_daily(conn: sqlite3.Connection, tk_db,
     return {"rows_inserted": len(agg), "years": years, "n_null_societe": n_null_societe,
             "n_unmatched_company": n_unmatched_company, "n_unmatched_line": n_unmatched_line,
             "n_null_station": n_null_station}
+
+
+def populate_driver_services(conn: sqlite3.Connection, tk_db,
+                             canonical_companies: dict[str, list[str]] = None,
+                             years: list[str] = None) -> dict:
+    """Peuple `driver_services` depuis les tickets INDIVIDUELS (Historique_Tickets.Ticket{annee}),
+    même source que `populate_tickets_station_daily` -- seule à porter un code chauffeur
+    (`CodeCh`) avec un horodatage de session exploitable (`date_debut_service`+
+    `heure_debut_ticket` / `date_fin_service`+`heure_fin_ticket`, dénormalisés identiques sur
+    chaque ticket de la même session -- voir la note sur `driver_services` dans SCHEMA_SQL).
+
+    `years` par défaut restreint à 2025+ (décision utilisateur 2026-07-15 : les années
+    antérieures ne sont pas backfillées pour ce premier passage) -- passer explicitement
+    une liste plus large pour étendre plus tard sans changer le code.
+
+    $min/$max plutôt que $first sur les champs de session : ils sont censés être constants
+    sur tout le groupe (dénormalisés), mais $min/$max encaisse sans risque une éventuelle
+    incohérence ponctuelle au lieu de dépendre de l'ordre de renvoi de Mongo.
+    """
+    canonical_companies = canonical_companies or CANONICAL_COMPANIES
+    alias_to_canon = {alias: canon for canon, aliases in canonical_companies.items() for alias in aliases}
+    company_id_by_name = {row[1]: row[0] for row in conn.execute("SELECT company_id, canonical_name FROM companies")}
+    line_id_by_key = {(row[2], row[1]): row[0] for row in conn.execute(
+        "SELECT l.line_id, c.canonical_name, l.line_code FROM lines l JOIN companies c ON c.company_id = l.company_id")}
+
+    years = years or ["Ticket2025", "Ticket2026"]
+    pipeline = [
+        {"$group": {
+            "_id": {"societe": "$Societe", "line": "$CodeRoute", "bus": "$CodeBus",
+                    "driver": "$CodeCh", "day": "$jour_service"},
+            "date_debut_service": {"$min": "$date_debut_service"},
+            "heure_debut_ticket": {"$min": "$heure_debut_ticket"},
+            "date_fin_service": {"$max": "$date_fin_service"},
+            "heure_fin_ticket": {"$max": "$heure_fin_ticket"},
+            "n_tickets": {"$sum": 1},
+        }}
+    ]
+
+    agg: dict = {}
+    n_null_societe = n_unmatched_company = n_unmatched_line = n_null_driver = 0
+    for yr in years:
+        if yr not in tk_db.list_collection_names():
+            continue
+        for row in tk_db[yr].aggregate(pipeline, allowDiskUse=True):
+            key_raw = row["_id"]
+            raw_soc = key_raw.get("societe")
+            if not raw_soc:
+                n_null_societe += 1
+                continue
+            canon = alias_to_canon.get(raw_soc)
+            company_id = company_id_by_name.get(canon) if canon else None
+            if company_id is None:
+                n_unmatched_company += 1
+                continue
+            line_code = str(key_raw.get("line", "")).strip()
+            line_id = line_id_by_key.get((line_code, canon))
+            if line_id is None:
+                n_unmatched_line += 1
+                continue
+            driver = str(key_raw.get("driver") or "").strip()
+            if not driver:
+                n_null_driver += 1
+                continue
+            bus = str(key_raw.get("bus", "")).strip()
+            parts = str(key_raw.get("day", "")).split("/")
+            day = f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}" if len(parts) == 3 else None
+            if day is None:
+                continue
+            d0, h0 = row.get("date_debut_service"), row.get("heure_debut_ticket")
+            d1, h1 = row.get("date_fin_service"), row.get("heure_fin_ticket")
+            if not (d0 and h0 and d1 and h1):
+                continue
+            service_start = f"{d0.replace('/', '-')} {h0}:00"
+            service_end = f"{d1.replace('/', '-')} {h1}:00"
+            key = (company_id, line_id, bus, day, driver)
+            entry = agg.setdefault(key, {"service_start": service_start, "service_end": service_end, "n_tickets": 0})
+            entry["service_start"] = min(entry["service_start"], service_start)
+            entry["service_end"] = max(entry["service_end"], service_end)
+            entry["n_tickets"] += int(row.get("n_tickets") or 0)
+
+    conn.execute("DELETE FROM driver_services")
+    conn.executemany(
+        """INSERT INTO driver_services (company_id, line_id, bus, day, driver_code,
+                                         service_start, service_end, n_tickets)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        [(cid, lid, bus, day, driver, v["service_start"], v["service_end"], v["n_tickets"])
+         for (cid, lid, bus, day, driver), v in agg.items()],
+    )
+    conn.commit()
+    return {"rows_inserted": len(agg), "years": years, "n_null_societe": n_null_societe,
+            "n_unmatched_company": n_unmatched_company, "n_unmatched_line": n_unmatched_line,
+            "n_null_driver": n_null_driver}
+
+
+def attach_driver_codes_to_trips(conn: sqlite3.Connection) -> dict:
+    """Rattache `driver_code` à chaque trajet de `trips` par recoupement de fenêtre horaire
+    avec `driver_services` : un trajet est attribué au chauffeur dont la session (même
+    société/ligne/bus/jour) englobe son `trip_start`. Approximatif (fenêtre dérivée des
+    horodatages de tickets, pas d'un événement d'ouverture/fermeture explicite) mais c'est
+    la seule source qui existe -- voir la note sur `driver_services` dans SCHEMA_SQL.
+
+    NULL laissé tel quel pour un trajet sans session correspondante (pas de tickets
+    Historique_Tickets sur ce bus-jour, hors fenêtre d'années ingérée, ou aucune session ne
+    couvre exactement ce trip_start) -- pas de repli deviné.
+    """
+    conn.execute(
+        """UPDATE trips SET driver_code = (
+             SELECT ds.driver_code FROM driver_services ds
+             WHERE ds.company_id = trips.company_id AND ds.line_id = trips.line_id
+               AND ds.bus = trips.bus AND ds.day = trips.day
+               AND trips.trip_start BETWEEN ds.service_start AND ds.service_end
+             LIMIT 1
+           )
+           WHERE EXISTS (
+             SELECT 1 FROM driver_services ds
+             WHERE ds.company_id = trips.company_id AND ds.line_id = trips.line_id
+               AND ds.bus = trips.bus AND ds.day = trips.day
+               AND trips.trip_start BETWEEN ds.service_start AND ds.service_end
+           )"""
+    )
+    conn.commit()
+    n_attached = conn.execute("SELECT COUNT(*) FROM trips WHERE driver_code IS NOT NULL").fetchone()[0]
+    n_total = conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0]
+    return {"n_attached": n_attached, "n_total": n_total}
 
 
 # Export reconstitue la forme `foundation_arrivals_full.parquet` depuis trips/trip_stops

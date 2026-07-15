@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import os
 import time
 from datetime import datetime, timedelta
@@ -1096,27 +1098,60 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
     if limit:
         ex = ex.head(limit)
 
-    # Isolation Forest est entraîné PAR OPÉRATEUR (>=30 trajets, voir models/anomaly.py
-    # train()), l'autoencodeur LSTM PAR OPÉRATEUR aussi mais avec un seuil plus haut
-    # (>=200, un autoencodeur a plus de paramètres à apprendre) -- EN DESSOUS, repli sur un
-    # modèle GLOBAL entraîné sur TOUTES les sociétés/lignes confondues. Dans les deux cas,
-    # même un modèle "dédié" à un opérateur reste entraîné sur TOUTES ses lignes poolées
-    # ensemble, jamais sur une ligne seule -- il n'y a pas de modèle par ligne. Exposé ici
-    # pour que le dashboard puisse avertir : "ce résultat compare au réseau global / à
-    # l'opérateur entier, pas à cette ligne spécifiquement, et s'affinera avec plus de
-    # données" plutôt que de laisser croire à une comparaison fine qui n'existe pas encore.
+    # Isolation Forest et l'autoencodeur LSTM ont 3 paliers de spécificité (voir
+    # models/anomaly.py train()) : dédié à la (société, ligne) si assez de trajets sur
+    # CETTE ligne (>=30 pour l'IF, >=200 pour le LSTM) -- sinon dédié à l'opérateur entier
+    # (mêmes seuils) -- sinon repli sur un modèle GLOBAL entraîné sur tout le réseau.
+    # `model_line_dedicated` distingue le meilleur cas (comparé à cette ligne précisément)
+    # du cas intermédiaire (comparé à l'opérateur entier, toutes lignes poolées), pour que
+    # le dashboard puisse nuancer son avertissement au lieu de traiter les deux pareil.
     if_models = models.get("if_models", {})
     lstm_models = models.get("lstm_models", {})
+    driver_lookup = _driver_code_lookup()
+    schedules = _scheduled_departures()
 
     rows = []
     for _, r in ex.iterrows():
         soc = r.get("societe")
-        if_dedicated = soc in if_models
-        lstm_dedicated = soc in lstm_models
+        line = r.get("line")
+        if_line_dedicated = (soc, line) in if_models
+        lstm_line_dedicated = (soc, line) in lstm_models
+        if_dedicated = if_line_dedicated or soc in if_models
+        lstm_dedicated = lstm_line_dedicated or soc in lstm_models
+        driver_code = driver_lookup.get((soc, line, str(int(r["bus"])), r["day"], r["trip_start"]))
+
+        # Départ prévu (horaire publié, voir _scheduled_departures) vs départ réel
+        # (trip_start, déjà net de l'immobilisation terminus -- voir foundation.segment_trips)
+        # -- purement informationnel (pas une feature entraînée), disponible seulement pour
+        # les lignes qui publient un horaire (45.6% des lignes suivies, confirmé 2026-07-15).
+        scheduled_departure = departure_delay_min = None
+        schedule_multi_variant = False
+        sched = schedules.get((soc, line))
+        ts = r.get("trip_start")
+        if sched and pd.notna(ts):
+            scheduled_departure = sched.get(r.get("dir"))
+            if scheduled_departure:
+                schedule_multi_variant = bool(sched.get("multi_variant"))
+                sh, sm = int(scheduled_departure[:2]), int(scheduled_departure[3:5])
+                sched_min = sh * 60 + sm
+                actual_min = ts.hour * 60 + ts.minute
+                delta = actual_min - sched_min
+                if delta > 720:
+                    delta -= 1440
+                elif delta < -720:
+                    delta += 1440
+                departure_delay_min = delta
+
         rows.append({
+            "driver_code": driver_code,
+            "scheduled_departure": scheduled_departure,
+            "departure_delay_min": departure_delay_min,
+            "schedule_multi_variant": schedule_multi_variant,
             "model_if_dedicated": bool(if_dedicated),
             "model_lstm_dedicated": bool(lstm_dedicated),
+            "model_line_dedicated": bool(if_line_dedicated and lstm_line_dedicated),
             "model_low_data": not (if_dedicated and lstm_dedicated),
+            "societe": soc,
             "day": r["day"],
             "trip_id": int(r["trip_id"]),
             "bus": int(r["bus"]),
@@ -1872,13 +1907,31 @@ def _detect_start_detour(g, trip_start, longest_stop, cfg, detour_thresh_m: floa
 @app.get("/api/anomaly-explain")
 async def anomaly_explain(
     societe: str,
-    line: str,
+    line: Optional[str] = None,
     bus: Optional[int] = None,
     day: Optional[str] = None,
     include_data_bugs: bool = False,
-    dir: Optional[str] = None
+    dir: Optional[str] = None,
+    check_detours: bool = False,
 ):
-    """Per-trip explanations + WHERE (which stops) the anomaly happened."""
+    """Per-trip explanations + WHERE (which stops) the anomaly happened.
+
+    `line=None` means "all lines for this operator" (decision 2026-07-15) -- `df`/`trips`
+    then span every line, so every per-row lookup below (`_trip_sequence`, the detour
+    track fetch) MUST key off that ROW's own `line`, never the outer `line` parameter,
+    which may be None. Keying the detour track cache by (line, bus, day) rather than just
+    (bus, day) for the same reason: a bus number isn't guaranteed unique across lines.
+
+    `check_detours` always runs now (decision 2026-07-15: loaded automatically, filterable
+    via the "Détour non-officiel" category in the client's existing type filter, not a
+    separate opt-in toggle). It needs a LIVE raw-GPS-ping read per distinct (line, bus,
+    day) in the list -- not just the already-loaded foundation slice -- to reconstruct the
+    actual path driven (see `_detect_start_detour`/`_build_gps_track`). Fetched once per
+    (line, bus, day), not once per trip, since several trips can share one bus-day, and
+    parallelized (bounded thread pool) since each fetch is independent. Best-effort: a
+    failure fetching one bus-day's track just leaves `has_detour` unset for its trips
+    rather than failing the whole request.
+    """
     df = model_manager.foundation_slice(societe, line=line)
     try:
         models, trips = _filter_trips(societe, line, bus, day, include_data_bugs=include_data_bugs, dir=dir)
@@ -1886,32 +1939,77 @@ async def anomaly_explain(
         anomalous = [r for r in rows if r["severity"] != "low"]
 
         # Attach stop-level detail to each anomalous trip
-        # Use the bus from each row (needed when bus=None means "all buses")
+        # Use each row's OWN line/bus (needed when line/bus=None means "all lines"/"all buses")
         if df is not None:
             for a in anomalous:
-                seq = _trip_sequence(df, societe, line, int(a["bus"]), a["day"], a["trip_start"])
+                seq = _trip_sequence(df, societe, a["line"], int(a["bus"]), a["day"], a["trip_start"])
                 a["problem_stops"] = _problem_stops(seq)
+
+        if anomalous:
+            # Un (ligne, bus, jour) distinct = un aller-retour Mongo (~1s) + un filtre Kalman
+            # complet. Séquentiel, une ligne avec des dizaines de trajets signalés (ou "toutes
+            # les lignes") pouvait dépasser 15-20s -- les fetches sont indépendants (chacun sa
+            # propre requête + son propre DataFrame local, pas d'état mutable partagé hors
+            # _load_usable_lines() qui n'est que lu), donc parallélisables sans risque via un
+            # pool de threads borné.
+            needed_keys = {
+                (a["line"], a["bus"], a["day"])
+                for a in anomalous
+                if (a["problem_stops"].get("longest_stop") or {}).get("arrival")
+            }
+
+            def _fetch(key):
+                line_, bus_, day_ = key
+                try:
+                    return key, _build_gps_track(societe, line_, bus_, day_)
+                except Exception:
+                    return key, None
+
+            track_cache: dict = {}
+            if needed_keys:
+                with ThreadPoolExecutor(max_workers=16) as pool:
+                    for key, built in pool.map(_fetch, needed_keys):
+                        track_cache[key] = built
+
+            for a in anomalous:
+                longest_stop = a["problem_stops"].get("longest_stop")
+                if not longest_stop or not longest_stop.get("arrival"):
+                    continue
+                built = track_cache.get((a["line"], a["bus"], a["day"]))
+                if built is None:
+                    continue
+                g, _stops, _route_len = built
+                try:
+                    detour = _detect_start_detour(g, a["trip_start"], longest_stop, fdn.Config())
+                except Exception:
+                    detour = None
+                a["has_detour"] = bool(detour)
+                if detour:
+                    a["detour"] = detour
 
         worst_trip, sequence = None, []
         if anomalous and df is not None:
             worst = max(anomalous, key=lambda r: r["anomaly_strength"])
             worst_trip = worst
-            sequence = _trip_sequence(df, societe, line, int(worst["bus"]),
+            sequence = _trip_sequence(df, societe, worst["line"], int(worst["bus"]),
                                       worst["day"], worst["trip_start"])
 
-        # Median trip duration for normal trips on this line (baseline for comparison)
+        # Median trip duration for normal trips on this line (baseline for comparison) --
+        # only meaningful PER LINE (different routes have different normal durations), so
+        # left None for "all lines" rather than averaging across unrelated routes.
         avg_duration_min = None
-        try:
-            all_scored = models["trips"]
-            line_normal = all_scored[
-                (all_scored["societe"] == societe) &
-                (all_scored["line"] == line) &
-                (~all_scored["anomaly"])
-            ]
-            if len(line_normal) >= 3:
-                avg_duration_min = round(float(line_normal["total_elapsed"].median()), 1)
-        except Exception:
-            pass
+        if line:
+            try:
+                all_scored = models["trips"]
+                line_normal = all_scored[
+                    (all_scored["societe"] == societe) &
+                    (all_scored["line"] == line) &
+                    (~all_scored["anomaly"])
+                ]
+                if len(line_normal) >= 3:
+                    avg_duration_min = round(float(line_normal["total_elapsed"].median()), 1)
+            except Exception:
+                pass
 
         return {
             "societe": societe, "line": line, "bus": bus, "day": day,
@@ -1971,6 +2069,226 @@ async def trip_detail(
     return {
         "sequence": seq,
         "problem_stops": problem_stops,
+    }
+
+
+_driver_trip_cache: Optional[pd.DataFrame] = None
+
+
+def _driver_scored_trips() -> pd.DataFrame:
+    """Precomputed anomaly-scored trips (trips_scored.parquet) merged with `driver_code`
+    from the reference DB (see reference_db.attach_driver_codes_to_trips). Cached once --
+    neither side changes during the app's lifetime (a restart is needed after re-running
+    the driver backfill, same as any other model/reference reload).
+
+    Historical only, and only as complete as the ticket backfill window: `driver_code`
+    comes from Historique_Tickets 2025+ (see reference_db.populate_driver_services) --
+    trips before 2025, or without matching ticket data, simply don't appear here rather
+    than being guessed. Live (today's webservice-scored) trips are never driver-attributed
+    either, since ticket data lags behind GPS by the same night-processing delay covered
+    elsewhere in this file -- a driver view is inherently a look-back tool, not a live one.
+
+    Confirmed data bugs / fragments / partial-coverage trips are EXCLUDED here, same as
+    `_filter_trips`'s default (`include_data_bugs=False`) -- these are impossible/outlier
+    readings (e.g. corrupted timestamps, <3 stops), never real driver behavior, and were
+    never meant to reach a driver's stats (bug found 2026-07-15: they were leaking into
+    driver-stats/drivers-ranked before this filter was added here).
+    """
+    global _driver_trip_cache
+    if _driver_trip_cache is not None:
+        return _driver_trip_cache
+    models = model_manager.get("anomaly")
+    scored = models["trips"].copy()
+    scored["bus"] = scored["bus"].astype(str)
+    scored["trip_start"] = pd.to_datetime(scored["trip_start"])
+    scored = _trip_quality_flags(scored, models)
+    scored = scored[~(scored["is_data_bug"] | scored["is_fragment"] | scored["is_partial_coverage"])]
+
+    conn = rdb.init_db()
+    try:
+        rows = conn.execute(
+            """SELECT c.canonical_name AS societe, l.line_code AS line, t.bus, t.day,
+                      t.trip_start, t.driver_code
+               FROM trips t JOIN companies c ON c.company_id = t.company_id
+                            JOIN lines l ON l.line_id = t.line_id
+               WHERE t.driver_code IS NOT NULL""").fetchall()
+    finally:
+        conn.close()
+    drivers = pd.DataFrame(rows, columns=["societe", "line", "bus", "day", "trip_start", "driver_code"])
+    drivers["trip_start"] = pd.to_datetime(drivers["trip_start"], format="mixed")
+
+    merged = scored.merge(drivers, on=["societe", "line", "bus", "day", "trip_start"], how="inner")
+    _driver_trip_cache = merged
+    return merged
+
+
+_schedule_cache: Optional[dict] = None
+
+
+def _scheduled_departures() -> dict:
+    """(societe, line) -> {"ALLER": "HH:MM"|None, "RETOUR": "HH:MM"|None, "multi_variant": bool},
+    from `winicari.ligne.horaires` (published timetable). Cached once (static reference
+    data, doesn't change during the app's lifetime).
+
+    Coverage: 31/68 of our tracked lines (45.6%, confirmed 2026-07-15) publish a schedule at
+    all -- the rest just have no entry here, nothing guessed for them.
+
+    Some lines carry MULTIPLE schedule variants in `horaires` (e.g. line 212 has 3 separate
+    groups; line 213 has 2 variants in one group) with no field documenting which applies
+    when (weekday/weekend? seasonal? genuinely unclear from the data, not worth guessing
+    without asking the platform team). Per user decision 2026-07-15: only the FIRST variant
+    encountered is used as a single best-effort reference time, and `multi_variant=True`
+    flags this so the UI can caveat it as approximate rather than presenting it as certain.
+
+    `Aller`/`Retour` arrays are index-aligned to `stationnames` (same physical route order,
+    confirmed by inspecting real documents, not guessed): `Aller[0]` = scheduled departure
+    from the line's origin. The RETOUR run's own origin is the LAST station in that same
+    list (the line's destination), so its departure time is `Retour[-1]`, NOT `Retour[0]`
+    (`Retour[0]` is the return trip's scheduled ARRIVAL back at the outbound origin).
+    """
+    global _schedule_cache
+    if _schedule_cache is not None:
+        return _schedule_cache
+    cache: dict = {}
+    alias_to_canon = {alias: canon for canon, aliases in rdb.CANONICAL_COMPANIES.items() for alias in aliases}
+    try:
+        wi_db = get_db("winicari")
+        for doc in wi_db["ligne"].find({"horaires": {"$exists": True, "$ne": []}},
+                                        {"code": 1, "societe": 1, "horaires": 1}):
+            canon = alias_to_canon.get(doc.get("societe"))
+            if not canon:
+                continue
+            line_code = str(doc.get("code", "")).strip()
+            if not line_code:
+                continue
+            # Aplatit la structure imbriquée (groupes -> sous-listes -> dicts) pour retenir
+            # TOUS les dicts de variante quelle que soit leur position exacte -- la forme
+            # varie d'une ligne à l'autre (1 groupe/1 variante, plusieurs groupes, ou
+            # plusieurs variantes dans un même groupe, constaté en échantillonnant 15 lignes).
+            variants = []
+            for grp in (doc.get("horaires") or []):
+                if not isinstance(grp, list):
+                    continue
+                for sub in grp:
+                    if isinstance(sub, list):
+                        variants.extend(v for v in sub if isinstance(v, dict))
+            if not variants:
+                continue
+            first = variants[0]
+            aller_list = first.get("Aller") or []
+            retour_list = first.get("Retour") or []
+            aller_time = next((v for v in aller_list if v), None)
+            retour_time = next((v for v in reversed(retour_list) if v), None)
+            if not aller_time and not retour_time:
+                continue
+            cache[(canon, line_code)] = {
+                "ALLER": aller_time, "RETOUR": retour_time,
+                "multi_variant": len(variants) > 1,
+            }
+    except Exception as e:
+        print(f"  _scheduled_departures unavailable: {e}")
+    _schedule_cache = cache
+    return cache
+
+
+_driver_lookup_cache: Optional[dict] = None
+
+
+def _driver_code_lookup() -> dict:
+    """(societe, line, bus, day, trip_start) -> driver_code, for attaching a driver chip to
+    any anomaly row without a per-row DB query. Built once from `_driver_scored_trips`."""
+    global _driver_lookup_cache
+    if _driver_lookup_cache is None:
+        df = _driver_scored_trips()
+        _driver_lookup_cache = {
+            (row.societe, row.line, row.bus, row.day, row.trip_start): row.driver_code
+            for row in df.itertuples()
+        }
+    return _driver_lookup_cache
+
+
+@app.get("/api/drivers-ranked")
+async def drivers_ranked(societe: Optional[str] = None, min_trips: int = 5, limit: int = 50):
+    """Drivers ranked by anomaly rate -- lets the dashboard offer a « which driver should I
+    look at? » list instead of requiring the admin to already know a driver code.
+    `min_trips` filters out drivers with too little history to make their rate meaningful
+    (same spirit as the model-tiering thresholds elsewhere in this file).
+    """
+    df = _driver_scored_trips()
+    if societe:
+        df = df[df["societe"] == societe]
+    if len(df) == 0:
+        return {"drivers": []}
+    g = (df.groupby(["driver_code", "societe"])
+           .agg(n_trips=("anomaly", "size"), n_anomalies=("anomaly", "sum"))
+           .reset_index())
+    g = g[g["n_trips"] >= min_trips]
+    if len(g) == 0:
+        return {"drivers": []}
+    g["anomaly_rate"] = (100 * g["n_anomalies"] / g["n_trips"]).round(1)
+    g = g.sort_values("anomaly_rate", ascending=False).head(limit)
+    return {"drivers": g.to_dict("records")}
+
+
+@app.get("/api/driver-stats")
+async def driver_stats(driver_code: str, societe: Optional[str] = None):
+    """Trip/anomaly stats for one driver across every line they've driven, plus their
+    flagged trips. See `_driver_scored_trips` for coverage caveats (2025+ only).
+
+    `societe` disambiguates -- driver codes (`CodeCh`) are assigned independently by each
+    company, NOT globally unique: confirmed 2026-07-15, code "5531" exists at S.T.S,
+    S.R.T.K, AND TCV simultaneously with hundreds of trips each, far too many to be one
+    person driving for three unrelated companies. Without `societe`, results would
+    silently merge different people's stats into one. Kept optional (not required) only
+    for backward-compatible lookups where the caller already knows the code is
+    company-scoped in practice; the dashboard always passes it.
+    """
+    df = _driver_scored_trips()
+    mask = df["driver_code"] == driver_code
+    if societe:
+        mask &= df["societe"] == societe
+    sub = df[mask]
+    if len(sub) == 0:
+        raise HTTPException(status_code=404, detail="No scored trips found for this driver code "
+                                                     "(unknown code, wrong operator, or outside the 2025+ ticket backfill window)")
+    if not societe and sub["societe"].nunique() > 1:
+        raise HTTPException(status_code=409, detail=(
+            f"Driver code '{driver_code}' exists at multiple operators "
+            f"({', '.join(sorted(sub['societe'].unique()))}) -- pass `societe` to disambiguate, "
+            "these are independently-assigned codes, not one person."))
+
+    by_line = (sub.groupby(["societe", "line"])
+                  .agg(n_trips=("anomaly", "size"), n_anomalies=("anomaly", "sum"))
+                  .reset_index())
+    by_line["anomaly_rate"] = (100 * by_line["n_anomalies"] / by_line["n_trips"]).round(1)
+    by_line = by_line.sort_values("n_anomalies", ascending=False)
+
+    models = model_manager.get("anomaly")
+    anomalies = sub[sub["anomaly"]]
+    # Non tronqué (pas de `limit`) pour que la distribution des causes porte sur TOUTES les
+    # anomalies de ce chauffeur, pas seulement les 50 renvoyées pour l'affichage détaillé --
+    # sinon "cause principale" refléterait un artefact de troncature, pas la vraie tendance.
+    all_rows = _rows_with_reasons(models, anomalies, anomalies_only=True) if len(anomalies) else []
+    cause_counts = Counter(r.get("top_feature") for r in all_rows)
+    cause_distribution = [
+        {"top_feature": f, "count": c, "pct": round(100 * c / len(all_rows), 1)}
+        for f, c in cause_counts.most_common()
+    ]
+    dominant_cause = cause_distribution[0] if cause_distribution else None
+    rows = all_rows[:50]
+
+    n = len(sub)
+    n_anom = int(sub["anomaly"].sum())
+    return {
+        "driver_code": driver_code,
+        "societe": societe or (sub["societe"].iloc[0] if len(sub) else None),
+        "total_trips": n,
+        "total_anomalies": n_anom,
+        "anomaly_rate": round(100 * n_anom / n, 1),
+        "by_line": by_line.to_dict("records"),
+        "dominant_cause": dominant_cause,
+        "cause_distribution": cause_distribution,
+        "anomalies": rows,
     }
 
 
@@ -2505,11 +2823,22 @@ async def active_buses(
     query_time: Optional[str] = None,
     day: Optional[str] = None
 ):
-    """Buses running on a line at query_time (active / upcoming / completed)."""
-    day = day or latest_day_for(societe, line)
+    """Buses running on a line at query_time (active / upcoming / completed).
+
+    Prefers the live GPS webservice day (see _live_gps_day) over the static precomputed
+    dataset, same as /api/current-anomalies -- without this, "ETA en direct" was silently
+    stuck on whatever day the last training snapshot happened to cover (confirmed
+    2026-07-15: the reference DB's latest day doesn't move even though live webservices
+    have been feeding real data for a while). `foundation_slice` already merges in the
+    live per-stop data automatically when `day` equals that live day (see its docstring),
+    so passing it through here is enough -- no separate live-scoring call needed.
+    """
+    live_day = _live_gps_day(societe)
+    is_live = day is None and live_day is not None
+    day = day or live_day or latest_day_for(societe, line)
     qt = pd.Timestamp(query_time) if query_time else None
     # Re-anchor the wall-clock time-of-day onto the operating day so "active/upcoming"
-    # is judged on the same date as the trips (the live demo clock runs on `day`).
+    # is judged on the same date as the trips.
     if qt is not None:
         day_ts = pd.Timestamp(datetime.strptime(day, "%Y%m%d").date())
         qt = day_ts + (qt - qt.normalize())
@@ -2518,7 +2847,8 @@ async def active_buses(
     if sub is None:
         raise HTTPException(status_code=503, detail="Foundation data not loaded")
     if len(sub) == 0:
-        return {"day": day, "query_time": qt.isoformat() if qt is not None else None, "buses": []}
+        return {"day": day, "live": is_live,
+                "query_time": qt.isoformat() if qt is not None else None, "buses": []}
 
     trips = sub.groupby(["bus", "trip_id"]).agg(
         trip_start=("trip_start", "first"),
@@ -2547,7 +2877,7 @@ async def active_buses(
 
     order = {"active": 0, "upcoming": 1, "unknown": 2, "completed": 3}
     buses.sort(key=lambda b: (order[b["status"]], b["trip_start"]))
-    return {"day": day, "query_time": qt.isoformat() if qt is not None else None,
+    return {"day": day, "live": is_live, "query_time": qt.isoformat() if qt is not None else None,
             "buses": buses}
 
 

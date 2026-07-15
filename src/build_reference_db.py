@@ -83,6 +83,15 @@ def main():
     tkt_stats = rdb.populate_tickets_station_trip_daily(conn, tk_db)
     print(f"  -> {tkt_stats['rows_inserted']} jours-lignes-bus-arrêts-direction")
 
+    print("\n[6ter/8] Sessions chauffeur (Historique_Tickets, 2025+)")
+    print("-" * 50)
+    ds_stats = rdb.populate_driver_services(conn, tk_db)
+    print(f"  -> {ds_stats['rows_inserted']} sessions chauffeur ({ds_stats['years']})")
+    n_trips_existing = conn.execute("SELECT COUNT(*) FROM trips").fetchone()[0]
+    if n_trips_existing:
+        attach_stats = rdb.attach_driver_codes_to_trips(conn)
+        print(f"  -> chauffeur rattaché à {attach_stats['n_attached']}/{attach_stats['n_total']} trajets")
+
     if args.with_trips:
         print("\n[7/8] Trajets GPS (reconstruction complète -- peut prendre ~40 min)")
         print("-" * 50)
@@ -90,6 +99,8 @@ def main():
                                     companies=args.companies)
         print(f"  -> {stats['n_trips']} trajets, {stats.get('n_loop_unknown_full', 0)} en boucle "
               f"(full=NULL), {stats['n_stop_rows']} arrêts-trajets")
+        attach_stats = rdb.attach_driver_codes_to_trips(conn)
+        print(f"  -> chauffeur rattaché à {attach_stats['n_attached']}/{attach_stats['n_total']} trajets")
     else:
         print("\n[7/8] Trajets GPS -- SKIP (passer --with-trips pour reconstruire, ~40 min)")
         print("-" * 50)

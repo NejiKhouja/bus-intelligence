@@ -1,13 +1,18 @@
 """Module de détection d'anomalies — entraîner, sauvegarder, charger, scorer.
 
 Cycle de vie complet pour le Module 3 :
-  train()  -> Isolation Forest par opérateur + Autoencodeur LSTM global -> sauvegardé dans models/anomaly/
+  train()  -> Isolation Forest + Autoencodeur LSTM, 3 paliers -> sauvegardé dans models/anomaly/
   load()   -> charge les artefacts depuis le disque
   score()  -> signale les trajets anormaux dans de nouvelles données avec les deux modèles
 
-Chaque opérateur obtient son propre Isolation Forest afin que la durée normale pour
-TCV (trajets urbains courts) ne soit pas utilisée comme référence pour S.R.T.K
-(lignes interurbaines longues), et vice versa.
+Trois paliers de spécificité, du plus fin au plus large : (société, ligne) dédié ->
+société dédié -> global. Un modèle dédié à une LIGNE est utilisé dès que cette ligne a
+assez de trajets ; sinon repli sur le modèle de l'opérateur entier ; sinon repli sur le
+modèle global. Sans ça, la durée normale d'une grosse ligne urbaine (ex. S.T.S/219,
+9 687 trajets) sert de référence à une petite ligne du même opérateur (ex. S.T.S/304,
+588 trajets) et signale son trafic normal comme anormal (constaté : 99.8% des trajets
+de la ligne 304 signalés, alors qu'elle a largement assez de données pour son propre
+modèle -- 588 trajets >> le seuil de 30 pour l'IF et de 200 pour le LSTM).
 """
 from __future__ import annotations
 
@@ -58,59 +63,103 @@ def train(foundation_path: str | Path,
         fa["departure"] = pd.to_datetime(fa["departure"])
     fa["dwell_s"] = fa.get("dwell_s", pd.Series(0.0, index=fa.index)).fillna(0)
 
-    # Isolation Forest par opérateur
-    print("  Entraînement des Isolation Forests (un par opérateur)...")
+    # Isolation Forest -- 3 paliers : (société, ligne) dédié -> société dédié -> global
+    print("  Entraînement des Isolation Forests (par ligne, puis par opérateur, puis global)...")
     trips = _an.trip_features(fa, cfg)
     print(f"    trajets total : {len(trips):,}")
 
-    company_index: dict[str, str] = {}   # safe_name -> original_name
-    all_scored: list[pd.DataFrame] = []
+    min_trips_per_line = 30
     min_trips_per_company = 30
 
-    for soc in sorted(trips["societe"].unique()):
-        soc_trips = trips[trips["societe"] == soc].copy()
-        if len(soc_trips) < min_trips_per_company:
-            print(f"    {soc}: {len(soc_trips)} trajets — trop peu, repli sur modèle global")
+    line_index: dict[str, list] = {}      # safe_name -> [societe, line]
+    company_index: dict[str, str] = {}    # safe_name -> societe
+    if_line_models: dict[tuple, tuple] = {}
+    if_company_models: dict[str, tuple] = {}
+
+    for (soc, line), grp in trips.groupby(["societe", "line"]):
+        if len(grp) < min_trips_per_line:
             continue
-        m, mean, std = _an.train_isolation_forest(soc_trips, cfg)
-        scored = _an.score_trips(m, mean, std, soc_trips)
+        m, mean, std = _an.train_isolation_forest(grp, cfg)
+        scored = _an.score_trips(m, mean, std, grp)
         n = int(scored["anomaly"].sum())
-        print(f"    {soc}: {n}/{len(soc_trips)} signalés ({100*n/len(soc_trips):.1f}%)")
+        print(f"    {soc}/{line}: {n}/{len(grp)} signalés ({100*n/len(grp):.1f}%) -- dédié à la ligne")
+        safe = _safe(f"{soc}__{line}")
+        joblib.dump(m, save_dir / f"line_{safe}_isolation_forest.joblib")
+        np.savez(save_dir / f"line_{safe}_if_scaler.npz", mean=mean, std=std)
+        line_index[safe] = [soc, line]
+        if_line_models[(soc, line)] = (m, mean, std)
+
+    for soc, grp in trips.groupby("societe"):
+        if len(grp) < min_trips_per_company:
+            print(f"    {soc}: {len(grp)} trajets — trop peu, repli sur modèle global")
+            continue
+        m, mean, std = _an.train_isolation_forest(grp, cfg)
+        scored = _an.score_trips(m, mean, std, grp)
+        n = int(scored["anomaly"].sum())
+        print(f"    {soc}: {n}/{len(grp)} signalés ({100*n/len(grp):.1f}%)")
         safe = _safe(soc)
         joblib.dump(m, save_dir / f"{safe}_isolation_forest.joblib")
         np.savez(save_dir / f"{safe}_if_scaler.npz", mean=mean, std=std)
         company_index[safe] = soc
-        all_scored.append(scored)
+        if_company_models[soc] = (m, mean, std)
 
-    # Modèle global (repli pour opérateurs avec peu de données)
+    # Modèle global (repli ultime)
     m_global, mean_global, std_global = _an.train_isolation_forest(trips, cfg)
     joblib.dump(m_global, save_dir / "isolation_forest.joblib")
     np.savez(save_dir / "if_scaler.npz", mean=mean_global, std=std_global)
 
-    trained_socs = set(company_index.values())
-    remaining = trips[~trips["societe"].isin(trained_socs)]
-    if len(remaining) > 0:
-        all_scored.append(_an.score_trips(m_global, mean_global, std_global, remaining))
-
+    with open(save_dir / "line_models.json", "w") as f:
+        json.dump(line_index, f, ensure_ascii=False)
     with open(save_dir / "company_models.json", "w") as f:
         json.dump(company_index, f, ensure_ascii=False)
 
+    # Score chaque trajet avec le modèle le plus spécifique disponible (ligne > opérateur > global)
+    all_scored: list[pd.DataFrame] = []
+    for (soc, line), grp in trips.groupby(["societe", "line"]):
+        if (soc, line) in if_line_models:
+            m, mean, std = if_line_models[(soc, line)]
+        elif soc in if_company_models:
+            m, mean, std = if_company_models[soc]
+        else:
+            m, mean, std = m_global, mean_global, std_global
+        all_scored.append(_an.score_trips(m, mean, std, grp))
+
     trips_scored = pd.concat(all_scored, ignore_index=True)
     n_if = int(trips_scored["anomaly"].sum())
-    print(f"    total signalés : {n_if}/{len(trips_scored)} ({100*n_if/len(trips_scored):.1f}%)")
+    print(f"    total signalés : {n_if}/{len(trips_scored)} ({100*n_if/len(trips_scored):.1f}%)"
+          f" -- {len(if_line_models)} ligne(s) dédiée(s), {len(if_company_models)} opérateur(s) dédié(s)")
 
-    #  Autoencodeur LSTM (par société + repli global)
-    # Même raison que l'IF par société : un modèle global unique est dominé par la société
-    # la plus volumineuse (TCV = 75% des trajets après l'expansion de la fondation) 
-    # il apprend "normal" = "ce que fait TCV" et ne peut plus rien signaler pour TCV
-    # (dual_anomaly=0 constaté), tout en étant trop peu sensible aux petites sociétés.
-    # `min_trips_lstm_company` est plus élevé que celui de l'IF (30) car un autoencodeur a
-    # bien plus de paramètres à apprendre en dessous, repli sur le modèle global.
-    print("  Entraînement des Autoencodeurs LSTM (par société, repli global si trop peu de données)...")
+    #  Autoencodeur LSTM -- 3 paliers : (société, ligne) dédié -> société dédié -> global
+    # Même raison que l'IF : un modèle unique dominé par la plus grosse ligne/société
+    # apprend "normal" = "ce que fait la plus grosse" et signale le trafic normal des
+    # petites lignes/sociétés comme anormal (dual_anomaly=0 constaté pour la dominante,
+    # 99.8% signalé pour une petite ligne avec pourtant assez de données pour son propre
+    # modèle). `min_trips_lstm_*` est plus élevé que celui de l'IF (30) car un autoencodeur
+    # a bien plus de paramètres à apprendre en dessous, repli sur le palier suivant.
+    print("  Entraînement des Autoencodeurs LSTM (par ligne, puis par opérateur, puis global)...")
+    min_trips_lstm_line = 200
     min_trips_lstm_company = 200
 
-    lstm_models: dict[str, tuple] = {}          # soc -> (modèle, seuil)
+    lstm_line_index: dict[str, list] = {}       # safe_name -> [societe, line]
     lstm_company_index: dict[str, str] = {}     # safe_name -> nom original
+    lstm_line_models: dict[tuple, tuple] = {}    # (soc, line) -> (modèle, seuil)
+    lstm_company_models: dict[str, tuple] = {}   # soc -> (modèle, seuil)
+
+    for (soc, line), grp_fa in fa.groupby(["societe", "line"]):
+        X, _ = _an.build_sequences(grp_fa, cfg)
+        if len(X) < min_trips_lstm_line:
+            continue
+        m, train_errors = _an.train_lstm_autoencoder(X, cfg)
+        thr = float(np.percentile(train_errors, 95))
+        n = int((train_errors > thr).sum())
+        print(f"    {soc}/{line}: {n}/{len(X)} signalés (seuil={thr:.5f}) -- dédié à la ligne")
+        safe = _safe(f"{soc}__{line}")
+        torch.save(m.state_dict(), save_dir / f"line_{safe}_lstm_ae.pt")
+        np.save(save_dir / f"line_{safe}_lstm_threshold.npy", np.array(thr))
+        with open(save_dir / f"line_{safe}_lstm_ae_config.json", "w") as f:
+            json.dump({"hidden": cfg.lstm_hidden, "seq_pad": cfg.seq_pad, "n_feats": X.shape[2]}, f)
+        lstm_line_index[safe] = [soc, line]
+        lstm_line_models[(soc, line)] = (m, thr)
 
     for soc in sorted(fa["societe"].unique()):
         soc_fa = fa[fa["societe"] == soc]
@@ -128,9 +177,9 @@ def train(foundation_path: str | Path,
         with open(save_dir / f"{safe}_lstm_ae_config.json", "w") as f:
             json.dump({"hidden": cfg.lstm_hidden, "seq_pad": cfg.seq_pad, "n_feats": X_soc.shape[2]}, f)
         lstm_company_index[safe] = soc
-        lstm_models[soc] = (m, thr)
+        lstm_company_models[soc] = (m, thr)
 
-    # Repli global entraîné sur TOUS les trajets, utilisé pour les sociétés sans modèle dédié
+    # Repli global entraîné sur TOUS les trajets, utilisé pour les lignes/sociétés sans modèle dédié
     X_all, _ = _an.build_sequences(fa, cfg)
     print(f"    séquences totales : {X_all.shape}")
     lstm_global, train_errors_global = _an.train_lstm_autoencoder(X_all, cfg)
@@ -141,21 +190,26 @@ def train(foundation_path: str | Path,
     np.save(save_dir / "lstm_ae_threshold.npy", np.array(threshold_global))
     with open(save_dir / "lstm_ae_config.json", "w") as f:
         json.dump({"hidden": cfg.lstm_hidden, "seq_pad": cfg.seq_pad, "n_feats": X_all.shape[2]}, f)
-    lstm_models["_global"] = (lstm_global, threshold_global)
 
+    with open(save_dir / "lstm_line_models.json", "w") as f:
+        json.dump(lstm_line_index, f, ensure_ascii=False)
     with open(save_dir / "lstm_company_models.json", "w") as f:
         json.dump(lstm_company_index, f, ensure_ascii=False)
 
-    # Score chaque trajet avec le modèle LSTM de SA société (ou le repli global)
+    # Score chaque trajet avec le modèle le plus spécifique (ligne > opérateur > global)
     lstm_rows = []
-    for soc in sorted(fa["societe"].unique()):
-        soc_fa = fa[fa["societe"] == soc]
-        X_soc, ids_soc = _an.build_sequences(soc_fa, cfg)
-        if len(X_soc) == 0:
+    for (soc, line), grp_fa in fa.groupby(["societe", "line"]):
+        X, ids = _an.build_sequences(grp_fa, cfg)
+        if len(X) == 0:
             continue
-        model, thr = lstm_models.get(soc, lstm_models["_global"])
-        scores = _an.lstm_anomaly_scores(model, X_soc)
-        df_soc = pd.DataFrame(ids_soc, columns=_an.TRIP_KEYS)
+        if (soc, line) in lstm_line_models:
+            model, thr = lstm_line_models[(soc, line)]
+        elif soc in lstm_company_models:
+            model, thr = lstm_company_models[soc]
+        else:
+            model, thr = lstm_global, threshold_global
+        scores = _an.lstm_anomaly_scores(model, X)
+        df_soc = pd.DataFrame(ids, columns=_an.TRIP_KEYS)
         df_soc["lstm_score"] = scores
         df_soc["lstm_anomaly"] = scores > thr
         lstm_rows.append(df_soc)
@@ -168,13 +222,12 @@ def train(foundation_path: str | Path,
     trips_scored.to_parquet(save_dir / "trips_scored.parquet", index=False)
 
     n_lstm = int(trips_scored["lstm_anomaly"].sum())
-    trained_lstm_socs = set(lstm_company_index.values())
     print(f"    LSTM total signalés : {n_lstm}/{len(trips_scored)} ({100*n_lstm/len(trips_scored):.1f}%) "
-          f"-- {len(trained_lstm_socs)} société(s) avec modèle dédié + repli global")
+          f"-- {len(lstm_line_models)} ligne(s) dédiée(s), {len(lstm_company_models)} opérateur(s) dédié(s) + repli global")
 
     print(f"  -> Artefacts sauvegardés dans {save_dir}")
     return {
-        "if_models": {soc: None for soc in trained_socs},
+        "if_models": {soc: None for soc in company_index.values()},
         "lstm_ae": lstm_global, "trips": trips_scored,
         "n_if": n_if, "n_lstm": n_lstm, "threshold": threshold_global,
     }
@@ -198,8 +251,23 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
 
     save_dir = Path(save_dir)
 
-    # Per-company IF models
-    if_models: dict[str, tuple] = {}
+    # IF -- 3 paliers : clé tuple (soc, line) = dédié ligne, clé str soc = dédié opérateur,
+    # "_global" = repli. Les 3 types de clé coexistent dans le même dict (pas de collision,
+    # tuple != str en tant que clé), donc le lookup `(soc, line) in if_models` puis
+    # `soc in if_models` reste sûr.
+    if_models: dict = {}
+    line_index_path = save_dir / "line_models.json"
+    if line_index_path.exists():
+        with open(line_index_path) as f:
+            line_index = json.load(f)
+        for safe, (soc, line) in line_index.items():
+            m_path = save_dir / f"line_{safe}_isolation_forest.joblib"
+            s_path = save_dir / f"line_{safe}_if_scaler.npz"
+            if m_path.exists() and s_path.exists():
+                m = joblib.load(m_path)
+                sc = np.load(s_path)
+                if_models[(soc, line)] = (m, sc["mean"], sc["std"])
+
     index_path = save_dir / "company_models.json"
     if index_path.exists():
         with open(index_path) as f:
@@ -217,10 +285,29 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
     global_sc = np.load(save_dir / "if_scaler.npz")
     if_models["_global"] = (global_m, global_sc["mean"], global_sc["std"])
 
-    # LSTM AE par société (+ repli global) -- même schéma que l'IF ; sauté sans torch
-    lstm_models: dict[str, tuple] = {}
+    # LSTM AE -- même schéma 3 paliers que l'IF ; sauté sans torch
+    lstm_models: dict = {}
     lstm_ae, threshold = None, None
+    n_line_if = sum(1 for k in if_models if isinstance(k, tuple))
+    n_line_lstm = 0
     if torch is not None:
+        lstm_line_index_path = save_dir / "lstm_line_models.json"
+        if lstm_line_index_path.exists():
+            with open(lstm_line_index_path) as f:
+                lstm_line_index = json.load(f)
+            for safe, (soc, line) in lstm_line_index.items():
+                cfg_path = save_dir / f"line_{safe}_lstm_ae_config.json"
+                model_path = save_dir / f"line_{safe}_lstm_ae.pt"
+                thr_path = save_dir / f"line_{safe}_lstm_threshold.npy"
+                if cfg_path.exists() and model_path.exists() and thr_path.exists():
+                    with open(cfg_path) as f:
+                        ae_cfg_line = json.load(f)
+                    m = _an._make_lstm_autoencoder(ae_cfg_line["seq_pad"], ae_cfg_line["n_feats"], ae_cfg_line["hidden"])
+                    m.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+                    m.eval()
+                    lstm_models[(soc, line)] = (m, float(np.load(thr_path)))
+            n_line_lstm = len(lstm_line_index)
+
         lstm_index_path = save_dir / "lstm_company_models.json"
         if lstm_index_path.exists():
             with open(lstm_index_path) as f:
@@ -251,10 +338,11 @@ def load(save_dir: str | Path = SAVE_DIR) -> dict:
 
     trips = pd.read_parquet(save_dir / "trips_scored.parquet")
 
-    n_co = len(if_models) - 1
-    n_co_lstm = max(len(lstm_models) - 1, 0)
-    lstm_note = f"{n_co_lstm} opérateur(s) LSTM" if torch is not None else "LSTM désactivé (pas de torch)"
-    print(f"Modèles d'anomalie chargés ({n_co} opérateur(s) IF + {lstm_note} + repli global)")
+    n_co = sum(1 for k in if_models if isinstance(k, str) and k != "_global")
+    n_co_lstm = sum(1 for k in lstm_models if isinstance(k, str) and k != "_global")
+    lstm_note = (f"{n_co_lstm} opérateur(s) + {n_line_lstm} ligne(s) LSTM" if torch is not None
+                else "LSTM désactivé (pas de torch)")
+    print(f"Modèles d'anomalie chargés ({n_co} opérateur(s) + {n_line_if} ligne(s) IF + {lstm_note} + repli global)")
     return {
         "if_models": if_models,
         # backward-compat keys used by explain_trips fallback
@@ -274,10 +362,12 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
     trips = _an.trip_features(fa, cfg)
     if_models = models.get("if_models", {})
 
-    # Score per company using dedicated models
+    # Score avec le modèle le plus spécifique disponible (ligne > opérateur > global)
     parts = []
-    for soc, grp in trips.groupby("societe"):
-        if soc in if_models:
+    for (soc, line), grp in trips.groupby(["societe", "line"]):
+        if (soc, line) in if_models:
+            m, mean, std = if_models[(soc, line)]
+        elif soc in if_models:
             m, mean, std = if_models[soc]
         else:
             m, mean, std = if_models.get("_global",
@@ -286,17 +376,22 @@ def score(models: dict, fa: pd.DataFrame) -> pd.DataFrame:
 
     trips = pd.concat(parts, ignore_index=True) if parts else trips
 
-    # Score LSTM par société (modèle dédié si disponible, sinon repli global).
+    # Score LSTM avec le modèle le plus spécifique (ligne > opérateur > global).
     # Vide en déploiement slim sans torch -> scoring IF uniquement.
     lstm_models = models.get("lstm_models") or (
         {"_global": (models["lstm_ae"], models["threshold"])}
         if models.get("lstm_ae") is not None else {})
     lstm_rows = []
-    for soc, soc_fa in (fa.groupby("societe") if lstm_models else ()):
+    for (soc, line), soc_fa in (fa.groupby(["societe", "line"]) if lstm_models else ()):
         X, ids = _an.build_sequences(soc_fa, cfg)
         if len(X) == 0:
             continue
-        model, thr = lstm_models.get(soc, lstm_models["_global"])
+        if (soc, line) in lstm_models:
+            model, thr = lstm_models[(soc, line)]
+        elif soc in lstm_models:
+            model, thr = lstm_models[soc]
+        else:
+            model, thr = lstm_models["_global"]
         scores = _an.lstm_anomaly_scores(model, X)
         df_soc = pd.DataFrame(ids, columns=_an.TRIP_KEYS)
         df_soc["lstm_score"] = scores
@@ -345,9 +440,14 @@ def explain_trips(models: dict, scored: pd.DataFrame, *,
     reasons_col, reason_features_col, top_col = [], [], []
 
     for _, row in out.iterrows():
-        # Use company-specific stats so z-scores compare against that operator's baseline
+        # Use the most specific stats available so z-scores compare against the right
+        # baseline: this line's own history if it has a dedicated model, else the
+        # operator's, else the global network.
         soc = row.get("societe", "")
-        if soc in if_models:
+        line = row.get("line", "")
+        if (soc, line) in if_models:
+            _, mean, std = if_models[(soc, line)]
+        elif soc in if_models:
             _, mean, std = if_models[soc]
         elif "_global" in if_models:
             _, mean, std = if_models["_global"]

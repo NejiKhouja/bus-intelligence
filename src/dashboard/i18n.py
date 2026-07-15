@@ -29,6 +29,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "tab_explain": "Expliquer un bus",
         "tab_patterns": "Tendances",
         "tab_tickets": "Anomalies billetterie",
+        "tab_drivers": "Chauffeurs",
         "lang_label": "Langue",
 
         # Filtres communs
@@ -50,6 +51,29 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "sort_duration_desc": "⏱️ Durée (plus longue d'abord)",
         "btn_analyze": "Analyser",
         "show_data_bugs": "Afficher aussi les bugs de données / fragments de suivi",
+        "analyzing_with_detours": "Analyse en cours (vérification des détours non-officiels incluse -- peut prendre jusqu'à 30-40s sur une ligne très signalée)...",
+        "chip_detour_confirmed": "{icon} Détour non-officiel confirmé — le bus s'est éloigné d'environ {dist} km pendant ~{min} min avant de revenir.",
+        "chip_detour_confirmed_help": "Détecté sur les positions GPS brutes : le bus a quitté son point de départ, s'est éloigné significativement, puis est revenu quasiment au même endroit avant sa longue immobilisation — probablement une course annexe (dépôt, ravitaillement...) plutôt qu'un simple bruit GPS.",
+        "chip_departure_late": "{icon} Départ prévu à **{sched}**, départ réel à **{dep}** — {min:.0f} min de retard.",
+        "chip_departure_early": "{icon} Départ prévu à **{sched}**, départ réel à **{dep}** — {min:.0f} min d'avance.",
+        "chip_departure_help": "Comparaison à l'horaire publié pour cette ligne/direction (winicari.ligne.horaires). Purement informatif, pas une anomalie du modèle.",
+        "chip_departure_multi_variant": "Comparaison à l'horaire publié -- ATTENTION, cette ligne publie plusieurs horaires différents (ex. jours différents) et on ne sait pas lequel s'applique ce jour précis ; seul le premier est utilisé comme référence, à prendre avec prudence.",
+        "chip_driver": "{icon} Chauffeur : **{code}**",
+        "chip_driver_disclaimer": "Information fournie à titre indicatif -- une corrélation entre un chauffeur et des trajets signalés n'est pas un verdict automatique. D'autres facteurs (trafic, état de la route, panne du véhicule, conditions météo...) peuvent expliquer une anomalie sans faute du chauffeur. À vous d'interpréter ces données selon le contexte.",
+        "metric_driver_trips": "Trajets",
+        "metric_driver_anomalies": "Anomalies",
+        "metric_driver_rate": "Taux d'anomalie",
+        "driver_stats_unavailable": "Aucune donnée trouvée pour ce code chauffeur (hors de la fenêtre 2025+ ou code inconnu).",
+        "drivers_tab_caption": "Statistiques d'anomalies par chauffeur — identifié via les tickets individuels (2025 et après uniquement ; les trajets plus anciens n'ont pas de chauffeur associé).",
+        "drivers_min_trips": "Trajets minimum (pour un taux significatif)",
+        "drivers_leaderboard": "Chauffeurs classés par taux d'anomalie",
+        "no_drivers_found": "Aucun chauffeur avec assez de trajets pour cet opérateur.",
+        "driver_lookup": "Rechercher un chauffeur par code",
+        "driver_code_input": "Code chauffeur",
+        "driver_by_line": "Détail par ligne",
+        "driver_dominant_cause": "Cause la plus fréquente : **{cause}** ({pct:.1f} % de ses anomalies)",
+        "driver_cause_distribution": "Répartition des causes",
+        "driver_flagged_trips": "Trajets signalés de ce chauffeur",
 
         # Avertissement modèle à faible historique (voir render_alert_cards) -- affiché une
         # fois par liste quand l'opérateur affiché n'a pas (encore) assez de trajets pour un
@@ -148,6 +172,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "topfeat_terminus_idle_min": "Stationnement terminus (service non clôturé)",
         "topfeat_elapsed_vs_bus_z": "Durée inhabituelle pour ce bus",
         "topfeat_elapsed_vs_line_z": "Durée inhabituelle pour cette ligne",
+        "topfeat_unofficial_detour": "Détour non-officiel",
 
         # Formule / activité GPS vérifiable
         "formula_caption": (
@@ -458,6 +483,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "analysis_header": "{scope} — analyse des anomalies",
         "scope_bus_line": "Bus {bus} · Ligne {line}",
         "scope_line": "Ligne {line}",
+        "scope_all_lines": "Toutes les lignes de {company}",
+        "filter_manual_date": "Ou saisir une date précise",
+        "filter_manual_date_help": "Prioritaire sur le menu déroulant \"Jour\" ci-dessus si renseignée -- utile pour un jour tout juste arrivé via les webservices en direct et pas encore dans la liste précalculée.",
         "metric_trips_analyzed": "Trajets analysés",
         "metric_trips_analyzed_help": "Nombre total de trajets dans la période sélectionnée pour ce périmètre.",
         "metric_abnormal_trips": "Trajets anormaux",
@@ -549,6 +577,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "tab_explain": "Investigate a bus",
         "tab_patterns": "Trends",
         "tab_tickets": "Ticket anomalies",
+        "tab_drivers": "Drivers",
         "lang_label": "Language",
 
         "filter_operator": "Operator",
@@ -569,6 +598,29 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "sort_duration_desc": "⏱️ Duration (longest first)",
         "btn_analyze": "Analyze",
         "show_data_bugs": "Also show data bugs / tracking fragments",
+        "analyzing_with_detours": "Analyzing (includes checking for unofficial detours -- can take up to 30-40s on a heavily-flagged line)...",
+        "chip_detour_confirmed": "{icon} Confirmed unofficial detour — the bus drove about {dist} km away for ~{min} min before returning.",
+        "chip_detour_confirmed_help": "Detected from raw GPS positions: the bus left its starting point, drove significantly away, then came back to roughly the same spot before its long dwell — likely an errand (depot run, refueling...) rather than plain GPS noise.",
+        "chip_departure_late": "{icon} Scheduled departure **{sched}**, actual departure **{dep}** — {min:.0f} min late.",
+        "chip_departure_early": "{icon} Scheduled departure **{sched}**, actual departure **{dep}** — {min:.0f} min early.",
+        "chip_departure_help": "Compared against the published timetable for this line/direction (winicari.ligne.horaires). Purely informational, not a model anomaly.",
+        "chip_departure_multi_variant": "Compared against the published timetable -- CAUTION, this line publishes several different schedules (e.g. different days) and we can't tell which applies on this exact day; only the first is used as a reference, treat with care.",
+        "chip_driver": "{icon} Driver: **{code}**",
+        "chip_driver_disclaimer": "Provided for reference only -- a correlation between a driver and flagged trips is not an automatic verdict. Other factors (traffic, road conditions, vehicle breakdown, weather...) can explain an anomaly without driver fault. Interpret this data according to context.",
+        "metric_driver_trips": "Trips",
+        "metric_driver_anomalies": "Anomalies",
+        "metric_driver_rate": "Anomaly rate",
+        "driver_stats_unavailable": "No data found for this driver code (outside the 2025+ window, or unknown code).",
+        "drivers_tab_caption": "Anomaly stats per driver — identified from individual tickets (2025 onward only; older trips have no driver attached).",
+        "drivers_min_trips": "Minimum trips (for a meaningful rate)",
+        "drivers_leaderboard": "Drivers ranked by anomaly rate",
+        "no_drivers_found": "No driver with enough trips for this operator.",
+        "driver_lookup": "Look up a driver by code",
+        "driver_code_input": "Driver code",
+        "driver_by_line": "Breakdown by line",
+        "driver_dominant_cause": "Most frequent cause: **{cause}** ({pct:.1f}% of their anomalies)",
+        "driver_cause_distribution": "Cause breakdown",
+        "driver_flagged_trips": "This driver's flagged trips",
 
         "model_warning_neither": (
             "This operator doesn't yet have enough recorded trips for a dedicated anomaly "
@@ -654,6 +706,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "topfeat_terminus_idle_min": "Terminus dwell (service not closed out)",
         "topfeat_elapsed_vs_bus_z": "Unusual duration for this bus",
         "topfeat_elapsed_vs_line_z": "Unusual duration for this line",
+        "topfeat_unofficial_detour": "Unofficial detour",
 
         "formula_caption": (
             "**Formula**: Trip duration = arrival time ({arr}) − departure time ({dep}), "
@@ -939,6 +992,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "analysis_header": "{scope} — anomaly analysis",
         "scope_bus_line": "Bus {bus} · Line {line}",
         "scope_line": "Line {line}",
+        "scope_all_lines": "All lines for {company}",
+        "filter_manual_date": "Or enter a specific date",
+        "filter_manual_date_help": "Takes priority over the \"Day\" dropdown above if set -- useful for a day that just arrived via live webservices and isn't in the precomputed list yet.",
         "metric_trips_analyzed": "Trips analyzed",
         "metric_trips_analyzed_help": "Total number of trips in the selected period for this scope.",
         "metric_abnormal_trips": "Abnormal trips",
@@ -987,6 +1043,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "tab_explain": "تحليل حافلة",
         "tab_patterns": "الاتجاهات",
         "tab_tickets": "انحراف التذاكر",
+        "tab_drivers": "السائقون",
         "lang_label": "اللغة",
 
         "filter_operator": "المشغّل",
@@ -1007,6 +1064,29 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "sort_duration_desc": "⏱️ المدة (الأطول أولاً)",
         "btn_analyze": "تحليل",
         "show_data_bugs": "إظهار أخطاء البيانات / أجزاء التتبع الناقصة أيضًا",
+        "analyzing_with_detours": "جارٍ التحليل (يشمل التحقق من الانحرافات غير الرسمية -- قد يستغرق حتى 30-40 ثانية على خط به الكثير من البلاغات)...",
+        "chip_detour_confirmed": "⁦{icon}⁩ انحراف غير رسمي مؤكد — ابتعدت الحافلة حوالي ⁦{dist}⁩ كم لمدة ~⁦{min}⁩ دقيقة قبل العودة.",
+        "chip_detour_confirmed_help": "اكتُشف من مواقع ⁦GPS⁩ الخام: غادرت الحافلة نقطة انطلاقها وابتعدت بشكل ملحوظ ثم عادت تقريبًا لنفس المكان قبل توقفها الطويل — على الأرجح مهمة جانبية (توقف بالمرآب، تزود بالوقود...) وليس مجرد تشويش ⁦GPS⁩.",
+        "chip_departure_late": "⁦{icon}⁩ الانطلاق المقرر الساعة **⁦{sched}⁩**، الانطلاق الفعلي الساعة **⁦{dep}⁩** — تأخير ⁦{min:.0f}⁩ دقيقة.",
+        "chip_departure_early": "⁦{icon}⁩ الانطلاق المقرر الساعة **⁦{sched}⁩**، الانطلاق الفعلي الساعة **⁦{dep}⁩** — تقدّم ⁦{min:.0f}⁩ دقيقة.",
+        "chip_departure_help": "مقارنة بالجدول الزمني المنشور لهذا الخط/الاتجاه. معلومة فقط، ليست انحرافًا حسب النموذج.",
+        "chip_departure_multi_variant": "مقارنة بالجدول الزمني المنشور -- تنبيه: هذا الخط ينشر عدة جداول مختلفة (مثلاً أيام مختلفة) ولا يمكننا معرفة أيها ينطبق على هذا اليوم بالذات؛ يُستخدم الجدول الأول فقط كمرجع، فيُرجى التعامل معه بحذر.",
+        "chip_driver": "⁦{icon}⁩ السائق: **⁦{code}⁩**",
+        "chip_driver_disclaimer": "معلومة إرشادية فقط -- الربط بين سائق ورحلات مُبلَّغ عنها ليس حكمًا آليًا. عوامل أخرى (حركة المرور، حالة الطريق، عطل بالمركبة، الأحوال الجوية...) قد تفسّر الانحراف دون أي خطأ من السائق. يعود لك تفسير هذه البيانات حسب السياق.",
+        "metric_driver_trips": "الرحلات",
+        "metric_driver_anomalies": "الانحرافات",
+        "metric_driver_rate": "معدل الانحراف",
+        "driver_stats_unavailable": "لا توجد بيانات لهذا الرمز (خارج نطاق 2025 وما بعده، أو رمز غير معروف).",
+        "drivers_tab_caption": "إحصائيات الانحرافات حسب السائق — محددة من التذاكر الفردية (2025 فما بعد فقط؛ الرحلات الأقدم ليس لها سائق مرتبط).",
+        "drivers_min_trips": "الحد الأدنى لعدد الرحلات (لمعدل ذي دلالة)",
+        "drivers_leaderboard": "السائقون مرتبون حسب معدل الانحراف",
+        "no_drivers_found": "لا يوجد سائق لديه عدد رحلات كافٍ لهذا المشغّل.",
+        "driver_lookup": "البحث عن سائق برمزه",
+        "driver_code_input": "رمز السائق",
+        "driver_by_line": "التفصيل حسب الخط",
+        "driver_dominant_cause": "السبب الأكثر تكرارًا: **⁦{cause}⁩** (⁦{pct:.1f}⁩٪ من انحرافاته)",
+        "driver_cause_distribution": "توزيع الأسباب",
+        "driver_flagged_trips": "الرحلات المُبلَّغ عنها لهذا السائق",
 
         "model_warning_neither": (
             "لا يزال لدى هذا المشغّل عدد غير كافٍ من الرحلات المسجّلة لنموذج انحراف مخصص "
@@ -1090,6 +1170,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "topfeat_terminus_idle_min": "توقف بالمحطة النهائية (خدمة لم تُغلق)",
         "topfeat_elapsed_vs_bus_z": "مدة غير معتادة لهذه الحافلة",
         "topfeat_elapsed_vs_line_z": "مدة غير معتادة لهذا الخط",
+        "topfeat_unofficial_detour": "انحراف غير رسمي",
 
         "formula_caption": (
             "**المعادلة**: مدة الرحلة = وقت الوصول (⁦{arr}⁩) − وقت المغادرة (⁦{dep}⁩)، "
@@ -1362,6 +1443,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "analysis_header": "⁦{scope}⁩ — تحليل حالات الانحراف",
         "scope_bus_line": "الحافلة ⁦{bus}⁩ · الخط ⁦{line}⁩",
         "scope_line": "الخط ⁦{line}⁩",
+        "scope_all_lines": "جميع خطوط ⁦{company}⁩",
+        "filter_manual_date": "أو إدخال تاريخ محدد",
+        "filter_manual_date_help": "له الأولوية على قائمة \"اليوم\" أعلاه إذا تم تحديده -- مفيد ليوم وصل للتو عبر خدمات الويب المباشرة ولم يُدرج بعد في القائمة المحسوبة مسبقًا.",
         "metric_trips_analyzed": "الرحلات المُحلَّلة",
         "metric_trips_analyzed_help": "العدد الإجمالي للرحلات ضمن الفترة المحددة لهذا النطاق.",
         "metric_abnormal_trips": "الرحلات غير الطبيعية",
