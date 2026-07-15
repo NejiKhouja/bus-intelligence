@@ -13,3 +13,8 @@ models/models_version.json
 # models.ticket_anomaly.train_stations() -- see docs/WEBSERVICES_NEEDED.md.
 data/reference/winicari_reference.db
 models/ticket_anomaly/stations/
+
+# Client hand-off embed (PHP/HTML/CSS/JS anomaly-detection widget for the company's own
+# dashboard, see embed/README.md) -- config.php holds the real Render API key, never
+# committed; config.example.php (tracked) is the template to fill in.
+embed/config.php
