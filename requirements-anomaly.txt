@@ -17,6 +17,10 @@ pandas==2.3.3
 numpy==2.4.6
 pyarrow==24.0.0
 python-dotenv==1.2.2
+# src/data/webservices.py (live GPS/ticket webservice client, imported at module level by
+# src/api/main.py) -- missing here caused a production crash on startup (ModuleNotFoundError,
+# confirmed 2026-07-15): this file was added after requirements-anomaly.txt was last updated.
+requests==2.34.2
 
 # Modeling — Isolation Forest only
 scikit-learn==1.9.0

@@ -22,6 +22,9 @@ python-dotenv==1.2.2
 # to miss (this was in fact missing from the original requirements.txt and only "worked"
 # in dev because pyarrow was pulled in transitively by an unrelated package).
 pyarrow==24.0.0
+# src/data/webservices.py (live GPS/ticket webservice client, imported at module level by
+# src/api/main.py) -- same "worked in dev, missing here" class of gap as pyarrow above.
+requests==2.34.2
 
 # Modeling (delay, GPS fallback, anomaly detection — chatbot excluded from this deployment)
 torch==2.12.1
