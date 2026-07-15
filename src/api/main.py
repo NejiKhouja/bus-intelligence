@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ import pandas as pd
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Import model modules
@@ -268,6 +270,19 @@ class ModelManager:
                     result = live_stops
                 elif len(live_stops):
                     result = pd.concat([result, live_stops], ignore_index=True, sort=False)
+
+        # `fa` (live, from reconstruct_bus_day) carries these as object-dtype Timestamp
+        # scalars, not datetime64 -- concat with the DB-sourced (already datetime64) result,
+        # or even the live-only case alone, can leave the column as `object` rather than a
+        # proper datetime dtype. Confirmed by a real crash (2026-07-13):
+        # "TypeError: unsupported operand type(s) for -: 'numpy.ndarray' and 'Timestamp'"
+        # in _trip_sequence's `df["trip_start"] - ts`. Normalize once here so every caller
+        # gets a consistent dtype regardless of source (DB/live/merged).
+        if result is not None and len(result):
+            for col in ("arrival", "departure", "trip_start", "trip_end",
+                       "origin_idle_from", "end_idle_to"):
+                if col in result.columns:
+                    result[col] = pd.to_datetime(result[col], errors="coerce")
         return result
 
     def trip_scopes(self, societe: str = None, line: str = None) -> Optional[pd.DataFrame]:
@@ -395,11 +410,35 @@ async def lifespan(app: FastAPI):
     yield
     print("Shutting down...")
 
+def _sanitize_non_finite(obj):
+    """Recursively replaces NaN/inf/-inf with `None` -- strict JSON doesn't allow them
+    (confirmed by a real crash, 2026-07-14: "ValueError: Out of range float values are not
+    JSON compliant" from /api/ticket-anomaly-history, traced to a z-score/if_score blowing
+    up on a freshly live-scored day with too little history for a stable scaler std). Fixed
+    at the serialization boundary rather than chasing every individual field that computes
+    a ratio/z-score/model score -- this guards the whole API against the same class of bug
+    wherever it next shows up, not just this one endpoint.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_non_finite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_non_finite(v) for v in obj]
+    return obj
+
+
+class SanitizedJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return super().render(_sanitize_non_finite(content))
+
+
 app = FastAPI(
     title="WiniCari AI API",
     description="API for bus delay prediction, GPS fallback, anomaly detection, and RAG chatbot",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    default_response_class=SanitizedJSONResponse,
 )
 
 app.add_middleware(
@@ -1012,6 +1051,15 @@ def _filter_trips(societe: str, line: Optional[str] = None,
                 trips = live["trips"]
             else:
                 trips = pd.concat([trips, live["trips"]], ignore_index=True, sort=False)
+            # Même normalisation que foundation_slice -- `trip_features()` sur des données
+            # EN DIRECT peut laisser trip_start/trip_end en dtype object plutôt que
+            # datetime64, cassant les comparaisons/isoformat() en aval (confirmé par un
+            # crash réel, voir la note dans foundation_slice).
+            if len(trips):
+                trips = trips.copy()
+                for col in ("trip_start", "trip_end"):
+                    if col in trips.columns:
+                        trips[col] = pd.to_datetime(trips[col], errors="coerce")
 
     mask = trips["societe"] == societe
     if line:
