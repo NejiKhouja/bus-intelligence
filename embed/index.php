@@ -34,7 +34,7 @@ $company = winicari_current_company();
     <!-- ── Company picker (dev/testing fallback — see session.php) ───────────────── -->
     <div class="wc-card wc-picker">
         <div class="wc-brand">
-            <span class="wc-brand-icon">🚌</span>
+            <span class="wc-brand-icon"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="14" rx="2"/><line x1="4" y1="11" x2="20" y2="11"/><circle cx="8" cy="19" r="1.6"/><circle cx="16" cy="19" r="1.6"/></svg></span>
             <span>WiniCari AI</span>
         </div>
         <h2>Choisir un opérateur</h2>
@@ -59,7 +59,7 @@ $company = winicari_current_company();
     <!-- ── Main app ─────────────────────────────────────────────────────────────── -->
     <header class="wc-header">
         <div class="wc-brand">
-            <span class="wc-brand-icon">🛡️</span>
+            <span class="wc-brand-icon"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
             <div>
                 <div class="wc-title">Détection d'anomalies</div>
                 <div class="wc-subtitle">Trajets signalés par Isolation Forest + autoencodeur LSTM</div>
@@ -72,34 +72,15 @@ $company = winicari_current_company();
     </header>
 
     <nav class="wc-tabs" role="tablist">
-        <button class="wc-tab active" data-view="trips" role="tab">📋 Trajets &amp; analyse</button>
-        <button class="wc-tab" data-view="trends" role="tab">📊 Tendances</button>
-        <button class="wc-tab" data-view="tickets" role="tab">🎫 Anomalies billetterie</button>
-        <button class="wc-tab" data-view="drivers" role="tab">🪪 Chauffeurs</button>
+        <button class="wc-tab active" data-view="trips" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>Trajets &amp; analyse</button>
+        <button class="wc-tab" data-view="trends" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="14"/></svg>Tendances</button>
+        <button class="wc-tab" data-view="tickets" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v4a1 1 0 0 0 1 1h18a1 1 0 0 0 1-1v-4a3 3 0 0 1 0-6V5a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1z"/><line x1="13" y1="5" x2="13" y2="19" stroke-dasharray="2 3"/></svg>Anomalies billetterie</button>
+        <button class="wc-tab" data-view="drivers" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="8" cy="11" r="2"/><path d="M5.5 17c.5-2 4.5-2 5 0"/><line x1="14" y1="9" x2="19" y2="9"/><line x1="14" y1="13" x2="18" y2="13"/></svg>Chauffeurs</button>
     </nav>
 
     <main id="wc-view-root" class="wc-view-root">
         <!-- populated by app.js -->
     </main>
-
-    <div id="wc-loading" class="wc-loading-overlay" hidden>
-        <div class="wc-brain">
-            <svg viewBox="0 0 100 80" class="wc-brain-svg" aria-hidden="true">
-                <path class="wc-brain-path wc-brain-left"
-                      d="M45 10 C30 8, 15 18, 15 32 C15 40, 20 44, 18 50 C14 58, 20 66, 30 66 C34 70, 42 72, 46 66 L46 14 Z"/>
-                <path class="wc-brain-path wc-brain-right"
-                      d="M55 10 C70 8, 85 18, 85 32 C85 40, 80 44, 82 50 C86 58, 80 66, 70 66 C66 70, 58 72, 54 66 L54 14 Z"/>
-                <circle class="wc-synapse s1" cx="28" cy="28" r="2.4"/>
-                <circle class="wc-synapse s2" cx="38" cy="45" r="2"/>
-                <circle class="wc-synapse s3" cx="24" cy="52" r="2.2"/>
-                <circle class="wc-synapse s4" cx="72" cy="28" r="2.2"/>
-                <circle class="wc-synapse s5" cx="62" cy="45" r="2"/>
-                <circle class="wc-synapse s6" cx="76" cy="52" r="2.4"/>
-            </svg>
-        </div>
-        <div class="wc-loading-text" id="wc-loading-text">Analyse en cours…</div>
-        <div class="wc-loading-bar"><div class="wc-loading-bar-fill"></div></div>
-    </div>
 
 <?php endif; ?>
 

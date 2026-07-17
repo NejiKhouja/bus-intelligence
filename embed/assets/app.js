@@ -62,30 +62,74 @@ function el(html) {
     return t.content.firstElementChild;
 }
 
-// ── API + loading overlay ───────────────────────────────────────────────────────────────
+// ── Inline SVG icons (replaces emojis -- decision 2026-07-17) ──────────────────────────
+// stroke: currentColor => each icon inherits its container's text color (banner/chip tints).
+const _ICON_PATHS = {
+    alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    fragment: '<circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/>',
+    signal: '<circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/>',
+    clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    pin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+    parking: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 17V7h4a3 3 0 0 1 0 6H9"/>',
+    ban: '<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>',
+    detour: '<polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>',
+    driver: '<rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="8" cy="11" r="2"/><path d="M5.5 17c.5-2 4.5-2 5 0"/><line x1="14" y1="9" x2="19" y2="9"/><line x1="14" y1="13" x2="18" y2="13"/>',
+    chart: '<line x1="6" y1="20" x2="6" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="14"/>',
+    check: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
+    up: '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
+    down: '<polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/>',
+    info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+};
+function icon(name) {
+    const p = _ICON_PATHS[name];
+    if (!p) return "";
+    return `<svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg> `;
+}
+// Pulsing green dot for "live data" -- pure CSS, no SVG needed.
+const LIVE_DOT = '<span class="wc-live-dot" aria-hidden="true"></span> ';
+
+// ── API + inline loading block ──────────────────────────────────────────────────────────
 const LOADING_MESSAGES = [
     "Analyse des trajets…", "Détection des anomalies…", "Vérification des détours…",
     "Recoupement des horaires…", "Presque prêt…",
 ];
 let _loadingTimer = null;
 
-function showLoading() {
-    const overlay = document.getElementById("wc-loading");
-    const textEl = document.getElementById("wc-loading-text");
-    if (!overlay) return;
-    overlay.hidden = false;
-    let i = 0;
-    textEl.textContent = LOADING_MESSAGES[0];
+// Rendered INSIDE the given container (not a full-page overlay -- decision 2026-07-17:
+// the fixed overlay blocked the whole page during a 30-40s analysis; inline, the rest of
+// the widget and the host dashboard stay usable while only the results zone shows work).
+function showLoadingIn(container) {
     clearInterval(_loadingTimer);
+    container.innerHTML = `
+    <div class="wc-loading-inline">
+        <div class="wc-brain">
+            <svg viewBox="0 0 100 80" class="wc-brain-svg" aria-hidden="true">
+                <path class="wc-brain-path wc-brain-left"
+                      d="M45 10 C30 8, 15 18, 15 32 C15 40, 20 44, 18 50 C14 58, 20 66, 30 66 C34 70, 42 72, 46 66 L46 14 Z"/>
+                <path class="wc-brain-path wc-brain-right"
+                      d="M55 10 C70 8, 85 18, 85 32 C85 40, 80 44, 82 50 C86 58, 80 66, 70 66 C66 70, 58 72, 54 66 L54 14 Z"/>
+                <circle class="wc-synapse s1" cx="28" cy="28" r="2.4"/>
+                <circle class="wc-synapse s2" cx="38" cy="45" r="2"/>
+                <circle class="wc-synapse s3" cx="24" cy="52" r="2.2"/>
+                <circle class="wc-synapse s4" cx="72" cy="28" r="2.2"/>
+                <circle class="wc-synapse s5" cx="62" cy="45" r="2"/>
+                <circle class="wc-synapse s6" cx="76" cy="52" r="2.4"/>
+            </svg>
+        </div>
+        <div class="wc-loading-text">${LOADING_MESSAGES[0]}</div>
+        <div class="wc-loading-bar"><div class="wc-loading-bar-fill"></div></div>
+    </div>`;
+    const textEl = container.querySelector(".wc-loading-text");
+    let i = 0;
     _loadingTimer = setInterval(() => {
         i = (i + 1) % LOADING_MESSAGES.length;
-        textEl.textContent = LOADING_MESSAGES[i];
+        // The block may have been replaced by results/error markup already -- the guard
+        // avoids touching a detached node; the interval itself is cleared by the caller.
+        if (textEl.isConnected) textEl.textContent = LOADING_MESSAGES[i];
     }, 2200);
 }
-function hideLoading() {
+function stopLoading() {
     clearInterval(_loadingTimer);
-    const overlay = document.getElementById("wc-loading");
-    if (overlay) overlay.hidden = true;
 }
 
 async function api(endpoint, params = {}) {
@@ -180,35 +224,35 @@ function renderAlertCard(a, { showDriverStatsHint = true } = {}) {
     if (a.top_feature !== undefined) {
         html += `<p class="wc-muted">Cause principale : <strong>${esc(TOP_FEATURE_LABELS[a.top_feature] || "Non catégorisé")}</strong></p>`;
     }
-    if (a.is_data_bug) html += `<div class="wc-banner error">⚠️ Probable bug de données (durée/horodatage incohérent) — à vérifier avant d'agir.</div>`;
-    else if (a.is_fragment) html += `<div class="wc-banner warn">✂️ Trajet trop court/fragmentaire pour être jugé fiable.</div>`;
-    else if (a.is_dark_inflated) html += `<div class="wc-banner info">📡 Durée gonflée par une perte de signal GPS prolongée, pas une vraie immobilisation.</div>`;
-    else if (a.is_implausible) html += `<div class="wc-banner info">⏱️ Durée improbable — à vérifier.</div>`;
-    else if (a.is_partial_coverage) html += `<div class="wc-banner info">📍 Couverture partielle (${a.n_stops ?? "?"} arrêts vs ${a.line_median_n_stops ?? "?"} normalement).</div>`;
+    if (a.is_data_bug) html += `<div class="wc-banner error">${icon("alert")}Probable bug de données (durée/horodatage incohérent) — à vérifier avant d'agir.</div>`;
+    else if (a.is_fragment) html += `<div class="wc-banner warn">${icon("fragment")}Trajet trop court/fragmentaire pour être jugé fiable.</div>`;
+    else if (a.is_dark_inflated) html += `<div class="wc-banner info">${icon("signal")}Durée gonflée par une perte de signal GPS prolongée, pas une vraie immobilisation.</div>`;
+    else if (a.is_implausible) html += `<div class="wc-banner info">${icon("clock")}Durée improbable — à vérifier.</div>`;
+    else if (a.is_partial_coverage) html += `<div class="wc-banner info">${icon("pin")}Couverture partielle (${a.n_stops ?? "?"} arrêts vs ${a.line_median_n_stops ?? "?"} normalement).</div>`;
 
     for (const r of reasons) html += `<div class="wc-reason">${esc(r)}</div>`;
 
     if (ps.longest_stop && ps.longest_stop.dwell_min >= 5) {
-        html += `<div class="wc-chip">🅿️ Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip">${icon("parking")}Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
     }
     if (ps.signal_loss_stop) {
-        html += `<div class="wc-chip">📡 Perte de signal à <strong>${esc(ps.signal_loss_stop.stop)}</strong> (~${ps.signal_loss_stop.dark_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip">${icon("signal")}Perte de signal à <strong>${esc(ps.signal_loss_stop.stop)}</strong> (~${ps.signal_loss_stop.dark_min.toFixed(0)} min)</div>`;
     }
     if (ps.farthest_stop) {
-        html += `<div class="wc-chip">📍 Écart de position à <strong>${esc(ps.farthest_stop.stop)}</strong> (~${ps.farthest_stop.dist_m.toFixed(0)} m)</div>`;
+        html += `<div class="wc-chip">${icon("pin")}Écart de position à <strong>${esc(ps.farthest_stop.stop)}</strong> (~${ps.farthest_stop.dist_m.toFixed(0)} m)</div>`;
     }
     if (ps.off_route_stops && ps.off_route_stops.length) {
-        html += `<div class="wc-chip">🚫 Arrêts non desservis : ${esc(ps.off_route_stops.join(", "))}</div>`;
+        html += `<div class="wc-chip">${icon("ban")}Arrêts non desservis : ${esc(ps.off_route_stops.join(", "))}</div>`;
     }
     if (a.has_detour && a.detour) {
-        html += `<div class="wc-chip detour">🔀 Détour non-officiel confirmé — ~${a.detour.distance_km} km pendant ~${a.detour.duration_min.toFixed(0)} min avant de revenir.</div>`;
+        html += `<div class="wc-chip detour">${icon("detour")}Détour non-officiel confirmé — ~${a.detour.distance_km} km pendant ~${a.detour.duration_min.toFixed(0)} min avant de revenir.</div>`;
     }
     if (a.scheduled_departure && a.departure_delay_min !== null && a.departure_delay_min !== undefined && Math.abs(a.departure_delay_min) >= 3) {
         const late = a.departure_delay_min > 0;
-        html += `<div class="wc-chip">🕐 Départ prévu <strong>${esc(a.scheduled_departure)}</strong>, départ réel <strong>${dep}</strong> — ${Math.abs(a.departure_delay_min).toFixed(0)} min ${late ? "de retard" : "d'avance"}${a.schedule_multi_variant ? " (horaire multiple, à titre indicatif)" : ""}.</div>`;
+        html += `<div class="wc-chip">${icon("clock")}Départ prévu <strong>${esc(a.scheduled_departure)}</strong>, départ réel <strong>${dep}</strong> — ${Math.abs(a.departure_delay_min).toFixed(0)} min ${late ? "de retard" : "d'avance"}${a.schedule_multi_variant ? " (horaire multiple, à titre indicatif)" : ""}.</div>`;
     }
     if (a.driver_code) {
-        html += `<div class="wc-chip driver">🪪 Chauffeur : <strong>${esc(a.driver_code)}</strong></div>
+        html += `<div class="wc-chip driver">${icon("driver")}Chauffeur : <strong>${esc(a.driver_code)}</strong></div>
         <div class="wc-disclaimer">Information fournie à titre indicatif — une corrélation entre un chauffeur et des trajets signalés n'est pas un verdict automatique. À interpréter selon le contexte (trafic, panne, météo…).</div>`;
     }
 
@@ -303,7 +347,7 @@ async function renderTripsView(root) {
         let day = daySel.value || null;
         if (manualDate.value) day = manualDate.value.replace(/-/g, "");
 
-        showLoading();
+        showLoadingIn(root.querySelector("#wc-t-results"));
         try {
             // check_detours always on for an explicit "Analyser" click -- measured ~30-40s
             // on a heavily-flagged single line, and much more across "all lines" (confirmed
@@ -313,9 +357,9 @@ async function renderTripsView(root) {
             const res = await api("/api/anomaly-explain", { line, bus, day, dir, check_detours: true });
             renderTripsResults(root, res);
         } catch (e) {
-            root.querySelector("#wc-t-results").innerHTML = `<div class="wc-banner error">Erreur d'analyse : ${esc(e.message)}</div>`;
+            root.querySelector("#wc-t-results").innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur d'analyse : ${esc(e.message)}</div>`;
         } finally {
-            hideLoading();
+            stopLoading();
         }
     }
     root.querySelector("#wc-t-analyze").addEventListener("click", runAnalysis);
@@ -331,10 +375,10 @@ async function renderTripsView(root) {
         try {
             const today = await api("/api/current-anomalies", {});
             const freshness = today.live
-                ? `<div class="wc-banner success">🟢 Données en direct — ${fmtDay(today.date)}</div>`
-                : `<div class="wc-banner info">📊 Dernier jour historique disponible — ${fmtDay(today.date)}</div>`;
+                ? `<div class="wc-banner success">${LIVE_DOT}Données en direct — ${fmtDay(today.date)}</div>`
+                : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`;
             if (!today.anomalies || !today.anomalies.length) {
-                resBox.innerHTML = freshness + `<div class="wc-banner success">✅ Aucune anomalie aujourd'hui pour cet opérateur.</div>`;
+                resBox.innerHTML = freshness + `<div class="wc-banner success">${icon("check")}Aucune anomalie aujourd'hui pour cet opérateur.</div>`;
                 return;
             }
             resBox.innerHTML = `<div class="wc-card">${freshness}<div id="wc-t-pills"></div><div id="wc-t-cards"></div></div>`;
@@ -359,7 +403,7 @@ function renderTripsResults(root, res) {
     resBox.innerHTML = "";
 
     if (!res || res.anomaly_count === 0) {
-        resBox.innerHTML = `<div class="wc-banner success">✅ Aucune anomalie trouvée pour ce périmètre.</div>`;
+        resBox.innerHTML = `<div class="wc-banner success">${icon("check")}Aucune anomalie trouvée pour ce périmètre.</div>`;
         return;
     }
 
@@ -518,12 +562,12 @@ function renderTicketCard(a) {
             <span class="wc-alert-title">Bus ${esc(a.bus)} · Ligne ${esc(a.line)}</span>
             <span class="wc-alert-date">${fmtDay(a.day)}</span>
         </div>`;
-    if (a.is_machine_issue) html += `<div class="wc-banner warn">⚠️ Probable panne de la machine à tickets (${a.gps_trip_count || 0} trajets GPS confirmés ce jour).</div>`;
-    else if (a.is_no_service) html += `<div class="wc-banner info">ℹ️ Aucun trajet GPS ce jour — jour sans service, pas une anomalie de recette.</div>`;
+    if (a.is_machine_issue) html += `<div class="wc-banner warn">${icon("alert")}Probable panne de la machine à tickets (${a.gps_trip_count || 0} trajets GPS confirmés ce jour).</div>`;
+    else if (a.is_no_service) html += `<div class="wc-banner info">${icon("info")}Aucun trajet GPS ce jour — jour sans service, pas une anomalie de recette.</div>`;
     else if (a.anomaly && a.is_good_anomaly !== null && a.is_good_anomaly !== undefined) {
         html += a.is_good_anomaly
-            ? `<div class="wc-banner success">📈 Recette au-dessus de la normale.</div>`
-            : `<div class="wc-banner warn">📉 Recette en dessous de la normale — à surveiller.</div>`;
+            ? `<div class="wc-banner success">${icon("up")}Recette au-dessus de la normale.</div>`
+            : `<div class="wc-banner warn">${icon("down")}Recette en dessous de la normale — à surveiller.</div>`;
     }
     html += `<div class="wc-metrics">
         <div class="wc-metric"><div class="wc-metric-label">Tickets</div><div class="wc-metric-value">${a.nbr_ticket}</div></div>

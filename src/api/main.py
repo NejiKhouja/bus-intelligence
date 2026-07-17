@@ -1947,45 +1947,50 @@ async def anomaly_explain(
 
         if anomalous:
             # Un (ligne, bus, jour) distinct = un aller-retour Mongo (~1s) + un filtre Kalman
-            # complet. Séquentiel, une ligne avec des dizaines de trajets signalés (ou "toutes
-            # les lignes") pouvait dépasser 15-20s -- les fetches sont indépendants (chacun sa
-            # propre requête + son propre DataFrame local, pas d'état mutable partagé hors
-            # _load_usable_lines() qui n'est que lu), donc parallélisables sans risque via un
-            # pool de threads borné.
-            needed_keys = {
-                (a["line"], a["bus"], a["day"])
-                for a in anomalous
-                if (a["problem_stops"].get("longest_stop") or {}).get("arrival")
-            }
+            # complet sur les pings bruts de toute la journée. Les fetches sont indépendants
+            # (chacun sa propre requête + son propre DataFrame local, pas d'état mutable
+            # partagé hors _load_usable_lines() qui n'est que lu), donc parallélisables --
+            # MAIS la concurrence et la RÉTENTION mémoire doivent rester bornées : la
+            # version précédente (16 workers + cache de TOUTES les traces jusqu'à la fin de
+            # la requête) tuait le worker Render 512MB par OOM (constaté 2026-07-17 : le log
+            # montre le process redémarrer en boucle, le proxy PHP recevait un 502).
+            # Ici : chaque trace est consommée puis relâchée DANS le worker (pic mémoire =
+            # DETOUR_WORKERS traces au plus), et DETOUR_MAX_TRACKS borne le nombre total de
+            # bus-jours vérifiés (les plus récents d'abord ; au-delà, has_detour reste
+            # simplement absent -- affiché comme "non vérifié", jamais comme "pas de détour").
+            by_key: dict = {}
+            for a in anomalous:
+                if (a["problem_stops"].get("longest_stop") or {}).get("arrival"):
+                    by_key.setdefault((a["line"], a["bus"], a["day"]), []).append(a)
 
-            def _fetch(key):
+            keys = sorted(by_key, key=lambda k: str(k[2]), reverse=True)
+            max_tracks = int(os.getenv("DETOUR_MAX_TRACKS", "0") or 0)
+            if max_tracks > 0:
+                keys = keys[:max_tracks]
+            workers = max(1, int(os.getenv("DETOUR_WORKERS", "8") or 8))
+
+            def _check(key):
                 line_, bus_, day_ = key
                 try:
-                    return key, _build_gps_track(societe, line_, bus_, day_)
+                    built = _build_gps_track(societe, line_, bus_, day_)
                 except Exception:
-                    return key, None
-
-            track_cache: dict = {}
-            if needed_keys:
-                with ThreadPoolExecutor(max_workers=16) as pool:
-                    for key, built in pool.map(_fetch, needed_keys):
-                        track_cache[key] = built
-
-            for a in anomalous:
-                longest_stop = a["problem_stops"].get("longest_stop")
-                if not longest_stop or not longest_stop.get("arrival"):
-                    continue
-                built = track_cache.get((a["line"], a["bus"], a["day"]))
+                    built = None
                 if built is None:
-                    continue
+                    return
                 g, _stops, _route_len = built
-                try:
-                    detour = _detect_start_detour(g, a["trip_start"], longest_stop, fdn.Config())
-                except Exception:
-                    detour = None
-                a["has_detour"] = bool(detour)
-                if detour:
-                    a["detour"] = detour
+                for a in by_key[key]:
+                    try:
+                        detour = _detect_start_detour(g, a["trip_start"],
+                                                      a["problem_stops"]["longest_stop"], fdn.Config())
+                    except Exception:
+                        detour = None
+                    a["has_detour"] = bool(detour)
+                    if detour:
+                        a["detour"] = detour
+
+            if keys:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    list(pool.map(_check, keys))
 
         worst_trip, sequence = None, []
         if anomalous and df is not None:

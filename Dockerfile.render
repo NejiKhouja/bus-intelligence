@@ -48,5 +48,14 @@ COPY data/reference/winicari_reference_slim.db ./data/reference/winicari_referen
 
 ENV ENABLED_MODULES=anomaly,ticket_anomaly
 
+# Le contrôle de détour (anomaly-explain?check_detours=true) charge les pings GPS bruts
+# d'un bus-jour entier + filtre Kalman PAR bus-jour vérifié. Sur cette instance 512MB,
+# la valeur par défaut (8 workers en parallèle) tuait le process par OOM -- constaté
+# 2026-07-17 : redémarrages en boucle dans les logs, 502 côté client pendant la requête.
+# 1 worker = une seule trace en mémoire à la fois ; DETOUR_MAX_TRACKS borne le nombre de
+# bus-jours vérifiés par requête (les plus récents d'abord, le reste rendu "non vérifié").
+ENV DETOUR_WORKERS=1
+ENV DETOUR_MAX_TRACKS=20
+
 # $PORT is provided by Render; the ${PORT:-8000} fallback keeps `docker run` working locally
 CMD ["sh", "-c", "uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
