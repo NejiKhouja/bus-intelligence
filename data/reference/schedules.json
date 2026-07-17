@@ -1,0 +1,464 @@
+[
+ {
+  "societe": "EPE-TVE",
+  "line": "974",
+  "ALLER": "23:00",
+  "RETOUR": "11:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "975",
+  "ALLER": "21:30",
+  "RETOUR": "20:30",
+  "multi_variant": true
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "978",
+  "ALLER": "07:10",
+  "RETOUR": "08:20",
+  "multi_variant": true
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "979",
+  "ALLER": "07:00",
+  "RETOUR": "13:30",
+  "multi_variant": true
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "982",
+  "ALLER": "06:00",
+  "RETOUR": "06:50",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "985",
+  "ALLER": "11:30",
+  "RETOUR": "11:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "986",
+  "ALLER": "08:30",
+  "RETOUR": "04:45",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "987",
+  "ALLER": "01:00",
+  "RETOUR": "15:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "988",
+  "ALLER": "11:30",
+  "RETOUR": "15:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "990",
+  "ALLER": "12:00",
+  "RETOUR": "19:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "993",
+  "ALLER": "04:40",
+  "RETOUR": "09:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "994",
+  "ALLER": "17:00",
+  "RETOUR": "17:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "995",
+  "ALLER": "19:00",
+  "RETOUR": "16:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "EPE-TVE",
+  "line": "999",
+  "ALLER": "12:00",
+  "RETOUR": "12:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.BIZERTE",
+  "line": "402",
+  "ALLER": "06:40",
+  "RETOUR": null,
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.BIZERTE",
+  "line": "403",
+  "ALLER": "06:00",
+  "RETOUR": "08:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.BIZERTE",
+  "line": "410",
+  "ALLER": "06:30",
+  "RETOUR": "08:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.BIZERTE",
+  "line": "499",
+  "ALLER": "10:00",
+  "RETOUR": "12:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "201",
+  "ALLER": "06:00",
+  "RETOUR": "12:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "202",
+  "ALLER": "06:00",
+  "RETOUR": "14:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "203",
+  "ALLER": "05:00",
+  "RETOUR": "13:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "204",
+  "ALLER": "06:45",
+  "RETOUR": "10:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "205",
+  "ALLER": "06:25",
+  "RETOUR": "09:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "206",
+  "ALLER": "11:00",
+  "RETOUR": "16:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "209",
+  "ALLER": "11:00",
+  "RETOUR": "16:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "210",
+  "ALLER": "07:00",
+  "RETOUR": "11:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "211",
+  "ALLER": "07:00",
+  "RETOUR": "11:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "212",
+  "ALLER": "05:00",
+  "RETOUR": "11:30",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "213",
+  "ALLER": "07:15",
+  "RETOUR": "16:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "215",
+  "ALLER": "04:45",
+  "RETOUR": "13:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "216",
+  "ALLER": "05:15",
+  "RETOUR": "14:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "217",
+  "ALLER": "04:00",
+  "RETOUR": "11:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "302",
+  "ALLER": "07:00",
+  "RETOUR": "07:50",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "341",
+  "ALLER": "10:00",
+  "RETOUR": "11:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.R.T.K",
+  "line": "402",
+  "ALLER": "05:30",
+  "RETOUR": "06:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.T.S",
+  "line": "101",
+  "ALLER": "05:00",
+  "RETOUR": "06:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "107",
+  "ALLER": "06:35",
+  "RETOUR": "07:15",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "209",
+  "ALLER": "00:00",
+  "RETOUR": "00:01",
+  "multi_variant": false
+ },
+ {
+  "societe": "S.T.S",
+  "line": "211",
+  "ALLER": "05:45",
+  "RETOUR": "07:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "213",
+  "ALLER": "03:40",
+  "RETOUR": "04:15",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "215",
+  "ALLER": "03:40",
+  "RETOUR": "04:15",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "216",
+  "ALLER": "06:00",
+  "RETOUR": "10:30",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "219",
+  "ALLER": "05:30",
+  "RETOUR": "06:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "220",
+  "ALLER": "16:20",
+  "RETOUR": null,
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "221",
+  "ALLER": "05:00",
+  "RETOUR": "07:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "225",
+  "ALLER": "05:50",
+  "RETOUR": "07:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "301",
+  "ALLER": "05:45",
+  "RETOUR": "07:30",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "304",
+  "ALLER": "05:00",
+  "RETOUR": "13:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "306",
+  "ALLER": "05:00",
+  "RETOUR": "14:35",
+  "multi_variant": true
+ },
+ {
+  "societe": "S.T.S",
+  "line": "541",
+  "ALLER": "06:15",
+  "RETOUR": "07:30",
+  "multi_variant": true
+ },
+ {
+  "societe": "TUS",
+  "line": "42",
+  "ALLER": "05:00",
+  "RETOUR": "06:10",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "201",
+  "ALLER": "06:00",
+  "RETOUR": "12:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "Winicari",
+  "line": "202",
+  "ALLER": "06:00",
+  "RETOUR": "14:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "203",
+  "ALLER": "05:00",
+  "RETOUR": "13:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "204",
+  "ALLER": "06:45",
+  "RETOUR": "10:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "205",
+  "ALLER": "06:25",
+  "RETOUR": "09:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "206",
+  "ALLER": "11:00",
+  "RETOUR": "16:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "Winicari",
+  "line": "208",
+  "ALLER": "07:15",
+  "RETOUR": "11:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "Winicari",
+  "line": "210",
+  "ALLER": "07:00",
+  "RETOUR": "11:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "Winicari",
+  "line": "211",
+  "ALLER": "07:00",
+  "RETOUR": "11:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "Winicari",
+  "line": "212",
+  "ALLER": "05:00",
+  "RETOUR": "11:30",
+  "multi_variant": true
+ },
+ {
+  "societe": "Winicari",
+  "line": "213",
+  "ALLER": "07:15",
+  "RETOUR": "16:00",
+  "multi_variant": true
+ },
+ {
+  "societe": "Winicari",
+  "line": "215",
+  "ALLER": "04:45",
+  "RETOUR": "13:30",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "216",
+  "ALLER": "05:45",
+  "RETOUR": "14:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "217",
+  "ALLER": "04:00",
+  "RETOUR": "11:00",
+  "multi_variant": false
+ },
+ {
+  "societe": "Winicari",
+  "line": "219",
+  "ALLER": "05:30",
+  "RETOUR": "06:00",
+  "multi_variant": true
+ }
+]

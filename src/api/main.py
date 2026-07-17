@@ -1,6 +1,7 @@
 """FastAPI serving layer for WiniCari AI"""
 from __future__ import annotations
 
+import json
 import logging
 import math
 from collections import Counter
@@ -1944,7 +1945,31 @@ async def anomaly_explain(
     failure fetching one bus-day's track just leaves `has_detour` unset for its trips
     rather than failing the whole request.
     """
-    df = model_manager.foundation_slice(societe, line=line)
+    # Tranche fondation chargée au PLUS ÉTROIT possible -- l'ancienne version chargeait
+    # toujours TOUT l'historique du périmètre (ligne entière, ou société ENTIÈRE pour
+    # "toutes les lignes"), même quand la requête ne portait que sur UN jour : ~200k lignes
+    # d'arrêts + 6 colonnes de datetime à parser, ce qui tuait l'instance Render 512MB par
+    # OOM (constaté 2026-07-17 : 502 sur anomaly-explain?day=20260716). Ici :
+    #   - jour précisé -> tranche de CE jour seulement (minuscule) ;
+    #   - ligne précisée sans jour -> tranche de la ligne (modéré) ;
+    #   - toutes lignes + tous jours -> rien d'office, tranches chargées PAR JOUR
+    #     d'anomalie à la demande (chaque jour = quelques centaines de lignes).
+    if day is not None:
+        df = model_manager.foundation_slice(societe, line=line, day=day)
+    elif line is not None:
+        df = model_manager.foundation_slice(societe, line=line)
+    else:
+        df = None
+
+    day_slices: dict = {}
+
+    def _seq_df_for(day_):
+        if df is not None:
+            return df
+        if day_ not in day_slices:
+            day_slices[day_] = model_manager.foundation_slice(societe, day=day_)
+        return day_slices[day_]
+
     try:
         models, trips = _filter_trips(societe, line, bus, day, include_data_bugs=include_data_bugs, dir=dir)
         rows = _rows_with_reasons(models, trips, anomalies_only=False)
@@ -1952,10 +1977,13 @@ async def anomaly_explain(
 
         # Attach stop-level detail to each anomalous trip
         # Use each row's OWN line/bus (needed when line/bus=None means "all lines"/"all buses")
-        if df is not None:
-            for a in anomalous:
-                seq = _trip_sequence(df, societe, a["line"], int(a["bus"]), a["day"], a["trip_start"])
+        for a in anomalous:
+            sdf = _seq_df_for(a["day"])
+            if sdf is not None:
+                seq = _trip_sequence(sdf, societe, a["line"], int(a["bus"]), a["day"], a["trip_start"])
                 a["problem_stops"] = _problem_stops(seq)
+            else:
+                a["problem_stops"] = {}
 
         if anomalous:
             # Un (ligne, bus, jour) distinct = un aller-retour Mongo (~1s) + un filtre Kalman
@@ -1981,10 +2009,10 @@ async def anomaly_explain(
                 keys = keys[:max_tracks]
             workers = max(1, int(os.getenv("DETOUR_WORKERS", "8") or 8))
 
-            def _check(key):
+            def _check(key, ws_groups):
                 line_, bus_, day_ = key
                 try:
-                    built = _build_gps_track(societe, line_, bus_, day_)
+                    built = _build_gps_track(societe, line_, bus_, day_, ws_groups=ws_groups)
                 except Exception:
                     built = None
                 if built is None:
@@ -2001,15 +2029,29 @@ async def anomaly_explain(
                         a["detour"] = detour
 
             if keys:
+                # Traitement PAR JOUR : quand les pings viennent du webservice (Mongo
+                # absent en production, ou jour plus récent que le dataset), UN appel
+                # getPingsForDay couvre tous les bus de la journée -- le pré-chargement
+                # par jour évite de refaire ce même appel pour chaque bus-jour vérifié,
+                # et une seule journée de pings réside en mémoire à la fois.
+                latest_db_day = model_manager.get_latest_day() or ""
+                days_order = sorted({k[2] for k in keys}, reverse=True)
                 with ThreadPoolExecutor(max_workers=workers) as pool:
-                    list(pool.map(_check, keys))
+                    for day_ in days_order:
+                        day_keys = [k for k in keys if k[2] == day_]
+                        ws_groups = None
+                        if time.time() < _mongo_gps_down_until or str(day_) > str(latest_db_day):
+                            ws_groups = _ws_day_groups(societe, day_)
+                        list(pool.map(lambda k: _check(k, ws_groups), day_keys))
 
         worst_trip, sequence = None, []
-        if anomalous and df is not None:
+        if anomalous:
             worst = max(anomalous, key=lambda r: r["anomaly_strength"])
             worst_trip = worst
-            sequence = _trip_sequence(df, societe, worst["line"], int(worst["bus"]),
-                                      worst["day"], worst["trip_start"])
+            wdf = _seq_df_for(worst["day"])
+            if wdf is not None:
+                sequence = _trip_sequence(wdf, societe, worst["line"], int(worst["bus"]),
+                                          worst["day"], worst["trip_start"])
 
         # Median trip duration for normal trips on this line (baseline for comparison) --
         # only meaningful PER LINE (different routes have different normal durations), so
@@ -2166,6 +2208,28 @@ def _scheduled_departures() -> dict:
     global _schedule_cache
     if _schedule_cache is not None:
         return _schedule_cache
+
+    # Artefact JSON embarqué d'abord -- les horaires publiés sont des données de référence
+    # STATIQUES (comme les modèles entraînés), et MongoDB n'est pas joignable depuis la
+    # production (Render n'a que les webservices, décision utilisateur 2026-07-17). Le
+    # fichier est (ré)généré ci-dessous à chaque fois que Mongo EST joignable (dev local),
+    # committé, et copié dans l'image (voir Dockerfile.render) -- même workflow
+    # "réentraîner localement -> redéployer" que le reste des artefacts.
+    sched_path = Path("data/reference/schedules.json")
+    if sched_path.exists():
+        try:
+            with open(sched_path, encoding="utf-8") as f:
+                rows = json.load(f)
+            _schedule_cache = {
+                (r["societe"], r["line"]): {
+                    "ALLER": r.get("ALLER"), "RETOUR": r.get("RETOUR"),
+                    "multi_variant": bool(r.get("multi_variant")),
+                } for r in rows
+            }
+            return _schedule_cache
+        except Exception as e:
+            print(f"  schedules.json illisible ({e}) -- tentative Mongo")
+
     cache: dict = {}
     alias_to_canon = {alias: canon for canon, aliases in rdb.CANONICAL_COMPANIES.items() for alias in aliases}
     try:
@@ -2202,6 +2266,16 @@ def _scheduled_departures() -> dict:
                 "ALLER": aller_time, "RETOUR": retour_time,
                 "multi_variant": len(variants) > 1,
             }
+        # Mongo joignable -> (ré)écrire l'artefact pour le prochain build d'image
+        try:
+            sched_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(sched_path, "w", encoding="utf-8") as f:
+                json.dump([
+                    {"societe": soc, "line": ln, **vals}
+                    for (soc, ln), vals in sorted(cache.items())
+                ], f, ensure_ascii=False, indent=1)
+        except Exception as e:
+            print(f"  schedules.json non écrit: {e}")
     except Exception as e:
         print(f"  _scheduled_departures unavailable: {e}")
     _schedule_cache = cache
@@ -2674,16 +2748,69 @@ async def forecast_delay(
         raise HTTPException(status_code=400, detail=str(e))
 
 # GPS track / gaps / examples — for the event-driven signal-loss demo
-def _build_gps_track(societe: str, line: str, bus: int, day: str):
+# MongoDB n'existe pas en production (Render) -- seules les webservices de la plateforme
+# y sont joignables (WEBSERVICE_URL, décision utilisateur 2026-07-17 : "je n'essaie pas
+# d'atteindre MongoDB directement, j'utilise ces webservices"). Ce drapeau évite de payer
+# les ~30s de server-selection PyMongo à CHAQUE bus-jour vérifié quand Mongo est absent :
+# premier échec -> Mongo considéré indisponible 10 min, tous les appels suivants basculent
+# immédiatement sur le webservice.
+_mongo_gps_down_until = 0.0
+
+
+def _ws_day_groups(societe: str, day: str) -> Optional[dict]:
+    """Pings du webservice pour (societe, day), groupés par (line, bus) -- UN seul appel
+    pour tous les bus-jours de cette journée (le service ne filtre pas par ligne/bus).
+    None si le webservice n'est pas configuré/joignable/n'a pas ce jour."""
+    if not ws.WEBSERVICE_URL:
+        return None
+    try:
+        pings = ws.get_pings_for_day(day, societe=societe)
+    except Exception as e:
+        print(f"  webservice pings indisponibles ({societe}/{day}): {e}")
+        return None
+    return ws.group_pings_by_bus_line(pings) if pings else None
+
+
+def _build_gps_track(societe: str, line: str, bus: int, day: str, ws_groups: dict | None = None):
     """Raw pings -> cleaned -> projected -> Kalman-filtered track.
 
     Returns (g_filtered, stops_frame, route_len_m) or None if no usable data.
     Same chain used by /api/predict/gps-fallback; kept in one place.
+
+    Source des pings : MongoDB (Historique_pos) en local ; repli sur le webservice
+    getPingsForDay quand Mongo est indisponible (production Render) OU quand Mongo n'a
+    pas ce jour (jour "live" pas encore inséré par le traitement de nuit). `ws_groups`
+    (sortie de _ws_day_groups) évite de refaire l'appel webservice pour chaque bus d'une
+    même journée quand l'appelant vérifie plusieurs bus-jours (boucle détours).
     """
+    global _mongo_gps_down_until
     cfg = fdn.Config()
-    g = fdn.load_pings(get_db("Historique_pos"), f"d{day}", line, int(bus))
-    if len(g) == 0:
-        return None
+    g = None
+    if time.time() >= _mongo_gps_down_until:
+        try:
+            g = fdn.load_pings(get_db("Historique_pos"), f"d{day}", line, int(bus))
+        except Exception as e:
+            _mongo_gps_down_until = time.time() + 600
+            print(f"  Mongo GPS injoignable ({e.__class__.__name__}) -- repli webservice pendant 10 min")
+            g = None
+    if g is None or len(g) == 0:
+        rows = None
+        if ws_groups is not None:
+            rows = ws_groups.get((str(line), str(bus)))
+        else:
+            groups = _ws_day_groups(societe, day)
+            if groups:
+                rows = groups.get((str(line), str(bus)))
+        if not rows:
+            return None
+        g = pd.DataFrame(ws.pings_to_score_live_rows(rows))
+        # Mêmes colonnes que load_pings (t/lat/lon/speed/voyage) ; horodatages du service
+        # avec offset -> naïfs, comme partout ailleurs dans le pipeline (voir
+        # _score_all_gps_live pour l'erreur réelle qui a motivé ce tz_localize).
+        g["t"] = pd.to_datetime(g["t"]).dt.tz_localize(None)
+        g = g.dropna(subset=["t", "lat", "lon"]).sort_values("t").reset_index(drop=True)
+        if len(g) == 0:
+            return None
     g = fdn.clean_pings(g, cfg)
     usable = _load_usable_lines()
     key = (line, societe)
