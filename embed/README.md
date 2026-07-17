@@ -32,26 +32,39 @@ Every proxied request is pinned server-side to `$_SESSION['winicari_company']` �
 `societe` query param sent from the client is ignored on purpose, so one company's
 session can never read another's data by editing the URL.
 
-## Views
+## Views (mirrors the Streamlit dashboard's anomaly page, tab for tab)
 
-- **Trajets & analyse** — merges the old "today's flagged trips" quick view with a full
-  filter/drill-down panel (line, bus, day, manual date, "all lines", direction). The
-  *default* landing view uses `/api/current-anomalies` (fast, today only); clicking
-  **Analyser** runs the full `/api/anomaly-explain` with `check_detours=true`, which can
-  take 30-40s on a heavily-flagged line or "all lines" — that's why it's not the default.
+- **Trajets signalés** — today's live-scored flagged trips (green pulsing badge when the
+  webservice day is live, falls back to the last historical day otherwise) + the full
+  anomaly history below it (sort selector, category filter pills, client-side
+  pagination). Every card has a "Voir la carte du trajet" button.
+- **Expliquer un bus** — filters (line incl. "Toutes les lignes", bus, known-day
+  dropdown, free manual date, direction). Picking a line immediately shows the **line
+  verdict** (bon état / à surveiller / à risque, same thresholds as Streamlit) and the
+  **reference trip** block (per-direction metrics + map — "what a NORMAL trip looks
+  like"). **Analyser** runs `/api/anomaly-explain` with `check_detours=true` (can take
+  30-40s+ on a heavily-flagged line or "all lines"; inline brain animation keeps the
+  rest of the page usable). Results carry the low-data model warnings, metric help
+  tooltips (hover the ⓘ), sort, category pills, and per-trip maps.
 - **Tendances** — anomaly rate by line / by hour, via Chart.js (loaded lazily from CDN).
 - **Anomalies billetterie** — ticket-anomaly patterns + admin/client view toggle.
 - **Chauffeurs** — driver leaderboard + code lookup, with the same "for reference only,
   not a verdict" disclaimer as the main dashboard.
 
+## Trip map
+
+Leaflet + OpenStreetMap tiles (free, no API key), lazy-loaded from CDN like Chart.js.
+Faithful to the Streamlit map: numbered stops in real visit order (RETOUR = reverse),
+color code (green normal / blue long dwell ≥10min / amber signal loss ≥5min / red
+unserved / gray suspect coords), size = dwell+signal-loss, Départ/Terminus labels,
+planned-route line, detour overlay (orange = out leg, purple = back leg) with the
+detour warning banner, and the first/last-tracked-passage caption.
+
 ## Known gaps / things to revisit
 
-- No trip map (the Streamlit dashboard renders one via Plotly) — this build shows
-  stop-level chips (dwell, signal loss, detour, etc.) as text instead. Add one later if
-  needed; no mapping API key was in scope for this pass.
-- Chart.js is loaded from a public CDN (`cdn.jsdelivr.net`) — if the host environment
-  blocks external script tags, charts degrade gracefully (metrics/lists still show, with
-  a "graphs unavailable" notice) rather than breaking the page.
+- Chart.js and Leaflet are loaded from public CDNs (`cdn.jsdelivr.net`, `unpkg.com`) —
+  if the host environment blocks external script tags, charts/maps degrade gracefully
+  (metrics/lists still show, with an "unavailable" notice) rather than breaking the page.
 - Driver/Chauffeurs data depends on the `attach_driver_codes_to_trips` backfill having
   been run against whichever reference DB is deployed — confirm it's present in
   production before relying on it (it may be empty if the production DB predates that

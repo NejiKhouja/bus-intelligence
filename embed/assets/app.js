@@ -197,13 +197,123 @@ function verticalBarChart(canvas, labels, values, color) {
     });
 }
 
+// ── Leaflet (trip map) -- lazy CDN load, same pattern as Chart.js ───────────────────────
+// Free OSM tiles, no API key -- mirrors the Streamlit map (plotly "open-street-map" style).
+let _leafletPromise = null;
+function ensureLeaflet() {
+    if (window.L) return Promise.resolve();
+    if (_leafletPromise) return _leafletPromise;
+    _leafletPromise = new Promise((resolve, reject) => {
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+        document.head.appendChild(css);
+        const s = document.createElement("script");
+        s.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+    });
+    return _leafletPromise;
+}
+
+// Mirrors src/dashboard/app.py::render_trip_map -- same colors, same thresholds, same
+// visit-order semantics (RETOUR = seq décroissant), same legend, same detour overlay.
+function stopColor(s) {
+    if (s.coord_suspect) return "#9ca3af";
+    if (!s.matched) return "#ef4444";
+    if ((s.dark_min || 0) >= 5) return "#f59e0b";
+    if ((s.dwell_min || 0) >= 10) return "#2563eb";
+    return "#22c55e";
+}
+function renderTripMap(container, seqList, direction, detour) {
+    const rows = (seqList || []).filter((s) => s.lat && s.lon);
+    if (!rows.length) {
+        container.innerHTML = `<div class="wc-banner info">${icon("info")}Coordonnées GPS non disponibles pour les arrêts de cette ligne.</div>`;
+        return;
+    }
+    const dot = (c) => `<span class="wc-legend-dot" style="background:${c}"></span>`;
+    let html = `<p class="wc-muted wc-map-legend">Chaque cercle représente un arrêt, numéroté dans l'ordre de passage (départ → terminus). La taille reflète la durée d'immobilisation + perte de signal.<br>
+        ${dot("#22c55e")}Normal ${dot("#2563eb")}Immobilisation longue (≥10 min) ${dot("#f59e0b")}Perte de signal (≥5 min) ${dot("#ef4444")}Arrêt non desservi ${dot("#9ca3af")}Coordonnées douteuses</p>`;
+
+    if (detour && detour.track) {
+        const t = (v) => v ? fmtTime(v) : "—";
+        html += `<div class="wc-banner warn">${icon("detour")}Détour non-officiel détecté : le bus a quitté son point de départ à <strong>${t(detour.left_at)}</strong>, s'est éloigné de ~${detour.distance_km} km (point le plus éloigné à ${t(detour.farthest_at)}), puis est revenu à <strong>${t(detour.returned_at)}</strong> — ~${(detour.duration_min || 0).toFixed(0)} min au total. Tracé orange = aller, violet = retour.</div>`;
+    }
+    html += `<div class="wc-map"></div>`;
+
+    // Ordre de passage réel : les seq suivent la géométrie ALLER, donc un RETOUR visite
+    // les arrêts en seq décroissant (même logique que le dashboard Streamlit).
+    const sorted = [...rows].sort((a, b) => direction === "RETOUR" ? b.seq - a.seq : a.seq - b.seq);
+    const tracked = sorted.filter((s) => s.arrival);
+    if (tracked.length) {
+        const first = tracked[0], last = tracked[tracked.length - 1];
+        html += `<p class="wc-muted">${icon("pin")}Premier passage suivi : <strong>${fmtTime(first.arrival)}</strong> (${esc(first.stop)}) → dernier passage suivi : <strong>${fmtTime(last.arrival)}</strong> (${esc(last.stop)})</p>`;
+    }
+    container.innerHTML = html;
+
+    const mapEl = container.querySelector(".wc-map");
+    const map = L.map(mapEl, { scrollWheelZoom: false });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19,
+    }).addTo(map);
+
+    // Itinéraire prévu (ligne grise reliant les arrêts dans l'ordre de passage)
+    const latlngs = sorted.map((s) => [s.lat, s.lon]);
+    L.polyline(latlngs, { color: "#94a3b8", weight: 3, opacity: .8 }).addTo(map);
+
+    // Détour : aller (orange) et retour (violet) tracés séparément, comme dans Streamlit --
+    // un seul tracé superposerait les deux passages et rendrait le sens illisible.
+    if (detour && detour.track) {
+        const legs = [[detour.leg_out || detour.track, "#f97316"], [detour.leg_back || [], "#a855f7"]];
+        for (const [leg, color] of legs) {
+            if (leg && leg.length) {
+                L.polyline(leg.map((p) => [p.lat, p.lon]), { color, weight: 3 }).addTo(map);
+            }
+        }
+    }
+
+    sorted.forEach((s, i) => {
+        const color = stopColor(s);
+        const size = Math.min(28, Math.max(16, (s.dwell_min || 0) + (s.dark_min || 0)));
+        const iconEl = L.divIcon({
+            className: "",
+            html: `<div class="wc-map-stop" style="background:${color};width:${size}px;height:${size}px;line-height:${size}px">${i + 1}</div>`,
+            iconSize: [size, size],
+            iconAnchor: [size / 2, size / 2],
+        });
+        const popup = `<b>${i + 1} : ${esc(s.stop)}</b><br>
+            Passage : ${s.arrival ? fmtTime(s.arrival) : "—"}<br>
+            Immobilisation : ${(s.dwell_min || 0).toFixed(1)} min<br>
+            Perte de signal : ${(s.dark_min || 0).toFixed(1)} min<br>
+            Écart de position : ${(s.dist_m || 0).toFixed(0)} m<br>
+            Suivi : ${s.matched ? "oui" : "non"}${s.coord_suspect ? "<br><i>Coordonnées d'arrêt douteuses</i>" : ""}`;
+        L.marker([s.lat, s.lon], { icon: iconEl }).addTo(map).bindPopup(popup);
+    });
+
+    // Départ / terminus dans le sens de circulation (mêmes couleurs que Streamlit)
+    const mkEnd = (s, color, label) => {
+        const ic = L.divIcon({
+            className: "",
+            html: `<div class="wc-map-end" style="border-color:${color}"><span style="color:${color}">${label}</span></div>`,
+            iconSize: [70, 30], iconAnchor: [35, 34],
+        });
+        L.marker([s.lat, s.lon], { icon: ic, interactive: false }).addTo(map);
+    };
+    mkEnd(sorted[0], "#16a34a", `Départ${direction ? " (" + direction + ")" : ""}`);
+    mkEnd(sorted[sorted.length - 1], "#dc2626", "Terminus");
+
+    map.fitBounds(L.latLngBounds(latlngs).pad(0.15));
+}
+
 // ── Shared: alert card rendering (used by Trips view, Chauffeurs view) ─────────────────
 function rowCategories(a) {
     const cats = [a.top_feature ?? null];
     if (a.has_detour) cats.push("unofficial_detour");
     return cats;
 }
-function renderAlertCard(a, { showDriverStatsHint = true } = {}) {
+function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}) {
     const sev = SEV_META[a.severity] || SEV_META.medium;
     const dep = fmtTime(a.trip_start), arr = fmtTime(a.trip_end);
     const dur = a.trip_duration_min || a.total_elapsed_min || 0;
@@ -257,7 +367,36 @@ function renderAlertCard(a, { showDriverStatsHint = true } = {}) {
     }
 
     html += `</div>`;
-    return el(html);
+    const card = el(html);
+
+    // Bouton carte -- même comportement que le dashboard Streamlit : la séquence par arrêt
+    // est chargée À LA DEMANDE (/api/trip-detail), pas avec la liste (une carte Leaflet par
+    // carte d'alerte chargée d'office serait ruineux en DOM et en appels API).
+    if (withMap && a.trip_start) {
+        const btn = el(`<button class="wc-btn-secondary wc-btn-map">${icon("pin")}Voir la carte du trajet</button>`);
+        const mapBox = el(`<div class="wc-map-holder"></div>`);
+        let loaded = false;
+        btn.addEventListener("click", async () => {
+            if (loaded) { mapBox.hidden = !mapBox.hidden; return; }
+            btn.disabled = true;
+            mapBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement de la carte…</p>`;
+            try {
+                await ensureLeaflet();
+                const d = await api("/api/trip-detail", {
+                    line: a.line, bus: a.bus, day: a.day, trip_start: a.trip_start,
+                });
+                renderTripMap(mapBox, d.sequence, a.dir, (d.problem_stops || {}).unofficial_detour || a.detour);
+                loaded = true;
+            } catch (e) {
+                mapBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Carte indisponible : ${esc(e.message)}</div>`;
+            } finally {
+                btn.disabled = false;
+            }
+        });
+        card.appendChild(btn);
+        card.appendChild(mapBox);
+    }
+    return card;
 }
 
 function categoryFilterPills(container, anomalies, onChange) {
@@ -278,131 +417,64 @@ function categoryFilterPills(container, anomalies, onChange) {
     return () => anomalies.filter((a) => rowCategories(a).some((c) => selected.has(c)));
 }
 
-// ── View: Trips & Analyse (merged Trajets signalés + Expliquer un bus) ─────────────────
+// ── Tri des anomalies (mêmes options que le dashboard Streamlit) ────────────────────────
+const SORT_OPTIONS = {
+    date_desc: "Plus récent d'abord",
+    date_asc: "Plus ancien d'abord",
+    severity_desc: "Gravité décroissante",
+    severity_asc: "Gravité croissante",
+    duration_desc: "Durée décroissante",
+};
+const SEV_RANK = { high: 3, medium: 2, low: 1 };
+function sortAnomalies(list, key) {
+    const dur = (a) => a.trip_duration_min || a.total_elapsed_min || 0;
+    const day = (a) => a.day || "";
+    const sev = (a) => SEV_RANK[a.severity] || 0;
+    const sorted = [...list];
+    if (key === "date_asc") sorted.sort((a, b) => day(a).localeCompare(day(b)) || sev(b) - sev(a));
+    else if (key === "severity_desc") sorted.sort((a, b) => sev(b) - sev(a) || day(b).localeCompare(day(a)));
+    else if (key === "severity_asc") sorted.sort((a, b) => sev(a) - sev(b) || day(b).localeCompare(day(a)));
+    else if (key === "duration_desc") sorted.sort((a, b) => dur(b) - dur(a));
+    else sorted.sort((a, b) => day(b).localeCompare(day(a)) || sev(b) - sev(a));
+    return sorted;
+}
+
+// ── View: Trajets signalés (aujourd'hui en direct + historique complet) ─────────────────
+// Miroir de l'onglet tab_live du dashboard Streamlit -- séparé de "Expliquer un bus"
+// (décision utilisateur 2026-07-17 : revenir aux 2 onglets comme dans Streamlit).
 async function renderTripsView(root) {
-    root.innerHTML = `
-    <div class="wc-card">
-        <div class="wc-filters">
-            <div class="wc-field">
-                <label>Ligne</label>
-                <select id="wc-t-line"><option value="">Toutes les lignes</option></select>
-            </div>
-            <div class="wc-field">
-                <label>Bus</label>
-                <select id="wc-t-bus"><option value="">Tous les bus</option></select>
-            </div>
-            <div class="wc-field">
-                <label>Jour</label>
-                <select id="wc-t-day"><option value="">Tous les jours (historique + aujourd'hui)</option></select>
-            </div>
-            <div class="wc-field">
-                <label>Ou date précise</label>
-                <input type="date" id="wc-t-manual-date">
-            </div>
-            <div class="wc-field">
-                <label>Direction</label>
-                <select id="wc-t-dir"><option value="">Les deux</option><option value="ALLER">ALLER</option><option value="RETOUR">RETOUR</option></select>
-            </div>
-            <div class="wc-field">
-                <label>&nbsp;</label>
-                <button id="wc-t-analyze">Analyser</button>
-            </div>
-        </div>
-        <p class="wc-muted" id="wc-t-hint">Chargement des lignes…</p>
-    </div>
-    <div id="wc-t-badge"></div>
-    <div id="wc-t-results"></div>
-    `;
-
-    const lineSel = root.querySelector("#wc-t-line");
-    const busSel = root.querySelector("#wc-t-bus");
-    const daySel = root.querySelector("#wc-t-day");
-    const manualDate = root.querySelector("#wc-t-manual-date");
-    const dirSel = root.querySelector("#wc-t-dir");
-    const hint = root.querySelector("#wc-t-hint");
-
-    api("/api/lines-ranked").then((d) => {
-        for (const line of (d.lines || [])) {
-            lineSel.appendChild(el(`<option value="${esc(line)}">${esc(line)}</option>`));
-        }
-        hint.textContent = "Choisissez une ligne précise ou laissez « Toutes les lignes » et cliquez Analyser.";
-    }).catch(() => { hint.textContent = "Impossible de charger la liste des lignes."; });
-
-    lineSel.addEventListener("change", async () => {
-        busSel.innerHTML = `<option value="">Tous les bus</option>`;
-        daySel.innerHTML = `<option value="">Tous les jours (historique + aujourd'hui)</option>`;
-        if (!lineSel.value) return;
-        const [busesD, daysD] = await Promise.all([
-            api("/api/buses-for-line", { line: lineSel.value }),
-            api("/api/days-for-line", { line: lineSel.value }),
-        ]);
-        for (const b of (busesD.buses || [])) busSel.appendChild(el(`<option value="${esc(b)}">${esc(b)}</option>`));
-        for (const d of (daysD.days || [])) daySel.appendChild(el(`<option value="${esc(d)}">${esc(fmtDay(d))}</option>`));
-    });
-
-    async function runAnalysis() {
-        const line = lineSel.value || null;
-        const bus = busSel.value || null;
-        const dir = dirSel.value || null;
-        let day = daySel.value || null;
-        if (manualDate.value) day = manualDate.value.replace(/-/g, "");
-
-        showLoadingIn(root.querySelector("#wc-t-results"));
-        try {
-            // check_detours always on for an explicit "Analyser" click -- measured ~30-40s
-            // on a heavily-flagged single line, and much more across "all lines" (confirmed
-            // 2026-07-15: minutes-long on a large operator) -- acceptable for a deliberate
-            // deep-dive click backed by the loading animation, NOT for the page's default
-            // landing view (see the fast path below).
-            const res = await api("/api/anomaly-explain", { line, bus, day, dir, check_detours: true });
-            renderTripsResults(root, res);
-        } catch (e) {
-            root.querySelector("#wc-t-results").innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur d'analyse : ${esc(e.message)}</div>`;
-        } finally {
-            stopLoading();
-        }
-    }
-    root.querySelector("#wc-t-analyze").addEventListener("click", runAnalysis);
-
-    // Fast default landing view: today's live-scored flagged trips only (no detour check,
-    // no "all lines + all history" scan) -- mirrors the old lightweight "Trajets signalés"
-    // list. The filters + Analyser button above are the deliberate, slower deep-dive (the
-    // old "Expliquer un bus"), which is the actual merge the user asked for: one view, but
-    // the expensive path only runs when asked for.
-    (async () => {
-        const resBox = root.querySelector("#wc-t-results");
-        resBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement des trajets signalés aujourd'hui…</p>`;
-        try {
-            const today = await api("/api/current-anomalies", {});
-            const freshness = today.live
-                ? `<div class="wc-banner success">${LIVE_DOT}Données en direct — ${fmtDay(today.date)}</div>`
-                : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`;
-            if (!today.anomalies || !today.anomalies.length) {
-                resBox.innerHTML = freshness + `<div class="wc-banner success">${icon("check")}Aucune anomalie aujourd'hui pour cet opérateur.</div>`
-                    + `<div id="wc-t-history"></div>`;
-            } else {
-                resBox.innerHTML = `<div class="wc-card">${freshness}<div id="wc-t-pills"></div><div id="wc-t-cards"></div></div>
-                    <div id="wc-t-history"></div>`;
-                const cardsBox = resBox.querySelector("#wc-t-cards");
-                const pillsBox = resBox.querySelector("#wc-t-pills");
-                function draw(list) {
-                    cardsBox.innerHTML = "";
-                    for (const a of list) cardsBox.appendChild(renderAlertCard(a));
-                }
-                const getFiltered = categoryFilterPills(pillsBox, today.anomalies, draw);
-                draw(getFiltered());
+    root.innerHTML = `<div id="wc-t-results"></div>`;
+    const resBox = root.querySelector("#wc-t-results");
+    resBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement des trajets signalés aujourd'hui…</p>`;
+    try {
+        const today = await api("/api/current-anomalies", {});
+        const freshness = today.live
+            ? `<div class="wc-banner success">${LIVE_DOT}Données en direct — ${fmtDay(today.date)}</div>`
+            : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`;
+        if (!today.anomalies || !today.anomalies.length) {
+            resBox.innerHTML = freshness + `<div class="wc-banner success">${icon("check")}Aucune anomalie aujourd'hui pour cet opérateur.</div>`
+                + `<div id="wc-t-history"></div>`;
+        } else {
+            resBox.innerHTML = `<div class="wc-card"><h4>Trajets ce jour</h4>${freshness}<div id="wc-t-pills"></div><div id="wc-t-cards"></div></div>
+                <div id="wc-t-history"></div>`;
+            const cardsBox = resBox.querySelector("#wc-t-cards");
+            const pillsBox = resBox.querySelector("#wc-t-pills");
+            function draw(list) {
+                cardsBox.innerHTML = "";
+                for (const a of list) cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
             }
-            loadHistory(resBox.querySelector("#wc-t-history"));
-        } catch (e) {
-            resBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+            const getFiltered = categoryFilterPills(pillsBox, today.anomalies, draw);
+            draw(getFiltered());
         }
-    })();
+        loadHistory(resBox.querySelector("#wc-t-history"));
+    } catch (e) {
+        resBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+    }
 
     // Historique complet des anomalies sous la vue du jour -- même structure que l'onglet
-    // "Trajets signalés" du dashboard Streamlit (aujourd'hui en haut, historique dessous),
-    // demandé explicitement 2026-07-17. Chargé séparément APRÈS la vue du jour pour que le
-    // direct s'affiche vite ; paginé côté client (bouton "Afficher plus") pour ne pas
-    // insérer des centaines de cartes DOM d'un coup.
+    // "Trajets signalés" du dashboard Streamlit. Chargé séparément APRÈS la vue du jour
+    // pour que le direct s'affiche vite ; paginé côté client (bouton "Afficher plus") pour
+    // ne pas insérer des centaines de cartes DOM d'un coup.
     async function loadHistory(box) {
         box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
             <p class="wc-muted"><span class="wc-spin"></span> Chargement de l'historique…</p></div>`;
@@ -421,61 +493,274 @@ async function renderTripsView(root) {
             return;
         }
         box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
+            <div class="wc-sort-row"><label>Trier par</label><select id="wc-th-sort">${
+                Object.entries(SORT_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")
+            }</select></div>
             <div id="wc-th-pills"></div><div id="wc-th-cards"></div>
             <button id="wc-th-more" class="wc-btn-secondary" style="margin-top:10px">Afficher plus</button></div>`;
         const cardsBox = box.querySelector("#wc-th-cards");
         const pillsBox = box.querySelector("#wc-th-pills");
         const moreBtn = box.querySelector("#wc-th-more");
+        const sortSel = box.querySelector("#wc-th-sort");
         const PAGE = 15;
         let shown = PAGE;
         let current = all;
         function draw() {
             cardsBox.innerHTML = "";
-            const sorted = [...current].sort((a, b) => (b.day || "").localeCompare(a.day || ""));
-            for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a));
+            const sorted = sortAnomalies(current, sortSel.value);
+            for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
             moreBtn.style.display = shown < sorted.length ? "" : "none";
             moreBtn.textContent = `Afficher plus (${Math.min(shown, sorted.length)}/${sorted.length})`;
         }
         moreBtn.addEventListener("click", () => { shown += PAGE; draw(); });
+        sortSel.addEventListener("change", () => { shown = PAGE; draw(); });
         const getFiltered = categoryFilterPills(pillsBox, all, (list) => { current = list; shown = PAGE; draw(); });
         current = getFiltered();
         draw();
     }
 }
 
-function renderTripsResults(root, res) {
-    const badgeBox = root.querySelector("#wc-t-badge");
-    const resBox = root.querySelector("#wc-t-results");
-    badgeBox.innerHTML = "";
-    resBox.innerHTML = "";
-
-    if (!res || res.anomaly_count === 0) {
-        resBox.innerHTML = `<div class="wc-banner success">${icon("check")}Aucune anomalie trouvée pour ce périmètre.</div>`;
-        return;
-    }
-
-    const pct = res.total_trips ? (100 * res.anomaly_count / res.total_trips) : 0;
-    resBox.innerHTML = `
+// ── View: Expliquer un bus (filtres + verdict de ligne + référence + analyse) ───────────
+// Miroir de l'onglet tab_explain du dashboard Streamlit : verdict de ligne, trajet de
+// référence avec carte, avertissements modèle, métriques avec explications, tri,
+// catégories, cartes détaillées avec carte par trajet.
+async function renderExplainView(root) {
+    root.innerHTML = `
     <div class="wc-card">
-        <div class="wc-metrics">
-            <div class="wc-metric"><div class="wc-metric-label">Trajets analysés</div><div class="wc-metric-value">${res.total_trips}</div></div>
-            <div class="wc-metric"><div class="wc-metric-label">Trajets anormaux</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
-            ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label">Durée normale (médiane)</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
+        <div class="wc-filters">
+            <div class="wc-field">
+                <label>Ligne</label>
+                <select id="wc-e-line"><option value="">Toutes les lignes</option></select>
+            </div>
+            <div class="wc-field">
+                <label>Bus</label>
+                <select id="wc-e-bus"><option value="">Tous les bus</option></select>
+            </div>
+            <div class="wc-field">
+                <label>Jour</label>
+                <select id="wc-e-day"><option value="">Tous les jours</option></select>
+            </div>
+            <div class="wc-field">
+                <label title="Prioritaire sur le menu « Jour » si renseignée — utile pour un jour tout juste arrivé via les webservices en direct et pas encore dans la liste précalculée.">Ou date précise</label>
+                <input type="date" id="wc-e-manual-date">
+            </div>
+            <div class="wc-field">
+                <label>Direction</label>
+                <select id="wc-e-dir"><option value="">Les deux</option><option value="ALLER">ALLER</option><option value="RETOUR">RETOUR</option></select>
+            </div>
+            <div class="wc-field">
+                <label>&nbsp;</label>
+                <button id="wc-e-analyze">Analyser</button>
+            </div>
         </div>
-        <div class="wc-pills" id="wc-t-pills"></div>
-        <div id="wc-t-cards"></div>
-    </div>`;
+        <p class="wc-muted" id="wc-e-hint">Chargement des lignes…</p>
+    </div>
+    <div id="wc-e-verdict"></div>
+    <div id="wc-e-reference"></div>
+    <div id="wc-e-results"></div>
+    `;
 
-    const cardsBox = resBox.querySelector("#wc-t-cards");
-    const pillsBox = resBox.querySelector("#wc-t-pills");
+    const lineSel = root.querySelector("#wc-e-line");
+    const busSel = root.querySelector("#wc-e-bus");
+    const daySel = root.querySelector("#wc-e-day");
+    const manualDate = root.querySelector("#wc-e-manual-date");
+    const dirSel = root.querySelector("#wc-e-dir");
+    const hint = root.querySelector("#wc-e-hint");
+    const verdictBox = root.querySelector("#wc-e-verdict");
+    const refBox = root.querySelector("#wc-e-reference");
+    const resBox = root.querySelector("#wc-e-results");
 
-    function draw(list) {
-        cardsBox.innerHTML = "";
-        const sorted = [...list].sort((a, b) => (b.day || "").localeCompare(a.day || ""));
-        for (const a of sorted) cardsBox.appendChild(renderAlertCard(a));
+    api("/api/lines-ranked").then((d) => {
+        for (const line of (d.lines || [])) {
+            lineSel.appendChild(el(`<option value="${esc(line)}">${esc(line)}</option>`));
+        }
+        hint.textContent = "Choisissez une ligne précise ou laissez « Toutes les lignes » et cliquez Analyser.";
+    }).catch(() => { hint.textContent = "Impossible de charger la liste des lignes."; });
+
+    lineSel.addEventListener("change", async () => {
+        busSel.innerHTML = `<option value="">Tous les bus</option>`;
+        daySel.innerHTML = `<option value="">Tous les jours</option>`;
+        verdictBox.innerHTML = "";
+        refBox.innerHTML = "";
+        if (!lineSel.value) return;
+        loadLineVerdict(lineSel.value);
+        loadReferenceTrip(lineSel.value);
+        try {
+            const [busesD, daysD] = await Promise.all([
+                api("/api/buses-for-line", { line: lineSel.value }),
+                api("/api/days-for-line", { line: lineSel.value }),
+            ]);
+            for (const b of (busesD.buses || [])) busSel.appendChild(el(`<option value="${esc(b)}">${esc(b)}</option>`));
+            for (const d of (daysD.days || [])) daySel.appendChild(el(`<option value="${esc(d)}">${esc(fmtDay(d))}</option>`));
+        } catch { /* les listes restent réduites, l'analyse marche quand même */ }
+    });
+
+    // Verdict global de la ligne -- mêmes seuils que Streamlit : l'Isolation Forest est
+    // calibrée pour ~5% d'anomalies par construction, donc <=7% = bon état, <=15% = à
+    // surveiller, au-delà = risque élevé. Delta affiché vs cette base de 5%.
+    async function loadLineVerdict(line) {
+        verdictBox.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> Évaluation de la ligne…</p></div>`;
+        let pat;
+        try { pat = await api("/api/anomaly-patterns", { line }); }
+        catch { verdictBox.innerHTML = ""; return; }
+        if (!pat || pat.total_trips < 5) {
+            verdictBox.innerHTML = pat && pat.total_trips
+                ? `<div class="wc-banner info">${icon("info")}Ligne ${esc(line)} : seulement ${pat.total_trips} trajet(s) enregistré(s) — pas assez de données pour juger l'état général de la ligne.</div>`
+                : "";
+            return;
+        }
+        const rate = pat.overall_rate;
+        let cls = "success", label = "Ligne en bon état", ic = "check";
+        if (rate > 0.15) { cls = "error"; label = "Ligne à risque élevé"; ic = "alert"; }
+        else if (rate > 0.07) { cls = "warn"; label = "Ligne à surveiller"; ic = "alert"; }
+        const delta = (rate - 0.05) * 100;
+        verdictBox.innerHTML = `
+        <div class="wc-card">
+            <div class="wc-banner ${cls}" style="margin-bottom:10px">${icon(ic)}<strong>${label}</strong> — Ligne ${esc(line)} · basé sur ${pat.total_trips.toLocaleString("fr-FR")} trajets analysés.</div>
+            <div class="wc-metrics">
+                <div class="wc-metric"><div class="wc-metric-label" title="Part des trajets signalés comme anormaux. Le modèle est calibré pour ~5% d'anomalies « naturelles » — le delta est mesuré par rapport à cette base.">Taux d'anomalie ⓘ</div>
+                    <div class="wc-metric-value">${(rate * 100).toFixed(1)} %</div>
+                    <div class="wc-metric-sub">${delta >= 0 ? "+" : ""}${delta.toFixed(1)} pts vs base 5%</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">Trajets signalés</div>
+                    <div class="wc-metric-value">${pat.total_anomalies} / ${pat.total_trips}</div></div>
+            </div>
+        </div>`;
     }
-    const getFiltered = categoryFilterPills(pillsBox, res.anomalies, draw);
-    draw(getFiltered());
+
+    // Trajet de référence -- « voici à quoi ressemble un trajet NORMAL sur cette ligne » :
+    // ancre de confiance, comme l'expander Streamlit, avec carte par direction.
+    async function loadReferenceTrip(line) {
+        refBox.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> Recherche d'un trajet de référence…</p></div>`;
+        let ref;
+        try { ref = await api("/api/reference-trip", { line }); }
+        catch { refBox.innerHTML = ""; return; }
+        const dirs = (ref || {}).directions || {};
+        const dirNames = Object.keys(dirs);
+        if (!dirNames.length) {
+            refBox.innerHTML = `<div class="wc-banner info">${icon("info")}Pas de trajet de référence disponible pour cette ligne.</div>`;
+            return;
+        }
+        let inner = `<details class="wc-ref"><summary>${icon("check")}Trajet de référence — à quoi ressemble un trajet NORMAL sur la ligne ${esc(line)} ?</summary>`;
+        if (dirNames.length === 2) {
+            const at = dirs["ALLER"] && dirs["ALLER"].trip, rt = dirs["RETOUR"] && dirs["RETOUR"].trip;
+            if (at && rt && at.bus === rt.bus && at.day === rt.day) {
+                inner += `<p class="wc-muted">Cycle complet : bus <strong>${esc(at.bus)}</strong>, le <strong>${fmtDay(at.day)}</strong> — l'ALLER et le RETOUR ci-dessous sont le même bus le même jour, donc la pause au terminus reflète une vraie pause entre l'arrivée et le redépart.</p>`;
+            }
+        } else {
+            inner += `<p class="wc-muted">Direction : <strong>${esc(dirNames[0])}</strong> (aucun trajet normal exploitable trouvé pour l'autre direction sur cette ligne).</p>`;
+        }
+        for (const d of dirNames) {
+            const entry = dirs[d];
+            const rt = entry.trip;
+            inner += `
+            <div class="wc-ref-dir">
+                <h4>${esc(d)}</h4>
+                <p class="wc-muted">Trajet réel, jugé normal par le modèle, choisi parmi les mieux suivis (${(rt.match_rate * 100).toFixed(0)}% des arrêts) avec une durée proche de la médiane de la ligne pour cette direction — comparez les anomalies ci-dessous à cette référence.</p>
+                <div class="wc-metrics">
+                    <div class="wc-metric"><div class="wc-metric-label">Bus</div><div class="wc-metric-value">${esc(rt.bus)}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">Jour</div><div class="wc-metric-value" style="font-size:15px">${fmtDay(rt.day)}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">Durée</div><div class="wc-metric-value">${fmtDuration(rt.duration_min)}</div>
+                        <div class="wc-metric-sub">médiane ligne : ${fmtDuration(rt.line_median_min)}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">Arrêts suivis</div><div class="wc-metric-value">${rt.n_stops}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">Immobilisation moy.</div><div class="wc-metric-value">${(rt.mean_dwell_min || 0).toFixed(1)} min</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">Départ → Arrivée</div><div class="wc-metric-value" style="font-size:15px">${fmtTime(rt.trip_start)} → ${fmtTime(rt.trip_end)}</div></div>
+                </div>
+                ${rt.typical_terminus_idle_min !== null && rt.typical_terminus_idle_min !== undefined ? `
+                <div class="wc-chip">${icon("parking")}Stationnement terminus typique pour cette direction : <strong>~${rt.typical_terminus_idle_min.toFixed(0)} min</strong> avant le vrai départ / après la vraie arrivée (médiane sur les trajets normaux).${rt.service_not_closed_threshold_min ? ` Au-delà d'environ <strong>${rt.service_not_closed_threshold_min.toFixed(0)} min</strong> (~2x la normale), un stationnement observé est probablement un <strong>service non clôturé</strong> (chauffeur n'ayant pas coupé le traceur) plutôt qu'une pause normale.` : ""}</div>` : ""}
+                <div class="wc-ref-map" data-dir="${esc(d)}"></div>
+            </div>`;
+        }
+        inner += `</details>`;
+        refBox.innerHTML = `<div class="wc-card">${inner}</div>`;
+
+        // Cartes chargées à l'OUVERTURE du bloc (pas d'office) -- Leaflet dans un <details>
+        // fermé mesure une taille nulle et rend une carte grise ; on attend le premier
+        // toggle pour instancier, puis c'est fait une fois pour toutes.
+        const details = refBox.querySelector("details");
+        let mapsDone = false;
+        details.addEventListener("toggle", async () => {
+            if (!details.open || mapsDone) return;
+            mapsDone = true;
+            try { await ensureLeaflet(); } catch { return; }
+            for (const d of dirNames) {
+                const holder = refBox.querySelector(`.wc-ref-map[data-dir="${CSS.escape(d)}"]`);
+                if (holder && dirs[d].sequence) renderTripMap(holder, dirs[d].sequence, d, null);
+            }
+        });
+    }
+
+    async function runAnalysis() {
+        const line = lineSel.value || null;
+        const bus = busSel.value || null;
+        const dir = dirSel.value || null;
+        let day = daySel.value || null;
+        if (manualDate.value) day = manualDate.value.replace(/-/g, "");
+
+        showLoadingIn(resBox);
+        try {
+            // check_detours toujours actif sur un clic "Analyser" délibéré -- mesuré
+            // ~30-40s sur une ligne très signalée (et plus sur "toutes les lignes"),
+            // assumé derrière l'animation de chargement.
+            const res = await api("/api/anomaly-explain", { line, bus, day, dir, check_detours: true });
+            renderExplainResults(res, { line, bus });
+        } catch (e) {
+            resBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur d'analyse : ${esc(e.message)}</div>`;
+        } finally {
+            stopLoading();
+        }
+    }
+    root.querySelector("#wc-e-analyze").addEventListener("click", runAnalysis);
+
+    function renderExplainResults(res, scope) {
+        if (!res || res.anomaly_count === 0) {
+            const label = scope.bus ? `Bus ${scope.bus} · Ligne ${scope.line}` : (scope.line ? `Ligne ${scope.line}` : "Toutes les lignes");
+            resBox.innerHTML = `<div class="wc-banner success">${icon("check")}${label} : aucun trajet anormal détecté — tout est dans la normale.</div>`;
+            return;
+        }
+
+        // Avertissement modèle à faible historique -- une seule fois pour la liste (mêmes
+        // textes que le dashboard Streamlit, voir i18n model_warning_*).
+        const a0 = res.anomalies[0];
+        let warning = "";
+        if (a0 && a0.model_low_data) {
+            const txt = (!a0.model_if_dedicated && !a0.model_lstm_dedicated)
+                ? "Cet opérateur n'a pas encore assez de trajets enregistrés pour un modèle d'anomalie dédié (ni Isolation Forest, ni autoencodeur LSTM). La détection ci-dessous compare donc ces trajets à l'ensemble du réseau (toutes sociétés et lignes confondues), <strong>pas spécifiquement à cette ligne ni à cet opérateur</strong> — le résultat n'est pas garanti à 100% et doit être interprété avec prudence. La précision s'améliorera automatiquement dès que cet opérateur accumulera plus de données."
+                : "Cet opérateur a assez de trajets pour son propre modèle Isolation Forest, mais pas encore assez pour un autoencodeur LSTM dédié — celui-ci retombe sur un modèle <strong>global</strong> entraîné sur toutes les sociétés confondues. Le résultat doit être interprété avec prudence — la précision s'améliorera automatiquement avec plus de données.";
+            warning = `<div class="wc-banner warn">${icon("alert")}${txt}</div>`;
+        }
+
+        const pct = res.total_trips ? (100 * res.anomaly_count / res.total_trips) : 0;
+        resBox.innerHTML = `
+        <div class="wc-card">
+            ${warning}
+            <div class="wc-metrics">
+                <div class="wc-metric"><div class="wc-metric-label" title="Nombre total de trajets dans la période sélectionnée pour ce périmètre.">Trajets analysés ⓘ</div><div class="wc-metric-value">${res.total_trips}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label" title="Trajets signalés comme anormaux par le modèle de détection (Isolation Forest + LSTM).">Trajets anormaux ⓘ</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
+                ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label" title="Durée médiane d'un trajet non anormal sur cette ligne — sert de référence pour juger si un trajet est trop long ou trop court.">Durée normale (médiane) ⓘ</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
+            </div>
+            <h4 style="margin-top:14px">Trajets signalés</h4>
+            <div class="wc-sort-row"><label>Trier par</label><select id="wc-e-sort">${
+                Object.entries(SORT_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")
+            }</select></div>
+            <div class="wc-pills" id="wc-e-pills"></div>
+            <div id="wc-e-cards"></div>
+        </div>`;
+
+        const cardsBox = resBox.querySelector("#wc-e-cards");
+        const pillsBox = resBox.querySelector("#wc-e-pills");
+        const sortSel = resBox.querySelector("#wc-e-sort");
+        let current = res.anomalies;
+        function draw() {
+            cardsBox.innerHTML = "";
+            for (const a of sortAnomalies(current, sortSel.value)) {
+                cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
+            }
+        }
+        sortSel.addEventListener("change", draw);
+        const getFiltered = categoryFilterPills(pillsBox, res.anomalies, (list) => { current = list; draw(); });
+        current = getFiltered();
+        draw();
+    }
 }
 
 // ── View: Tendances ──────────────────────────────────────────────────────────────────────
@@ -728,7 +1013,7 @@ async function renderDriversView(root) {
 }
 
 // ── Tab wiring ───────────────────────────────────────────────────────────────────────────
-const VIEWS = { trips: renderTripsView, trends: renderTrendsView, tickets: renderTicketsView, drivers: renderDriversView };
+const VIEWS = { trips: renderTripsView, explain: renderExplainView, trends: renderTrendsView, tickets: renderTicketsView, drivers: renderDriversView };
 
 function init() {
     const root = document.getElementById("wc-view-root");
