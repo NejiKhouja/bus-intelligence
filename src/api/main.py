@@ -41,6 +41,7 @@ if not api_logger.handlers:
 _process_start_time = time.time()
 _request_count = 0
 _model_version_info = mv.read_version_file()
+_app_ready = False
 
 # Déploiement config lue depuis l'environnement (voir docs/DEPLOYMENT.md)
 API_KEY = os.getenv("API_KEY")  # None = auth désactivée (dev local uniquement)
@@ -406,10 +407,13 @@ def _load_usable_lines() -> dict:
 # FastAPI App
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _app_ready  
     print("=" * 60)
     print("WiniCari AI API Starting...")
     print("=" * 60)
     model_manager.load_all()
+    _app_ready = True  
+    print("Application ready to serve requests")  
     yield
     print("Shutting down...")
 
@@ -509,19 +513,26 @@ def get_available_options(societe: Optional[str] = None, line: Optional[str] = N
 @app.get("/")
 @app.get("/health")
 async def health_check():
+    if not _app_ready:  
+        return JSONResponse(
+            status_code=503,
+            content={"status": "starting", "detail": "Models still loading"}
+        )
     return {
-        "status": "healthy",
-        "models_loaded": model_manager.is_loaded(),
-        "models": model_manager.get_loaded_models(),
+        "status": "healthy" if _app_ready else "starting",
+        "ready": _app_ready,
+        "models_loaded": model_manager.is_loaded() if _app_ready else [],
+        "models": model_manager.get_loaded_models() if _app_ready else [],
         "enabled_modules": sorted(ENABLED_MODULES),
-        "foundation_data": model_manager.get_latest_day() is not None,
-        "rows": model_manager.get_trips_count(),
-        "latest_day": model_manager.get_latest_day(),
+        "foundation_data": model_manager.get_latest_day() is not None if _app_ready else False,
+        "rows": model_manager.get_trips_count() if _app_ready else 0,
+        "latest_day": model_manager.get_latest_day() if _app_ready else None,
         "timestamp": datetime.now().isoformat(),
         "model_version": _model_version_info,
         "uptime_seconds": round(time.time() - _process_start_time, 1),
         "request_count": _request_count,
     }
+
 
 
 def demo_today() -> str:
