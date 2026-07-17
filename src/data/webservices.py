@@ -36,16 +36,64 @@ def is_day_ready(day: str) -> bool:
     return bool(r.json().get("ready", False))
 
 
+def _slim_ping(p: dict) -> dict | None:
+    """Ping brut du service -> dict compact à 7 champs (line/bus/t/lat/lon/speed/voyage).
+    Retourne None si le ping est inutilisable (pas de position/date/ligne/bus)."""
+    loc = p.get("localisation") or {}
+    bus = p.get("bus") or {}
+    svc = p.get("service") or {}
+    line = str(svc.get("codeLigne", "") or "")
+    bus_code = str(bus.get("code", "") or "")
+    if not line or not bus_code or loc.get("x") is None or loc.get("y") is None or not p.get("date"):
+        return None
+    speed = bus.get("vitesse")
+    return {
+        "line": line,
+        "bus": bus_code,
+        "t": p["date"],
+        "lat": float(loc["x"]),
+        "lon": float(loc["y"]),
+        "speed": float(speed) if speed is not None else None,
+        "voyage": svc.get("voyage"),
+    }
+
+
 def get_pings_for_day(day: str, societe: str | None = None) -> list[dict]:
-    """`day` au format YYYYMMDD. Pings bruts (forme réduite : _id, localisation, date,
-    service.codeLigne, service.voyage, bus.code, bus.vitesse) -- PAS filtrés par ligne/bus,
-    une société peut couvrir plusieurs lignes/bus en un seul appel."""
+    """`day` au format YYYYMMDD. Retourne des pings COMPACTS (voir _slim_ping) -- PAS
+    filtrés par ligne/bus, une société peut couvrir plusieurs lignes/bus en un seul appel.
+
+    Parsé en STREAMING (ijson) plutôt que r.json() : une journée complète d'une grosse
+    société fait ~10 Mo de JSON, soit 100-200 Mo une fois matérialisée en dicts Python --
+    c'est précisément ce qui tuait le worker Render 512MB par OOM à chaque tentative de
+    scoring en direct (constaté 2026-07-17 : crash juste après current-anomalies?societe=
+    S.T.S, la plus grosse société). En streaming, seuls les dicts compacts à 7 champs
+    survivent au parcours ; le JSON complet ne réside jamais en mémoire. Les floats ijson
+    (Decimal) sont convertis dans _slim_ping. Repli sur r.json() + compaction immédiate si
+    ijson n'est pas installé (env de dev pas encore à jour) -- même sortie, pic mémoire
+    supérieur."""
     params = {"day": day}
     if societe:
         params["societe"] = societe
-    r = requests.get(f"{_base_url()}/Service/getPingsForDay", params=params, timeout=120)
+    r = requests.get(f"{_base_url()}/Service/getPingsForDay", params=params,
+                     timeout=120, stream=True)
     r.raise_for_status()
-    return r.json()
+    try:
+        import ijson
+    except ImportError:
+        rows = [s for p in r.json() if (s := _slim_ping(p)) is not None]
+        return rows
+    # r.raw ne décompresse pas gzip/deflate par défaut -- sans ça ijson lirait des octets
+    # compressés et échouerait dès le premier token.
+    r.raw.decode_content = True
+    rows = []
+    try:
+        for p in ijson.items(r.raw, "item"):
+            s = _slim_ping(p)
+            if s is not None:
+                rows.append(s)
+    finally:
+        r.close()
+    return rows
 
 
 def get_ticket_totals_for_day(day: str) -> list[dict]:
@@ -65,47 +113,30 @@ def get_ticket_details_for_day(day: str) -> list[dict]:
 
 
 def group_pings_by_bus_line(pings: list[dict]) -> dict[tuple[str, str], list[dict]]:
-    """Regroupe les pings bruts par (codeLigne, bus.code) -- un jour/société peut couvrir
-    plusieurs lignes/bus, alors que /api/anomaly/score-live score UN bus-jour exact à la
-    fois. Retourne {(line, bus_code_str): [pings...]}."""
+    """Regroupe les pings COMPACTS (sortie de get_pings_for_day, voir _slim_ping) par
+    (line, bus) -- un jour/société peut couvrir plusieurs lignes/bus, alors que
+    /api/anomaly/score-live score UN bus-jour exact à la fois.
+    Retourne {(line, bus_code_str): [pings...]}."""
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for p in pings:
-        svc = p.get("service") or {}
-        bus = p.get("bus") or {}
-        line = str(svc.get("codeLigne", ""))
-        bus_code = str(bus.get("code", ""))
-        if not line or not bus_code:
-            continue
-        groups[(line, bus_code)].append(p)
+        groups[(p["line"], p["bus"])].append(p)
     return dict(groups)
 
 
 def pings_to_score_live_rows(pings: list[dict]) -> list[dict]:
-    """Un groupe de pings BRUTS (déjà filtré à un seul bus/ligne, voir
+    """Un groupe de pings COMPACTS (déjà filtré à un seul bus/ligne, voir
     group_pings_by_bus_line) -> liste de dicts au format GpsPingRow attendu par
-    /api/anomaly/score-live (t/lat/lon/speed/voyage).
+    /api/anomaly/score-live (t/lat/lon/speed/voyage). Le filtrage des pings inutilisables
+    est déjà fait au parsing (_slim_ping) ; ne reste qu'à projeter les champs.
 
     `speed` : le service ne renvoie plus le `speed` racine (voir docs/webservice_fields.txt
-    -- seul bus.vitesse est demandé), donc systématiquement replié sur bus.vitesse ici --
-    à savoir : `bus.vitesse` est souvent 0/obsolète sur les données récentes (voir
-    foundation.load_pings), donc ce champ sera moins fiable qu'avant tant que `speed`
-    racine n'est pas redemandé à la plateforme.
+    -- seul bus.vitesse est demandé), donc systématiquement replié sur bus.vitesse en
+    amont -- à savoir : `bus.vitesse` est souvent 0/obsolète sur les données récentes
+    (voir foundation.load_pings), donc ce champ sera moins fiable qu'avant tant que
+    `speed` racine n'est pas redemandé à la plateforme.
     """
-    rows = []
-    for p in pings:
-        loc = p.get("localisation") or {}
-        bus = p.get("bus") or {}
-        svc = p.get("service") or {}
-        if loc.get("x") is None or loc.get("y") is None or not p.get("date"):
-            continue
-        rows.append({
-            "t": p["date"],
-            "lat": loc["x"],
-            "lon": loc["y"],
-            "speed": bus.get("vitesse"),
-            "voyage": svc.get("voyage"),
-        })
-    return rows
+    return [{"t": p["t"], "lat": p["lat"], "lon": p["lon"],
+             "speed": p["speed"], "voyage": p["voyage"]} for p in pings]
 
 
 def ticket_totals_to_rows(raw_rows: list[dict], day_yyyymmdd: str) -> list[dict]:

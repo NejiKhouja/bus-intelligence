@@ -21,6 +21,11 @@ python-dotenv==1.2.2
 # src/api/main.py) -- missing here caused a production crash on startup (ModuleNotFoundError,
 # confirmed 2026-07-15): this file was added after requirements-anomaly.txt was last updated.
 requests==2.34.2
+# Parsing en STREAMING de getPingsForDay (src/data/webservices.py) : sans lui, r.json()
+# matérialise ~10 Mo de JSON en 100-200 Mo de dicts Python et tue l'instance 512MB par
+# OOM à chaque scoring en direct (constaté 2026-07-17). Le code a un repli sans ijson,
+# mais ce repli garde justement le pic mémoire fatal -- indispensable en production slim.
+ijson==3.5.1
 
 # Modeling — Isolation Forest only
 scikit-learn==1.9.0

@@ -552,6 +552,18 @@ def latest_day_for(societe: str, line: Optional[str] = None) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 _current_gps_cache: dict = {}   # (societe, day) -> (timestamp, {"trips":.., "stops":..} ou None)
 _CURRENT_GPS_CACHE_TTL_S = 90
+# Nombre max d'entrées retenues par cache de scoring en direct. Une entrée GPS porte les
+# DataFrames trips+stops d'une journée entière d'une société -- sans borne, naviguer entre
+# plusieurs sociétés accumule tout (11 sociétés possibles) et grignote la RAM de l'instance
+# 512MB déjà tendue (voir l'OOM du scoring live, 2026-07-17). Éviction du plus ancien.
+_LIVE_CACHE_MAX_ENTRIES = 3
+
+
+def _live_cache_put(cache: dict, key, value) -> None:
+    cache[key] = (time.time(), value)
+    while len(cache) > _LIVE_CACHE_MAX_ENTRIES:
+        oldest = min(cache, key=lambda k: cache[k][0])
+        del cache[oldest]
 
 
 def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
@@ -625,7 +637,7 @@ def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
         except Exception as e:
             print(f"Live GPS webservice unavailable ({societe}/{day}): {e}")
 
-    _current_gps_cache[cache_key] = (time.time(), result)
+    _live_cache_put(_current_gps_cache, cache_key, result)
     return result
 
 
@@ -665,7 +677,7 @@ def _score_all_tickets_live(societe: str, day: str) -> Optional[pd.DataFrame]:
         except Exception as e:
             print(f"Live ticket webservice unavailable ({societe}/{day}): {e}")
 
-    _current_ticket_cache[cache_key] = (time.time(), result)
+    _live_cache_put(_current_ticket_cache, cache_key, result)
     return result
 
 

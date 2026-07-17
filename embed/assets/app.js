@@ -378,22 +378,69 @@ async function renderTripsView(root) {
                 ? `<div class="wc-banner success">${LIVE_DOT}Données en direct — ${fmtDay(today.date)}</div>`
                 : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`;
             if (!today.anomalies || !today.anomalies.length) {
-                resBox.innerHTML = freshness + `<div class="wc-banner success">${icon("check")}Aucune anomalie aujourd'hui pour cet opérateur.</div>`;
-                return;
+                resBox.innerHTML = freshness + `<div class="wc-banner success">${icon("check")}Aucune anomalie aujourd'hui pour cet opérateur.</div>`
+                    + `<div id="wc-t-history"></div>`;
+            } else {
+                resBox.innerHTML = `<div class="wc-card">${freshness}<div id="wc-t-pills"></div><div id="wc-t-cards"></div></div>
+                    <div id="wc-t-history"></div>`;
+                const cardsBox = resBox.querySelector("#wc-t-cards");
+                const pillsBox = resBox.querySelector("#wc-t-pills");
+                function draw(list) {
+                    cardsBox.innerHTML = "";
+                    for (const a of list) cardsBox.appendChild(renderAlertCard(a));
+                }
+                const getFiltered = categoryFilterPills(pillsBox, today.anomalies, draw);
+                draw(getFiltered());
             }
-            resBox.innerHTML = `<div class="wc-card">${freshness}<div id="wc-t-pills"></div><div id="wc-t-cards"></div></div>`;
-            const cardsBox = resBox.querySelector("#wc-t-cards");
-            const pillsBox = resBox.querySelector("#wc-t-pills");
-            function draw(list) {
-                cardsBox.innerHTML = "";
-                for (const a of list) cardsBox.appendChild(renderAlertCard(a));
-            }
-            const getFiltered = categoryFilterPills(pillsBox, today.anomalies, draw);
-            draw(getFiltered());
+            loadHistory(resBox.querySelector("#wc-t-history"));
         } catch (e) {
             resBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
         }
     })();
+
+    // Historique complet des anomalies sous la vue du jour -- même structure que l'onglet
+    // "Trajets signalés" du dashboard Streamlit (aujourd'hui en haut, historique dessous),
+    // demandé explicitement 2026-07-17. Chargé séparément APRÈS la vue du jour pour que le
+    // direct s'affiche vite ; paginé côté client (bouton "Afficher plus") pour ne pas
+    // insérer des centaines de cartes DOM d'un coup.
+    async function loadHistory(box) {
+        box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
+            <p class="wc-muted"><span class="wc-spin"></span> Chargement de l'historique…</p></div>`;
+        let hist;
+        try {
+            hist = await api("/api/anomaly-history", { limit: 300 });
+        } catch (e) {
+            box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
+                <div class="wc-banner error">${icon("alert")}Erreur : ${esc(e.message)}</div></div>`;
+            return;
+        }
+        const all = (hist || {}).anomalies || [];
+        if (!all.length) {
+            box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
+                <div class="wc-banner info">${icon("info")}Aucun historique d'anomalies pour cet opérateur.</div></div>`;
+            return;
+        }
+        box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
+            <div id="wc-th-pills"></div><div id="wc-th-cards"></div>
+            <button id="wc-th-more" class="wc-btn-secondary" style="margin-top:10px">Afficher plus</button></div>`;
+        const cardsBox = box.querySelector("#wc-th-cards");
+        const pillsBox = box.querySelector("#wc-th-pills");
+        const moreBtn = box.querySelector("#wc-th-more");
+        const PAGE = 15;
+        let shown = PAGE;
+        let current = all;
+        function draw() {
+            cardsBox.innerHTML = "";
+            const sorted = [...current].sort((a, b) => (b.day || "").localeCompare(a.day || ""));
+            for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a));
+            moreBtn.style.display = shown < sorted.length ? "" : "none";
+            moreBtn.textContent = `Afficher plus (${Math.min(shown, sorted.length)}/${sorted.length})`;
+        }
+        moreBtn.addEventListener("click", () => { shown += PAGE; draw(); });
+        const getFiltered = categoryFilterPills(pillsBox, all, (list) => { current = list; shown = PAGE; draw(); });
+        current = getFiltered();
+        draw();
+    }
 }
 
 function renderTripsResults(root, res) {

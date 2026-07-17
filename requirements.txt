@@ -25,6 +25,8 @@ pyarrow==24.0.0
 # src/data/webservices.py (live GPS/ticket webservice client, imported at module level by
 # src/api/main.py) -- same "worked in dev, missing here" class of gap as pyarrow above.
 requests==2.34.2
+# Streaming JSON parse of getPingsForDay -- see the note in requirements-anomaly.txt.
+ijson==3.5.1
 
 # Modeling (delay, GPS fallback, anomaly detection — chatbot excluded from this deployment)
 torch==2.12.1
