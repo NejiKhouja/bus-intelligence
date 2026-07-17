@@ -45,7 +45,7 @@ COPY src/ ./src/
 COPY models/anomaly/ ./models/anomaly/
 COPY models/ticket_anomaly/ ./models/ticket_anomaly/
 COPY data/reference/winicari_reference_slim.db ./data/reference/winicari_reference.db
-
+COPY data/reference/schedules.json ./data/reference/schedules.json
 ENV ENABLED_MODULES=anomaly,ticket_anomaly
 
 # Le contrôle de détour (anomaly-explain?check_detours=true) charge les pings GPS bruts
