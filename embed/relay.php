@@ -24,20 +24,41 @@
  *
  * Test manuel :  php relay.php            (pousse hier)
  *                php relay.php 20260716   (pousse un jour précis)
+ *
+ * MODE AUTO (?auto=1, déclenché par index.php à la première visite -- voir autorun.php) :
+ * pas de planificateur à configurer du tout. La requête de déclenchement coupe après
+ * ~300 ms (le visiteur n'attend RIEN) ; ce script continue seul en arrière-plan
+ * (ignore_user_abort), vérifie d'abord auprès de l'API si la journée d'hier y est déjà
+ * (GET /api/ingest/status -- l'API est la seule source de vérité, son magasin étant
+ * éphémère), et ne pousse que si elle manque. Un verrou fichier garantit qu'une seule
+ * exécution tourne à la fois même si plusieurs visiteurs arrivent ensemble.
  */
 
 require_once __DIR__ . '/config.php';
 
 // ── Garde d'accès : CLI librement ; via web, uniquement avec la clé API ──────────────
 $is_cli = (php_sapi_name() === 'cli');
+$is_auto = !$is_cli && isset($_GET['auto']);
 if (!$is_cli) {
     if (!isset($_GET['key']) || !hash_equals(WINICARI_API_KEY, $_GET['key'])) {
         http_response_code(403);
         exit("Forbidden\n");
     }
     header('Content-Type: text/plain; charset=utf-8');
-    // Une journée complète peut prendre 1-2 min à tirer + pousser
+    // Une journée complète peut prendre 1-2 min à tirer + pousser ; en mode auto le
+    // déclencheur coupe la connexion après ~300 ms et on continue sans lui.
+    ignore_user_abort(true);
     set_time_limit(600);
+}
+
+// ── Verrou : une seule exécution à la fois (2 visiteurs simultanés = 1 seul push) ────
+$var_dir = __DIR__ . '/var';
+if (!is_dir($var_dir)) {
+    @mkdir($var_dir, 0775, true);
+}
+$lock = fopen($var_dir . '/relay.lock', 'c');
+if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) {
+    exit("Un relais tourne déjà -- rien à faire.\n");
 }
 // json_decode d'une journée complète (~10 Mo de JSON) coûte bien plus en RAM que la
 // limite PHP par défaut (souvent 128M) -- relevé explicitement ici, uniquement pour ce
@@ -55,6 +76,16 @@ if (!preg_match('/^\d{8}$/', $day)) {
 $day_dashed = substr($day, 0, 4) . '-' . substr($day, 4, 2) . '-' . substr($day, 6, 2);
 
 echo "Relais WiniCari -- jour $day -> " . WINICARI_API_BASE . "\n";
+if ($is_auto) {
+    // La connexion du déclencheur peut être coupée d'un instant à l'autre -- vider ce
+    // qu'on a déjà écrit et continuer en autonome.
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    } else {
+        @ob_end_flush();
+        @flush();
+    }
+}
 
 // ── Helpers HTTP ─────────────────────────────────────────────────────────────────────
 function ws_get(string $path, array $params, int $timeout = 180) {
@@ -119,6 +150,25 @@ function slim_ping(array $p): ?array {
         'speed' => isset($bus['vitesse']) ? (float)$bus['vitesse'] : null,
         'voyage' => $svc['voyage'] ?? null,
     ];
+}
+
+// ── 0. Mode auto : l'API a-t-elle déjà cette journée ? ───────────────────────────────
+// L'API est la SEULE source de vérité (son magasin est éphémère : instance redémarrée =
+// magasin vide) -- un marqueur local dirait "déjà poussé" à tort. Si au moins un fichier
+// GPS de ce jour y est présent, rien à faire.
+if ($is_auto) {
+    try {
+        $status = render_req('GET', '/api/ingest/status', null, 60);
+        foreach (($status['files'] ?? []) as $f) {
+            if (($f['kind'] ?? '') === 'gps' && ($f['day'] ?? '') === $day) {
+                exit("$day : déjà présent sur l'API -- rien à pousser.\n");
+            }
+        }
+    } catch (Exception $e) {
+        // API injoignable (instance froide qui démarre ?) -- on tente le push quand
+        // même, les POST réveilleront/attendront l'instance.
+        echo 'status indisponible (' . $e->getMessage() . ") -- push tenté quand même\n";
+    }
 }
 
 // ── 1. Le traitement de nuit est-il prêt ? ───────────────────────────────────────────

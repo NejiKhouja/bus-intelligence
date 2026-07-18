@@ -18,3 +18,4 @@ models/ticket_anomaly/stations/
 # dashboard, see embed/README.md) -- config.php holds the real Render API key, never
 # committed; config.example.php (tracked) is the template to fill in.
 embed/config.phpdata/live_ingest/
+embed/var/

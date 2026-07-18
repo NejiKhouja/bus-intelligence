@@ -60,7 +60,7 @@ unserved / gray suspect coords), size = dwell+signal-loss, Départ/Terminus labe
 planned-route line, detour overlay (orange = out leg, purple = back leg) with the
 detour warning banner, and the first/last-tracked-passage caption.
 
-## Live data relay (relay.php)
+## Live data relay (relay.php + autorun.php) — zero configuration
 
 The platform webservices have no public URL — the Render API can't reach them. Instead,
 `relay.php` runs **on the company's server** (which IS on the right network), pulls
@@ -68,23 +68,26 @@ yesterday's GPS pings + ticket totals from the webservices, and pushes them to R
 (`POST /api/ingest/*`, same X-API-Key). Once pushed, every visitor of this page sees
 live data — visitors never run anything themselves.
 
-Setup: fill `WINICARI_WEBSERVICE_URL` in `config.php`, then schedule ONE daily run after
-the platform's night processing (e.g. 07:00):
+**It triggers itself — no scheduler needed.** On each page view, `autorun.php` (included
+by `index.php`) fires a ~400 ms fire-and-forget request to `relay.php?auto=1` and lets
+it finish alone in the background (`ignore_user_abort`). The visitor's page load costs
+~0 extra (measured: 0.47 s first visit, 0.04 s after). Three layers guarantee exactly
+one real push per day even with many simultaneous visitors:
 
-```
-# crontab (shell access)
-0 7 * * * php /path/to/embed/relay.php >> /var/log/winicari_relay.log 2>&1
+1. local throttle — at most one trigger attempt per 10 min (`var/relay_trigger.last`);
+2. lock file — a single relay execution at a time (`var/relay.lock`);
+3. **API freshness check** — relay asks `GET /api/ingest/status` whether yesterday is
+   already stored and exits if so. The API is the only source of truth here: its store
+   is ephemeral (a Render restart wipes it), so this design also **self-heals** — the
+   next visit after a restart re-pushes automatically, where a fixed cron would leave
+   the page stale until the next morning.
 
-# or cPanel "Cron Jobs" -> command:
-php /home/ACCOUNT/public_html/embed/relay.php
-
-# or pure-HTTP cron (no shell): protect with the API key
-0 7 * * * wget -qO- "https://their-domain/embed/relay.php?key=API_KEY"
-```
-
-Manual test: `php relay.php` (pushes yesterday) or `php relay.php 20260716`. If the run
-is missed one morning, the page simply keeps showing the previous day until the next
-successful run — nothing breaks.
+Timing caveat: the first visitor after the platform's night processing sees the previous
+data; the fresh day appears ~1-2 min later (next refresh/visitor). Setup: just fill
+`WINICARI_WEBSERVICE_URL` in `config.php`. An optional cron (`0 7 * * * php
+/path/to/embed/relay.php`) can still be added as a backstop so the day is pushed even
+before anyone visits — same script, the layers make double-pushing impossible. Manual
+test: `php relay.php` (yesterday) or `php relay.php 20260716`.
 
 ## Known gaps / things to revisit
 

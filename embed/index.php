@@ -1,6 +1,9 @@
 <?php
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/session.php';
+// Déclenche (au plus 1x/10 min, en arrière-plan, coût ~0 pour le visiteur) le push des
+// données de la veille vers l'API si elles n'y sont pas encore -- voir autorun.php.
+require_once __DIR__ . '/autorun.php';
 
 // Dev/testing convenience: the picker form below posts here to set the session company.
 // In the company's real integration, their own login flow sets $_SESSION['winicari_company']

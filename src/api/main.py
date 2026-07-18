@@ -753,6 +753,28 @@ async def ingest_gps_day(body: GpsDayIngest):
             "societe": body.societe, "day": body.day}
 
 
+@app.get("/api/ingest/status")
+async def ingest_status():
+    """Ce que le magasin poussé contient (jour/société/taille/date de push) -- permet au
+    déclencheur côté page (embed/relay.php en mode auto) de savoir si la journée d'hier
+    est déjà là AVANT de lancer un push : indispensable parce que ce magasin est
+    ÉPHÉMÈRE (instance Render redémarrée = magasin vide) -- un marqueur local côté PHP
+    dirait "déjà poussé" à tort, seul CE serveur sait ce qu'il a réellement."""
+    items = []
+    if _INGEST_DIR.exists():
+        for p in sorted(_INGEST_DIR.glob("*.json.gz")):
+            stem = p.name[:-8]
+            parts = stem.split("_")
+            items.append({
+                "kind": parts[0],
+                "societe": "_".join(parts[1:-1]) or None,
+                "day": parts[-1],
+                "size": p.stat().st_size,
+                "pushed_at": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
+            })
+    return {"files": items}
+
+
 @app.post("/api/ingest/ticket-day")
 async def ingest_ticket_day(body: TicketDayIngest):
     """Reçoit les totaux billetterie d'une journée (toutes sociétés, forme brute de
