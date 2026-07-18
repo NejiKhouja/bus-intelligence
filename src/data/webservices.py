@@ -10,6 +10,7 @@ appel MongoDB direct ici, cohérent avec le principe déjà établi pour ces deu
 from __future__ import annotations
 
 import os
+import time
 from collections import defaultdict
 
 import requests
@@ -18,6 +19,40 @@ from dotenv import load_dotenv
 load_dotenv()
 
 WEBSERVICE_URL = os.getenv("WEBSERVICE_URL", "").rstrip("/")
+
+# Disjoncteur : les webservices tournent sur le RÉSEAU LOCAL de la plateforme (pas d'URL
+# publique) -- depuis un serveur cloud (Render, Allemagne) chaque appel TIME OUT au lieu
+# d'être refusé, et un timeout de 30s dans un endpoint async bloque l'event loop assez
+# longtemps pour faire échouer le health check de Render (5s) et tuer l'instance
+# (constaté 2026-07-17). Ici : connexion limitée à ~3s, et après UN échec réseau, le
+# service est marqué injoignable 10 min -- tous les appels suivants échouent
+# instantanément (les appelants attrapent déjà l'exception et retombent sur
+# l'historique / le magasin ingéré, voir main.py).
+_down_until = 0.0
+_CONNECT_TIMEOUT_S = 3.05
+
+
+def _guard() -> None:
+    if time.time() < _down_until:
+        raise RuntimeError("webservice marqué injoignable (circuit ouvert, nouvel essai plus tard)")
+
+
+def _mark_down(e: Exception) -> None:
+    global _down_until
+    _down_until = time.time() + 600
+    print(f"  webservice injoignable ({e.__class__.__name__}) -- circuit ouvert 10 min")
+
+
+def _get(path: str, params: dict, read_timeout: float, stream: bool = False) -> requests.Response:
+    _guard()
+    try:
+        r = requests.get(f"{_base_url()}{path}", params=params,
+                         timeout=(_CONNECT_TIMEOUT_S, read_timeout), stream=stream)
+    except (requests.ConnectionError, requests.Timeout) as e:
+        _mark_down(e)
+        raise
+    r.raise_for_status()
+    return r
 
 
 def _base_url() -> str:
@@ -31,8 +66,7 @@ def is_day_ready(day: str) -> bool:
     """`day` au format YYYYMMDD. Le traitement de nuit peut exister mais être vide --
     l'API renvoie déjà `ready=false` dans ce cas côté plateforme (voir la précision
     donnée : collection absente OU countDocuments()==0 -> ready=false)."""
-    r = requests.get(f"{_base_url()}/Service/isDayReady", params={"day": day}, timeout=30)
-    r.raise_for_status()
+    r = _get("/Service/isDayReady", {"day": day}, read_timeout=30)
     return bool(r.json().get("ready", False))
 
 
@@ -74,9 +108,7 @@ def get_pings_for_day(day: str, societe: str | None = None) -> list[dict]:
     params = {"day": day}
     if societe:
         params["societe"] = societe
-    r = requests.get(f"{_base_url()}/Service/getPingsForDay", params=params,
-                     timeout=120, stream=True)
-    r.raise_for_status()
+    r = _get("/Service/getPingsForDay", params, read_timeout=120, stream=True)
     try:
         import ijson
     except ImportError:
@@ -98,17 +130,13 @@ def get_pings_for_day(day: str, societe: str | None = None) -> list[dict]:
 
 def get_ticket_totals_for_day(day: str) -> list[dict]:
     """`day` au format YYYY-MM-DD (PAS YYYYMMDD -- confirmé sur le service réel)."""
-    r = requests.get(f"{_base_url()}/ServiceDetais/getTicketTotalsForDay",
-                     params={"day": day}, timeout=60)
-    r.raise_for_status()
+    r = _get("/ServiceDetais/getTicketTotalsForDay", {"day": day}, read_timeout=60)
     return r.json()
 
 
 def get_ticket_details_for_day(day: str) -> list[dict]:
     """`day` au format YYYY-MM-DD. Tickets individuels (pour le détail par arrêt)."""
-    r = requests.get(f"{_base_url()}/ticketsHorsLigne/getTicketDetailsForDay",
-                     params={"day": day}, timeout=60)
-    r.raise_for_status()
+    r = _get("/ticketsHorsLigne/getTicketDetailsForDay", {"day": day}, read_timeout=60)
     return r.json()
 
 

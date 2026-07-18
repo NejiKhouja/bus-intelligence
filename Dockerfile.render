@@ -45,6 +45,9 @@ COPY src/ ./src/
 COPY models/anomaly/ ./models/anomaly/
 COPY models/ticket_anomaly/ ./models/ticket_anomaly/
 COPY data/reference/winicari_reference_slim.db ./data/reference/winicari_reference.db
+# Horaires publiés (chips "départ prévu vs réel") -- artefact statique exporté depuis
+# Mongo en local (voir main.py::_scheduled_departures) ; Mongo n'est pas joignable en
+# production, ce fichier est la seule source possible là-bas.
 COPY data/reference/schedules.json ./data/reference/schedules.json
 ENV ENABLED_MODULES=anomaly,ticket_anomaly
 

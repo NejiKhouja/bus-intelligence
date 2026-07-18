@@ -1,6 +1,7 @@
 """FastAPI serving layer for WiniCari AI"""
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import math
@@ -562,6 +563,60 @@ def latest_day_for(societe: str, line: Optional[str] = None) -> str:
 # (coûteuse : projection + segmentation par bus) à chaque rerun Streamlit -- TTL court,
 # pas un cache de longue durée comme les artefacts entraînés.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Magasin de données EN DIRECT POUSSÉES (relais) -- les webservices de la plateforme
+# tournent sur un réseau local SANS URL publique : un serveur cloud (Render, Allemagne)
+# ne peut pas les atteindre (timeout, constaté 2026-07-17), et l'utilisateur n'a pas la
+# main sur le serveur des webservices. Solution : inverser le sens -- un petit script
+# relais (scripts/push_live_day.py) tourne sur une machine DU réseau local (elle, elle
+# atteint les webservices), tire la journée et la POUSSE ici via POST /api/ingest/*
+# (sortie HTTPS simple, marche depuis n'importe quel réseau). Les scoreurs live lisent
+# ce magasin D'ABORD, le webservice ensuite (le pull direct reste le chemin naturel en
+# dev local, où le réseau le permet).
+# Stocké sur disque (gzip) : survit aux redémarrages du process sur la même instance ;
+# sur une instance neuve le magasin repart vide et se remplit au prochain push -- même
+# philosophie éphémère que le reste des artefacts non committés.
+# ─────────────────────────────────────────────────────────────────────────────
+_INGEST_DIR = Path("data/live_ingest")
+_INGEST_KEEP_DAYS = 3
+
+
+def _ingest_safe(s: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in str(s))
+
+
+def _ingest_path(kind: str, day: str, societe: str = None) -> Path:
+    name = f"{kind}_{_ingest_safe(societe)}_{day}.json.gz" if societe else f"{kind}_{day}.json.gz"
+    return _INGEST_DIR / name
+
+
+def _ingest_write(path: Path, rows: list) -> None:
+    _INGEST_DIR.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False)
+    # Rétention courte : seule la journée "live" (hier) sert au scoring ; au-delà, les
+    # données sont déjà couvertes par le pipeline historique au prochain réentraînement.
+    cutoff = (datetime.now() - timedelta(days=_INGEST_KEEP_DAYS)).strftime("%Y%m%d")
+    for old in _INGEST_DIR.glob("*.json.gz"):
+        day_part = old.stem.replace(".json", "").rsplit("_", 1)[-1]
+        if day_part.isdigit() and day_part < cutoff:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+
+def _ingest_read(path: Path) -> Optional[list]:
+    if not path.exists():
+        return None
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"  ingest illisible ({path.name}): {e}")
+        return None
+
+
 _current_gps_cache: dict = {}   # (societe, day) -> (timestamp, {"trips":.., "stops":..} ou None)
 _CURRENT_GPS_CACHE_TTL_S = 90
 # Nombre max d'entrées retenues par cache de scoring en direct. Une entrée GPS porte les
@@ -599,55 +654,61 @@ def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
         return cached[1]
 
     result = None
-    if ws.WEBSERVICE_URL:
+    # Magasin poussé D'ABORD (aucun réseau, voir le relais scripts/push_live_day.py),
+    # webservice ensuite (chemin naturel en dev local où le réseau le permet).
+    pings = _ingest_read(_ingest_path("gps", day, societe))
+    if pings is None and ws.WEBSERVICE_URL:
         try:
             if ws.is_day_ready(day):
                 pings = ws.get_pings_for_day(day, societe=societe)
-                if pings:
-                    groups = ws.group_pings_by_bus_line(pings)
-                    usable = _load_usable_lines()
-                    models = model_manager.get("anomaly")
-                    cfg = fdn.Config()
-                    trip_frames, stop_frames = [], []
-                    for (grp_line, grp_bus), grp_pings in groups.items():
-                        key = (grp_line, societe)
-                        if key not in usable:
-                            continue
-                        rows = ws.pings_to_score_live_rows(grp_pings)
-                        if not rows:
-                            continue
-                        raw_df = pd.DataFrame(rows)
-                        # Le service renvoie des horodatages avec offset (+00:00) -> tz-aware,
-                        # alors que le reste du pipeline (day0 = pd.Timestamp(...) dans
-                        # reconstruct_bus_day) compare avec des Timestamp NAÏFS, comme les
-                        # datetime bruts de pymongo -- confirmé par erreur réelle (2026-07-13,
-                        # "Invalid comparison between dtype=datetime64[ns, UTC] and Timestamp").
-                        # On retire juste l'info de fuseau (les valeurs restent identiques),
-                        # pas de vraie conversion de fuseau nécessaire.
-                        raw_df["t"] = pd.to_datetime(raw_df["t"]).dt.tz_localize(None)
-                        raw_df = raw_df.sort_values("t").reset_index(drop=True)
-                        try:
-                            fa = fdn.reconstruct_bus_day(
-                                None, f"d{day}", grp_line, societe, int(grp_bus),
-                                usable[key], cfg, raw_pings=raw_df)
-                        except Exception as e:
-                            print(f"  live reconstruct failed for {societe}/{grp_line}/{grp_bus}: {e}")
-                            continue
-                        if fa.empty:
-                            continue
-                        try:
-                            trip_frames.append(anomaly.score(models, fa))
-                        except Exception as e:
-                            print(f"  live scoring failed for {societe}/{grp_line}/{grp_bus}: {e}")
-                            continue
-                        stop_frames.append(fa)
-                    if trip_frames:
-                        result = {
-                            "trips": pd.concat(trip_frames, ignore_index=True),
-                            "stops": pd.concat(stop_frames, ignore_index=True),
-                        }
         except Exception as e:
             print(f"Live GPS webservice unavailable ({societe}/{day}): {e}")
+    if pings:
+        try:
+            groups = ws.group_pings_by_bus_line(pings)
+            usable = _load_usable_lines()
+            models = model_manager.get("anomaly")
+            cfg = fdn.Config()
+            trip_frames, stop_frames = [], []
+            for (grp_line, grp_bus), grp_pings in groups.items():
+                key = (grp_line, societe)
+                if key not in usable:
+                    continue
+                rows = ws.pings_to_score_live_rows(grp_pings)
+                if not rows:
+                    continue
+                raw_df = pd.DataFrame(rows)
+                # Le service renvoie des horodatages avec offset (+00:00) -> tz-aware,
+                # alors que le reste du pipeline (day0 = pd.Timestamp(...) dans
+                # reconstruct_bus_day) compare avec des Timestamp NAÏFS, comme les
+                # datetime bruts de pymongo -- confirmé par erreur réelle (2026-07-13,
+                # "Invalid comparison between dtype=datetime64[ns, UTC] and Timestamp").
+                # On retire juste l'info de fuseau (les valeurs restent identiques),
+                # pas de vraie conversion de fuseau nécessaire.
+                raw_df["t"] = pd.to_datetime(raw_df["t"]).dt.tz_localize(None)
+                raw_df = raw_df.sort_values("t").reset_index(drop=True)
+                try:
+                    fa = fdn.reconstruct_bus_day(
+                        None, f"d{day}", grp_line, societe, int(grp_bus),
+                        usable[key], cfg, raw_pings=raw_df)
+                except Exception as e:
+                    print(f"  live reconstruct failed for {societe}/{grp_line}/{grp_bus}: {e}")
+                    continue
+                if fa.empty:
+                    continue
+                try:
+                    trip_frames.append(anomaly.score(models, fa))
+                except Exception as e:
+                    print(f"  live scoring failed for {societe}/{grp_line}/{grp_bus}: {e}")
+                    continue
+                stop_frames.append(fa)
+            if trip_frames:
+                result = {
+                    "trips": pd.concat(trip_frames, ignore_index=True),
+                    "stops": pd.concat(stop_frames, ignore_index=True),
+                }
+        except Exception as e:
+            print(f"Live GPS scoring failed ({societe}/{day}): {e}")
 
     _live_cache_put(_current_gps_cache, cache_key, result)
     return result
@@ -658,6 +719,50 @@ def _live_gps_day(societe: str) -> Optional[str]:
     société, else `None` -- see _score_all_gps_live for why "yesterday" not "today"."""
     day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
     return day if _score_all_gps_live(societe, day) is not None else None
+
+
+class GpsDayIngest(BaseModel):
+    day: str = Field(..., description="YYYYMMDD")
+    societe: str
+    pings: List[Dict[str, Any]] = Field(..., description="pings compacts: line/bus/t/lat/lon/speed/voyage")
+
+
+class TicketDayIngest(BaseModel):
+    day: str = Field(..., description="YYYYMMDD")
+    rows: List[Dict[str, Any]] = Field(..., description="lignes brutes de getTicketTotalsForDay (toutes sociétés)")
+
+
+@app.post("/api/ingest/gps-day")
+async def ingest_gps_day(body: GpsDayIngest):
+    """Reçoit la journée GPS d'une société, POUSSÉE par le relais tournant sur le réseau
+    local de la plateforme (scripts/push_live_day.py) -- ce serveur ne peut pas atteindre
+    les webservices lui-même (réseau privé sans URL publique, voir _INGEST_DIR). Protégé
+    par la même X-API-Key que le reste de /api/*."""
+    if not (len(body.day) == 8 and body.day.isdigit()):
+        raise HTTPException(status_code=422, detail="day doit être au format YYYYMMDD")
+    keep = [
+        {k: p.get(k) for k in ("line", "bus", "t", "lat", "lon", "speed", "voyage")}
+        for p in body.pings
+        if p.get("line") and p.get("bus") and p.get("t") and p.get("lat") is not None and p.get("lon") is not None
+    ]
+    _ingest_write(_ingest_path("gps", body.day, body.societe), keep)
+    # Invalider le cache de scoring pour que le prochain affichage reparte des données
+    # fraîchement poussées (sinon un résultat None mis en cache 90s masquerait le push).
+    _current_gps_cache.pop((body.societe, body.day), None)
+    return {"stored": len(keep), "dropped": len(body.pings) - len(keep),
+            "societe": body.societe, "day": body.day}
+
+
+@app.post("/api/ingest/ticket-day")
+async def ingest_ticket_day(body: TicketDayIngest):
+    """Reçoit les totaux billetterie d'une journée (toutes sociétés, forme brute de
+    getTicketTotalsForDay), poussés par le même relais que /api/ingest/gps-day."""
+    if not (len(body.day) == 8 and body.day.isdigit()):
+        raise HTTPException(status_code=422, detail="day doit être au format YYYYMMDD")
+    _ingest_write(_ingest_path("tickets", body.day), body.rows)
+    for key in [k for k in _current_ticket_cache if k[1] == body.day]:
+        _current_ticket_cache.pop(key, None)
+    return {"stored": len(body.rows), "day": body.day}
 
 
 _current_ticket_cache: dict = {}   # (societe, day) -> (timestamp, days_df ou None)
@@ -677,17 +782,24 @@ def _score_all_tickets_live(societe: str, day: str) -> Optional[pd.DataFrame]:
         return cached[1]
 
     result = None
-    if ws.WEBSERVICE_URL:
+    # Magasin poussé d'abord (fichier = journée entière toutes sociétés, comme la réponse
+    # du service), webservice ensuite -- même logique que _score_all_gps_live.
+    raw = _ingest_read(_ingest_path("tickets", day))
+    if raw is None and ws.WEBSERVICE_URL:
         try:
             day_dashed = f"{day[:4]}-{day[4:6]}-{day[6:]}"
             raw = ws.get_ticket_totals_for_day(day_dashed)
+        except Exception as e:
+            print(f"Live ticket webservice unavailable ({societe}/{day}): {e}")
+    if raw:
+        try:
             sub = [r for r in raw if r.get("societe") == societe]
             rows = ws.ticket_totals_to_rows(sub, day)
             if rows:
                 models = model_manager.get("ticket_anomaly")
                 result = ticket_anomaly.score(models, pd.DataFrame(rows))
         except Exception as e:
-            print(f"Live ticket webservice unavailable ({societe}/{day}): {e}")
+            print(f"Live ticket scoring failed ({societe}/{day}): {e}")
 
     _live_cache_put(_current_ticket_cache, cache_key, result)
     return result
@@ -2769,16 +2881,17 @@ _mongo_gps_down_until = 0.0
 
 
 def _ws_day_groups(societe: str, day: str) -> Optional[dict]:
-    """Pings du webservice pour (societe, day), groupés par (line, bus) -- UN seul appel
-    pour tous les bus-jours de cette journée (le service ne filtre pas par ligne/bus).
-    None si le webservice n'est pas configuré/joignable/n'a pas ce jour."""
-    if not ws.WEBSERVICE_URL:
-        return None
-    try:
-        pings = ws.get_pings_for_day(day, societe=societe)
-    except Exception as e:
-        print(f"  webservice pings indisponibles ({societe}/{day}): {e}")
-        return None
+    """Pings pour (societe, day), groupés par (line, bus) -- magasin poussé d'abord (voir
+    scripts/push_live_day.py), webservice ensuite (UN seul appel pour tous les bus-jours
+    de la journée, le service ne filtre pas par ligne/bus). None si aucune source n'a ce
+    jour."""
+    pings = _ingest_read(_ingest_path("gps", day, societe))
+    if pings is None and ws.WEBSERVICE_URL:
+        try:
+            pings = ws.get_pings_for_day(day, societe=societe)
+        except Exception as e:
+            print(f"  webservice pings indisponibles ({societe}/{day}): {e}")
+            return None
     return ws.group_pings_by_bus_line(pings) if pings else None
 
 
