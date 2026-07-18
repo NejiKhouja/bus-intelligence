@@ -60,6 +60,32 @@ unserved / gray suspect coords), size = dwell+signal-loss, Départ/Terminus labe
 planned-route line, detour overlay (orange = out leg, purple = back leg) with the
 detour warning banner, and the first/last-tracked-passage caption.
 
+## Live data relay (relay.php)
+
+The platform webservices have no public URL — the Render API can't reach them. Instead,
+`relay.php` runs **on the company's server** (which IS on the right network), pulls
+yesterday's GPS pings + ticket totals from the webservices, and pushes them to Render
+(`POST /api/ingest/*`, same X-API-Key). Once pushed, every visitor of this page sees
+live data — visitors never run anything themselves.
+
+Setup: fill `WINICARI_WEBSERVICE_URL` in `config.php`, then schedule ONE daily run after
+the platform's night processing (e.g. 07:00):
+
+```
+# crontab (shell access)
+0 7 * * * php /path/to/embed/relay.php >> /var/log/winicari_relay.log 2>&1
+
+# or cPanel "Cron Jobs" -> command:
+php /home/ACCOUNT/public_html/embed/relay.php
+
+# or pure-HTTP cron (no shell): protect with the API key
+0 7 * * * wget -qO- "https://their-domain/embed/relay.php?key=API_KEY"
+```
+
+Manual test: `php relay.php` (pushes yesterday) or `php relay.php 20260716`. If the run
+is missed one morning, the page simply keeps showing the previous day until the next
+successful run — nothing breaks.
+
 ## Known gaps / things to revisit
 
 - Chart.js and Leaflet are loaded from public CDNs (`cdn.jsdelivr.net`, `unpkg.com`) —

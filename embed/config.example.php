@@ -19,3 +19,9 @@ define('WINICARI_FALLBACK_COMPANIES', [
     'EPE-TVE', 'S.R.T.BIZERTE', 'S.R.T.K', 'S.R.T.M', 'S.R.T.SELIANA', 'S.T.C.I',
     'S.T.S', 'SORETRAS', 'SRT.ELGOUAFEL', 'TCV', 'TUS', 'Winicari',
 ]);
+
+// Web services de la plateforme (réseau local -- joignables depuis CE serveur, pas
+// depuis Render). Utilisé uniquement par relay.php (le pont quotidien qui pousse la
+// journée de la veille vers l'API Render, voir relay.php). Laisser vide si le relais
+// tourne ailleurs.
+define('WINICARI_WEBSERVICE_URL', 'http://102.128.57.59:8123');
