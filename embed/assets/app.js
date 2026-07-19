@@ -123,6 +123,31 @@ function stopLoading() {
     clearInterval(_loadingTimer);
 }
 
+// Squelette de chargement (voir la note CSS .wc-skel) -- des cartes vides de la même
+// forme que renderAlertCard, avec un balayage lumineux. `n` cartes, largeurs de lignes
+// légèrement variées pour ne pas avoir l'air d'un pur pavé répété.
+function skeletonCards(n = 4) {
+    const widths = ["w70", "w55", "w40"];
+    let html = "";
+    for (let i = 0; i < n; i++) {
+        html += `
+        <div class="wc-skel-card" aria-hidden="true">
+            <div class="wc-skel-head">
+                <span class="wc-skel wc-skel-badge"></span>
+                <span class="wc-skel wc-skel-title"></span>
+                <span class="wc-skel wc-skel-date"></span>
+            </div>
+            <div class="wc-skel-metrics">
+                <span class="wc-skel wc-skel-metric"></span>
+                <span class="wc-skel wc-skel-metric"></span>
+            </div>
+            <span class="wc-skel wc-skel-line ${widths[i % 3]}"></span>
+            <span class="wc-skel wc-skel-line ${widths[(i + 1) % 3]}"></span>
+        </div>`;
+    }
+    return html;
+}
+
 async function api(endpoint, params = {}) {
     const qs = new URLSearchParams({ endpoint, ...cleanParams(params) });
     const res = await fetch(`${WINICARI_PROXY}?${qs.toString()}`);
@@ -139,12 +164,13 @@ async function api(endpoint, params = {}) {
     if (data && typeof data === "object") data.__cache = cacheStatus;
     return data;
 }
-// Petite note discrète quand la réponse vient du cache PÉRIMÉ (une actualisation tourne
-// déjà en arrière-plan, voir proxy.php) -- pas affichée pour HIT (cache frais, rien à
-// signaler) ni MISS (déjà la donnée la plus fraîche possible).
-function cacheNote(data) {
-    if (!data || data.__cache !== "STALE") return "";
-    return `<p class="wc-muted wc-cache-note">${icon("clock")}Résultat en cache -- actualisation en cours en arrière-plan, réessayez dans une minute pour les toutes dernières données.</p>`;
+// Note "résultat en cache" retirée de l'affichage (décision utilisateur 2026-07-19 :
+// "je n'aime pas que ce message apparaisse") -- le cache stale-while-revalidate lui-même
+// reste actif côté proxy.php (la donnée EST réellement rafraîchie en arrière-plan), on
+// arrête juste de le dire à l'écran. `data.__cache` reste disponible sur chaque réponse
+// si besoin de le réintroduire (ex. dans les devtools) sans toucher à api().
+function cacheNote(_data) {
+    return "";
 }
 function cleanParams(params) {
     const out = {};
@@ -468,7 +494,7 @@ function sortAnomalies(list, key) {
 // vue d'ensemble par défaut.
 async function renderTripsView(root) {
     root.innerHTML = `
-    <div id="wc-t-freshness"></div>
+    <div id="wc-t-freshness"><span class="wc-skel" style="display:block;width:220px;height:32px;border-radius:var(--wc-radius-sm);margin-bottom:14px"></span></div>
     <button id="wc-t-explain-toggle" class="wc-btn-secondary wc-explain-toggle">
         ${icon("search")}<span>Filtrer / analyser un bus précis</span>
     </button>
@@ -482,7 +508,7 @@ async function renderTripsView(root) {
         </div>
         <button id="wc-t-back" class="wc-link-muted" hidden>&larr; Revenir à la vue d'ensemble</button>
         <div id="wc-t-pills"></div>
-        <div id="wc-t-cards"><p class="wc-muted"><span class="wc-spin"></span> Chargement…</p></div>
+        <div id="wc-t-cards">${skeletonCards(4)}</div>
         <button id="wc-t-more" class="wc-btn-secondary" style="margin-top:10px" hidden>Afficher plus</button>
     </div>
     `;
@@ -600,11 +626,8 @@ async function renderExplainPanel(root, { onResults }) {
                 <label>Direction</label>
                 <select id="wc-e-dir"><option value="">Les deux</option><option value="ALLER">ALLER</option><option value="RETOUR">RETOUR</option></select>
             </div>
-            <div class="wc-field">
-                <label>&nbsp;</label>
-                <button id="wc-e-analyze">Analyser</button>
-            </div>
         </div>
+        <div class="wc-field-analyze"><button id="wc-e-analyze">Analyser</button></div>
         <p class="wc-muted" id="wc-e-hint">Chargement des lignes…</p>
     </div>
     <div id="wc-e-verdict"></div>
@@ -756,6 +779,17 @@ async function renderExplainPanel(root, { onResults }) {
         const dir = dirSel.value || null;
         let day = daySel.value || null;
         if (manualDate.value) day = manualDate.value.replace(/-/g, "");
+
+        // "Toutes les lignes" + "Tous les jours" ensemble = tout l'historique de TOUTES
+        // les lignes d'une société en une seule requête synchrone -- confirmé 2026-07-19 :
+        // HTTP 502 (timeout upstream Render), même sans le contrôle de détour. Plutôt que
+        // laisser cette combinaison échouer après une longue attente, on la bloque AVANT
+        // l'appel : il suffit de préciser une ligne OU un jour/une date pour rester dans
+        // un périmètre qui répond de façon fiable.
+        if (!line && !day) {
+            resBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Précisez une ligne ou un jour/une date précise pour analyser — l'historique complet de « Toutes les lignes » à la fois est trop volumineux pour un aperçu instantané.</div>`;
+            return;
+        }
 
         showLoadingIn(resBox);
         try {

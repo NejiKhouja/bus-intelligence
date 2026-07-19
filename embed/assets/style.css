@@ -27,6 +27,16 @@
 
     all: initial;
     * { box-sizing: border-box; }
+    /* Filet de sécurité GLOBAL pour l'attribut [hidden] -- ce bug a déjà été corrigé au
+       cas par cas trois fois séparément (onglets, overlay de chargement, maintenant le
+       bouton "Afficher plus") : chaque fois, une règle `all: unset` sur un bouton/élément
+       (nécessaire pour repartir d'un style natif propre) a une spécificité plus élevée
+       que la règle UA par défaut `[hidden] { display: none }` et la fait perdre --
+       l'élément reste visible malgré `el.hidden = true` en JS. Plutôt que corriger
+       chaque nouveau cas séparément, CETTE règle gagne toujours (elle cible
+       spécifiquement [hidden] avec !important) : aucun élément avec l'attribut hidden
+       ne peut plus jamais rester visible par accident. */
+    [hidden] { display: none !important; }
 
     display: block;
     width: 100%;
@@ -153,15 +163,26 @@
 .wc-embed button.wc-btn-secondary:hover { border-color: var(--wc-orange); color: var(--wc-orange); }
 .wc-embed button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
 
+/* Grille plutôt que flex-wrap serré (retour utilisateur 2026-07-19 : "les filtres sont
+   trop entassés") -- chaque champ a sa propre colonne avec un espacement généreux, et le
+   bouton Analyser passe sur sa propre ligne pleine largeur au lieu d'être coincé entre les
+   champs, ce qui lui donne aussi plus de poids visuel comme action principale. */
 .wc-filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: flex-end;
-    margin-bottom: 14px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 18px 20px;
+    margin-bottom: 16px;
 }
-.wc-field { display: flex; flex-direction: column; gap: 4px; min-width: 130px; flex: 1 1 130px; }
+.wc-field { display: flex; flex-direction: column; gap: 6px; }
 .wc-field label { font-size: 11.5px; color: var(--wc-text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.wc-field-analyze {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 4px;
+    border-top: 1px solid var(--wc-border-soft);
+}
+.wc-field-analyze button { min-width: 160px; padding: 10px 24px; }
 .wc-field-checkbox { flex-direction: row; align-items: center; gap: 6px; }
 
 .wc-pills {
@@ -268,7 +289,6 @@
     z-index: 0;
 }
 .wc-map-holder { margin-top: 8px; }
-.wc-map-holder[hidden] { display: none; }
 .wc-map-legend { line-height: 1.9; }
 .wc-legend-dot {
     display: inline-block;
@@ -319,7 +339,6 @@ button.wc-link-muted {
     margin-bottom: 10px;
 }
 button.wc-link-muted:hover { color: var(--wc-orange); }
-button.wc-link-muted[hidden] { display: none; }
 .wc-metric-sub { font-size: 11.5px; color: var(--wc-text-muted); margin-top: 2px; }
 .wc-metric-label[title] { cursor: help; }
 .wc-ref summary {
@@ -426,6 +445,43 @@ button.wc-link-muted[hidden] { display: none; }
     100% { transform: translateX(350%); }
 }
 
+/* ── Squelette de chargement (liste) ──────────────────────────────────────────────
+   Remplace le simple "Chargement…" + spinner au tout premier affichage de la liste
+   (redesign 2026-07-19, retour utilisateur : "trop basique, l'utilisateur n'a aucune
+   information") -- des blocs de la même FORME que les vraies cartes (renderAlertCard :
+   badge + titre + date, deux métriques, quelques lignes de texte) avec un effet de
+   balayage lumineux, pour que la page se lise comme "en train de se remplir" plutôt que
+   "en train d'attendre". Le spinner inline (.wc-loading-inline) reste utilisé pour les
+   actions ponctuelles (Analyser) où il n'y a pas de "forme" de résultat à préfigurer. */
+.wc-skel {
+    background: linear-gradient(100deg,
+        var(--wc-bg-elevated) 30%, var(--wc-border-soft) 50%, var(--wc-bg-elevated) 70%);
+    background-size: 250% 100%;
+    border-radius: 5px;
+    animation: wc-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes wc-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -50% 0; }
+}
+.wc-skel-card {
+    background: var(--wc-bg-elevated);
+    border: 1px solid var(--wc-border-soft);
+    border-radius: var(--wc-radius);
+    padding: 14px 16px;
+    margin-bottom: 10px;
+}
+.wc-skel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.wc-skel-badge { width: 64px; height: 18px; border-radius: 999px; }
+.wc-skel-title { flex: 1; height: 14px; max-width: 220px; }
+.wc-skel-date { width: 70px; height: 12px; }
+.wc-skel-metrics { display: flex; gap: 20px; margin-bottom: 12px; }
+.wc-skel-metric { width: 90px; height: 26px; }
+.wc-skel-line { display: block; height: 11px; margin: 7px 0; }
+.wc-skel-line.w70 { width: 70%; }
+.wc-skel-line.w55 { width: 55%; }
+.wc-skel-line.w40 { width: 40%; }
+
 /* ── Bouton bascule "Expliquer un bus" + panneau repliable ───────────────────────── */
 .wc-explain-toggle {
     display: flex;
@@ -439,7 +495,6 @@ button.wc-link-muted[hidden] { display: none; }
     padding-bottom: 4px;
     border-bottom: 1px solid var(--wc-border);
 }
-.wc-explain-panel[hidden] { display: none; }
 
 /* ── Note "résultat en cache" (stale-while-revalidate, voir proxy.php) ───────────── */
 .wc-cache-note { display: flex; align-items: center; gap: 4px; font-size: 11.5px; opacity: .8; margin: 2px 0 8px; }

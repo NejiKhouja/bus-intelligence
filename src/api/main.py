@@ -2099,16 +2099,30 @@ def anomaly_explain(  # def, pas async def -- voir la note dans get_anomaly_hist
     which may be None. Keying the detour track cache by (line, bus, day) rather than just
     (bus, day) for the same reason: a bus number isn't guaranteed unique across lines.
 
-    `check_detours` always runs now (decision 2026-07-15: loaded automatically, filterable
-    via the "Détour non-officiel" category in the client's existing type filter, not a
-    separate opt-in toggle). It needs a LIVE raw-GPS-ping read per distinct (line, bus,
-    day) in the list -- not just the already-loaded foundation slice -- to reconstruct the
-    actual path driven (see `_detect_start_detour`/`_build_gps_track`). Fetched once per
-    (line, bus, day), not once per trip, since several trips can share one bus-day, and
-    parallelized (bounded thread pool) since each fetch is independent. Best-effort: a
-    failure fetching one bus-day's track just leaves `has_detour` unset for its trips
-    rather than failing the whole request.
+    `check_detours` is opt-in (default False) -- it needs a LIVE raw-GPS-ping read per
+    distinct (line, bus, day) in the list, plus a Kalman filter over each, to reconstruct
+    the actual path driven (see `_detect_start_detour`/`_build_gps_track`). Not called by
+    the embed widget's bulk analysis anymore (decision 2026-07-19): checking every flagged
+    trip in one request was the direct cause of repeated OOM/timeout crashes on the 512MB
+    Render instance, a detour is never the ONLY signal a trip is anomalous (something else
+    already flags it), and the same detection still runs, cheaply, on a SINGLE trip when
+    the client asks for its map (`/api/trip-detail`, no bulk cost). Kept here as an opt-in
+    parameter for callers that genuinely want the bulk version (e.g. a scheduled report
+    with no request-latency constraint).
     """
+    # Garde-fou : "toutes les lignes" + "tous les jours" ensemble scanne TOUT l'historique
+    # de la société en une seule requête synchrone -- confirmé 2026-07-19 (502, timeout
+    # upstream Render) même sans le contrôle de détour (déjà retiré par ailleurs). Refusé
+    # explicitement plutôt que laissé échouer après une longue attente ; l'appelant garde
+    # toutes les autres combinaisons (une ligne sur tout l'historique, ou "toutes les
+    # lignes" sur un jour précis), toutes les deux bornées et déjà mesurées rapides.
+    if line is None and day is None:
+        raise HTTPException(status_code=422, detail=(
+            "Précisez une ligne ou un jour/une date pour analyser -- l'historique complet "
+            "de toutes les lignes à la fois dépasse ce que l'instance peut traiter en une "
+            "seule requête."
+        ))
+
     # Tranche fondation chargée au PLUS ÉTROIT possible -- l'ancienne version chargeait
     # toujours TOUT l'historique du périmètre (ligne entière, ou société ENTIÈRE pour
     # "toutes les lignes"), même quand la requête ne portait que sur UN jour : ~200k lignes
