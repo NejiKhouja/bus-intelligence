@@ -79,6 +79,7 @@ const _ICON_PATHS = {
     up: '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
     down: '<polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/>',
     info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+    search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
 };
 function icon(name) {
     const p = _ICON_PATHS[name];
@@ -102,19 +103,13 @@ function showLoadingIn(container) {
     clearInterval(_loadingTimer);
     container.innerHTML = `
     <div class="wc-loading-inline">
-        <div class="wc-brain">
-            <svg viewBox="0 0 100 80" class="wc-brain-svg" aria-hidden="true">
-                <path class="wc-brain-path wc-brain-left"
-                      d="M45 10 C30 8, 15 18, 15 32 C15 40, 20 44, 18 50 C14 58, 20 66, 30 66 C34 70, 42 72, 46 66 L46 14 Z"/>
-                <path class="wc-brain-path wc-brain-right"
-                      d="M55 10 C70 8, 85 18, 85 32 C85 40, 80 44, 82 50 C86 58, 80 66, 70 66 C66 70, 58 72, 54 66 L54 14 Z"/>
-                <circle class="wc-synapse s1" cx="28" cy="28" r="2.4"/>
-                <circle class="wc-synapse s2" cx="38" cy="45" r="2"/>
-                <circle class="wc-synapse s3" cx="24" cy="52" r="2.2"/>
-                <circle class="wc-synapse s4" cx="72" cy="28" r="2.2"/>
-                <circle class="wc-synapse s5" cx="62" cy="45" r="2"/>
-                <circle class="wc-synapse s6" cx="76" cy="52" r="2.4"/>
-            </svg>
+        <div class="wc-loader" aria-hidden="true">
+            <div class="wc-loader-ring r1"></div>
+            <div class="wc-loader-ring r2"></div>
+            <div class="wc-loader-ring r3"></div>
+            <div class="wc-loader-core"></div>
+            <div class="wc-loader-dot d1"></div>
+            <div class="wc-loader-dot d2"></div>
         </div>
         <div class="wc-loading-text">${LOADING_MESSAGES[0]}</div>
         <div class="wc-loading-bar"><div class="wc-loading-bar-fill"></div></div>
@@ -135,11 +130,25 @@ function stopLoading() {
 async function api(endpoint, params = {}) {
     const qs = new URLSearchParams({ endpoint, ...cleanParams(params) });
     const res = await fetch(`${WINICARI_PROXY}?${qs.toString()}`);
+    const cacheStatus = res.headers.get("X-Cache"); // HIT / STALE / MISS -- voir proxy.php
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || `HTTP ${res.status}`);
     }
-    return res.json();
+    const data = await res.json();
+    // Étiquette non énumérable-friendly : un simple champ suffit, aucun endpoint utilisé
+    // ici ne retourne un tableau nu au premier niveau, donc jamais en conflit avec les
+    // données réelles. Sert uniquement à afficher une note "résultat en cache" (voir
+    // cacheNote ci-dessous) -- ignoré partout ailleurs.
+    if (data && typeof data === "object") data.__cache = cacheStatus;
+    return data;
+}
+// Petite note discrète quand la réponse vient du cache PÉRIMÉ (une actualisation tourne
+// déjà en arrière-plan, voir proxy.php) -- pas affichée pour HIT (cache frais, rien à
+// signaler) ni MISS (déjà la donnée la plus fraîche possible).
+function cacheNote(data) {
+    if (!data || data.__cache !== "STALE") return "";
+    return `<p class="wc-muted wc-cache-note">${icon("clock")}Résultat en cache -- actualisation en cours en arrière-plan, réessayez dans une minute pour les toutes dernières données.</p>`;
 }
 function cleanParams(params) {
     const out = {};
@@ -454,14 +463,40 @@ function sortAnomalies(list, key) {
 // Miroir de l'onglet tab_live du dashboard Streamlit -- séparé de "Expliquer un bus"
 // (décision utilisateur 2026-07-17 : revenir aux 2 onglets comme dans Streamlit).
 async function renderTripsView(root) {
-    root.innerHTML = `<div id="wc-t-results"></div>`;
+    // Fusion "Trajets signalés" + "Expliquer un bus" (décision utilisateur 2026-07-19) --
+    // un seul onglet : la vue rapide du jour + l'historique s'affiche tout de suite comme
+    // avant, et un bouton révèle/masque le panneau de filtres+analyse (ex-onglet séparé,
+    // voir renderExplainPanel) sans jamais le charger tant qu'on n'en a pas besoin.
+    root.innerHTML = `
+    <button id="wc-t-explain-toggle" class="wc-btn-secondary wc-explain-toggle">
+        ${icon("search")}<span>Expliquer un bus</span>
+    </button>
+    <div id="wc-t-explain-panel" class="wc-explain-panel" hidden></div>
+    <div id="wc-t-results"></div>
+    `;
+    const toggleBtn = root.querySelector("#wc-t-explain-toggle");
+    const explainPanel = root.querySelector("#wc-t-explain-panel");
+    let explainLoaded = false;
+    toggleBtn.addEventListener("click", () => {
+        const opening = explainPanel.hidden;
+        explainPanel.hidden = !opening;
+        toggleBtn.classList.toggle("active", opening);
+        toggleBtn.querySelector("span").textContent = opening ? "Masquer l'analyse par bus" : "Expliquer un bus";
+        if (opening && !explainLoaded) {
+            explainLoaded = true;
+            renderExplainPanel(explainPanel);
+        }
+        if (opening) explainPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+
     const resBox = root.querySelector("#wc-t-results");
     resBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement des trajets signalés aujourd'hui…</p>`;
     try {
         const today = await api("/api/current-anomalies", {});
-        const freshness = today.live
+        const freshness = (today.live
             ? `<div class="wc-banner success">${LIVE_DOT}Données en direct — ${fmtDay(today.date)}</div>`
-            : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`;
+            : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`)
+            + cacheNote(today);
         if (!today.anomalies || !today.anomalies.length) {
             resBox.innerHTML = freshness + `<div class="wc-banner success">${icon("check")}Aucune anomalie aujourd'hui pour cet opérateur.</div>`
                 + `<div id="wc-t-history"></div>`;
@@ -503,7 +538,7 @@ async function renderTripsView(root) {
                 <div class="wc-banner info">${icon("info")}Aucun historique d'anomalies pour cet opérateur.</div></div>`;
             return;
         }
-        box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
+        box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>${cacheNote(hist)}
             <div class="wc-sort-row"><label>Trier par</label><select id="wc-th-sort">${
                 Object.entries(SORT_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")
             }</select></div>
@@ -531,11 +566,14 @@ async function renderTripsView(root) {
     }
 }
 
-// ── View: Expliquer un bus (filtres + verdict de ligne + référence + analyse) ───────────
-// Miroir de l'onglet tab_explain du dashboard Streamlit : verdict de ligne, trajet de
-// référence avec carte, avertissements modèle, métriques avec explications, tri,
-// catégories, cartes détaillées avec carte par trajet.
-async function renderExplainView(root) {
+// ── Panneau "Expliquer un bus" (filtres + verdict de ligne + référence + analyse) ───────
+// Miroir de l'ex-onglet tab_explain du dashboard Streamlit, maintenant repliable DANS
+// l'onglet "Trajets signalés" (fusion décidée 2026-07-19) plutôt qu'un onglet séparé --
+// `root` ici est le panneau repliable (#wc-t-explain-panel), pas la racine de l'onglet ;
+// self-contained comme avant, seule sa position dans le DOM change. Verdict de ligne,
+// trajet de référence avec carte, avertissements modèle, métriques avec explications,
+// tri, catégories, cartes détaillées avec carte par trajet.
+async function renderExplainPanel(root) {
     root.innerHTML = `
     <div class="wc-card">
         <div class="wc-filters">
@@ -756,10 +794,10 @@ async function renderExplainView(root) {
         const pct = res.total_trips ? (100 * res.anomaly_count / res.total_trips) : 0;
         resBox.innerHTML = `
         <div class="wc-card">
-            ${warning}
+            ${warning}${cacheNote(res)}
             <div class="wc-metrics">
                 <div class="wc-metric"><div class="wc-metric-label" title="Nombre total de trajets dans la période sélectionnée pour ce périmètre.">Trajets analysés ⓘ</div><div class="wc-metric-value">${res.total_trips}</div></div>
-                <div class="wc-metric"><div class="wc-metric-label" title="Trajets signalés comme anormaux par le modèle de détection (Isolation Forest + LSTM).">Trajets anormaux ⓘ</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
+                <div class="wc-metric"><div class="wc-metric-label" title="Trajets signalés comme anormaux par le système de détection automatique.">Trajets anormaux ⓘ</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
                 ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label" title="Durée médiane d'un trajet non anormal sur cette ligne — sert de référence pour juger si un trajet est trop long ou trop court.">Durée normale (médiane) ⓘ</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
             </div>
             <h4 style="margin-top:14px">Trajets signalés</h4>
@@ -1037,7 +1075,7 @@ async function renderDriversView(root) {
 }
 
 // ── Tab wiring ───────────────────────────────────────────────────────────────────────────
-const VIEWS = { trips: renderTripsView, explain: renderExplainView, trends: renderTrendsView, tickets: renderTicketsView, drivers: renderDriversView };
+const VIEWS = { trips: renderTripsView, trends: renderTrendsView, tickets: renderTicketsView, drivers: renderDriversView };
 
 function init() {
     const root = document.getElementById("wc-view-root");
