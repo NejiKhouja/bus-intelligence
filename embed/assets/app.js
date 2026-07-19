@@ -30,6 +30,27 @@ const SEV_META = {
     low: { label: "Faible", cls: "low" },
 };
 
+// ── Explications au survol des raisons (mirrors src/dashboard/i18n.py's REASON_HELP /
+// exp_* keys, FR) -- portées ici pour donner la même explicabilité que le dashboard
+// Streamlit (retour utilisateur 2026-07-19 : "expliquer tout avec le survol comme dans
+// app.py"). Affichées via l'attribut title (tooltip natif), même convention que
+// .wc-metric-label[title] déjà utilisée pour "Taux d'anomalie".
+const REASON_HELP = {
+    max_dwell_s: "Le plus long arrêt immobile détecté sur ce trajet dépasse nettement la normale. Mesuré pings-GPS-présents (bus vraiment immobile), pas un trou de signal.",
+    total_elapsed: "Durée totale du trajet (arrivée − départ), après retrait du stationnement en bordure de trajet (voir Formule) -- donc déjà nettoyée du service-non-clôturé aux deux bouts, mais PAS des arrêts survenus en cours de route.",
+    mean_dwell_s: "Durée moyenne d'immobilisation par arrêt sur ce trajet, plus élevée que la normale de la ligne -- suggère un ralentissement généralisé (trafic, retards en cascade) plutôt qu'un incident ponctuel à un seul arrêt.",
+    dist_m_max: "Écart maximal observé entre la position GPS du bus et la position théorique d'un arrêt qu'il a quand même été compté comme ayant desservi -- déviation d'itinéraire ou dérive GPS.",
+    match_rate: "Part des arrêts de la ligne effectivement détectés par le GPS sur ce trajet. Un taux bas peut venir d'un trajet partiel, d'un mauvais suivi GPS, ou d'arrêts aux coordonnées douteuses.",
+    n_stops: "Nombre d'arrêts couverts par ce trajet, nettement inférieur à la normale de la ligne/direction -- indique un trajet partiel plutôt qu'un problème de vitesse.",
+    max_dark_s: "Le plus long trou de signal GPS détecté (aucun ping reçu) sur ce trajet. Le bus a pu continuer à rouler normalement pendant ce silence -- ce temps N'EST PAS compté comme immobilisation, seulement comme incertitude.",
+    terminus_idle_min: "Temps où le traceur GPS a continué à pinger alors que le bus était garé au terminus -- avant le vrai départ ou après la vraie arrivée. Ce temps est DÉJÀ RETIRÉ de la durée du trajet affichée ; ce chiffre le montre séparément.",
+    elapsed_vs_bus_z: "Écart-type (z-score) de la durée de CE trajet par rapport à l'historique de CE BUS précis sur cette ligne. La durée comparée exclut déjà le stationnement en bordure de trajet -- ce n'est pas un artefact de stationnement non retiré.",
+    elapsed_vs_line_z: "Écart-type (z-score) de la durée de CE trajet par rapport à la médiane de TOUS les bus sur cette ligne/direction. La durée comparée exclut déjà le stationnement en bordure de trajet -- ce n'est pas un artefact de stationnement non retiré.",
+    unofficial_detour: "Le trajet réel suivi par GPS s'écarte de l'itinéraire officiel de la ligne sur une portion significative, avant de revenir dans le circuit normal.",
+};
+const REASON_HELP_DEFAULT = "Signal utilisé par le modèle de détection pour juger ce trajet anormal.";
+const FORMULA_HELP = "Durée trajet = dernier ping − premier ping, APRÈS avoir retiré le stationnement immobile en bordure du trajet (bus garé avant le vrai départ / après la vraie arrivée). Un arrêt ou une immobilisation EN COURS de trajet, elle, reste comptée dans cette durée -- ce n'est pas la même chose.";
+
 // ── Small utilities ─────────────────────────────────────────────────────────────────────
 function esc(s) {
     if (s === null || s === undefined) return "";
@@ -358,12 +379,15 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
             <span class="wc-alert-date">${fmtDay(a.day)}</span>
         </div>
         <div class="wc-metrics">
-            <div class="wc-metric"><div class="wc-metric-label">Durée du trajet</div><div class="wc-metric-value">${fmtDuration(dur)}</div></div>
+            <div class="wc-metric"><div class="wc-metric-label" title="${esc(FORMULA_HELP)}">Durée du trajet ⓘ</div><div class="wc-metric-value">${fmtDuration(dur)}</div></div>
             <div class="wc-metric"><div class="wc-metric-label">Départ → Arrivée</div><div class="wc-metric-value" style="font-size:16px">${dep} → ${arr}</div></div>
         </div>`;
 
     if (a.top_feature !== undefined) {
-        html += `<p class="wc-muted">Cause principale : <strong>${esc(TOP_FEATURE_LABELS[a.top_feature] || "Non catégorisé")}</strong></p>`;
+        html += `<div class="wc-cause">
+            <span class="wc-cause-label">Cause principale</span>
+            <span class="wc-cause-value">${icon("search")}${esc(TOP_FEATURE_LABELS[a.top_feature] || "Non catégorisé")}</span>
+        </div>`;
     }
     if (a.is_data_bug) html += `<div class="wc-banner error">${icon("alert")}Probable bug de données (durée/horodatage incohérent) — à vérifier avant d'agir.</div>`;
     else if (a.is_fragment) html += `<div class="wc-banner warn">${icon("fragment")}Trajet trop court/fragmentaire pour être jugé fiable.</div>`;
@@ -371,7 +395,11 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     else if (a.is_implausible) html += `<div class="wc-banner info">${icon("clock")}Durée improbable — à vérifier.</div>`;
     else if (a.is_partial_coverage) html += `<div class="wc-banner info">${icon("pin")}Couverture partielle (${a.n_stops ?? "?"} arrêts vs ${a.line_median_n_stops ?? "?"} normalement).</div>`;
 
-    for (const r of reasons) html += `<div class="wc-reason">${esc(r)}</div>`;
+    const reasonFeats = a.reason_features || [];
+    reasons.forEach((r, i) => {
+        const help = REASON_HELP[reasonFeats[i]] || REASON_HELP_DEFAULT;
+        html += `<div class="wc-reason" title="${esc(help)}">${esc(r)}</div>`;
+    });
 
     // Stationnement terminus DÉTAILLÉ (quel terminus, de quand à quand) -- parité avec le
     // dashboard Streamlit (chip_origin_idle/chip_end_idle) : le chiffre "~N min avant
@@ -728,6 +756,14 @@ async function renderExplainPanel(root, { onResults }) {
         } else {
             inner += `<p class="wc-muted">Direction : <strong>${esc(dirNames[0])}</strong> (aucun trajet normal exploitable trouvé pour l'autre direction sur cette ligne).</p>`;
         }
+        // Onglets ALLER/RETOUR côte à côte (redesign 2026-07-19, retour utilisateur : "je
+        // veux y accéder à travers les tabs comme dans Streamlit" -- st.tabs(dirs.keys())).
+        // Un seul bouton = pas de barre d'onglets, rien à sélectionner.
+        if (dirNames.length > 1) {
+            inner += `<div class="wc-ref-tabs">${dirNames.map((d, i) =>
+                `<button type="button" class="wc-ref-tab${i === 0 ? " active" : ""}" data-dir="${esc(d)}">${esc(d)}</button>`
+            ).join("")}</div>`;
+        }
         for (const d of dirNames) {
             const entry = dirs[d];
             const rt = entry.trip;
@@ -740,8 +776,8 @@ async function renderExplainPanel(root, { onResults }) {
                 ? `<div class="wc-banner info">${icon("info")}Couverture GPS partielle : le traceur ne couvre que <strong>${rt.covered_stops} des ${rt.geometry_stops} arrêts</strong> de la ligne sur ce trajet — aucun trajet entièrement suivi n'était disponible dans cette direction (fréquent quand le traceur est coupé en cours de route). Durée et arrêts affichés ne portent que sur la partie couverte.</div>`
                 : "";
             inner += `
-            <div class="wc-ref-dir">
-                <h4>${esc(d)}</h4>
+            <div class="wc-ref-dir" data-dir="${esc(d)}"${d === dirNames[0] ? "" : " hidden"}>
+                ${dirNames.length > 1 ? "" : `<h4>${esc(d)}</h4>`}
                 <p class="wc-muted">Trajet réel, jugé normal par le modèle, choisi parmi les mieux suivis (${(rt.match_rate * 100).toFixed(0)}% des arrêts) avec une durée proche de la médiane de la ligne pour cette direction — comparez les anomalies ci-dessous à cette référence.</p>
                 ${partialNote}
                 <div class="wc-metrics">
@@ -761,20 +797,33 @@ async function renderExplainPanel(root, { onResults }) {
         inner += `</details>`;
         refBox.innerHTML = `<div class="wc-card">${inner}</div>`;
 
-        // Cartes chargées à l'OUVERTURE du bloc (pas d'office) -- Leaflet dans un <details>
-        // fermé mesure une taille nulle et rend une carte grise ; on attend le premier
-        // toggle pour instancier, puis c'est fait une fois pour toutes.
-        const details = refBox.querySelector("details");
-        let mapsDone = false;
-        details.addEventListener("toggle", async () => {
-            if (!details.open || mapsDone) return;
-            mapsDone = true;
-            try { await ensureLeaflet(); } catch { return; }
-            for (const d of dirNames) {
-                const holder = refBox.querySelector(`.wc-ref-map[data-dir="${CSS.escape(d)}"]`);
-                if (holder && dirs[d].sequence) renderTripMap(holder, dirs[d].sequence, d, null);
+        // Bascule d'onglet : montre/cache le bloc de direction correspondant. La carte
+        // Leaflet de la direction nouvellement affichée est instanciée à la demande (voir
+        // plus bas) -- pas les deux à l'ouverture -- puisque seule une est visible à la fois.
+        const tabBtns = [...refBox.querySelectorAll(".wc-ref-tab")];
+        tabBtns.forEach((btn) => btn.addEventListener("click", () => {
+            const d = btn.dataset.dir;
+            tabBtns.forEach((b) => b.classList.toggle("active", b === btn));
+            for (const dd of dirNames) {
+                refBox.querySelector(`.wc-ref-dir[data-dir="${CSS.escape(dd)}"]`).hidden = dd !== d;
             }
-        });
+            renderRefMap(d);
+        }));
+
+        // Cartes chargées à l'OUVERTURE du bloc (pas d'office) -- Leaflet dans un <details>
+        // fermé, ou dans un onglet caché (display:none), mesure une taille nulle et rend
+        // une carte grise ; on attend le premier affichage RÉEL de chaque direction pour
+        // instancier la sienne, une seule fois chacune.
+        const details = refBox.querySelector("details");
+        const mapsBuilt = new Set();
+        async function renderRefMap(d) {
+            if (!details.open || mapsBuilt.has(d) || !dirs[d].sequence) return;
+            mapsBuilt.add(d);
+            try { await ensureLeaflet(); } catch { return; }
+            const holder = refBox.querySelector(`.wc-ref-map[data-dir="${CSS.escape(d)}"]`);
+            if (holder) renderTripMap(holder, dirs[d].sequence, d, null);
+        }
+        details.addEventListener("toggle", () => { if (details.open) renderRefMap(dirNames[0]); });
     }
 
     async function runAnalysis() {

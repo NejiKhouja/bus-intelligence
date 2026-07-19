@@ -236,7 +236,8 @@ class ModelManager:
         return self._models[model_name]
 
     def foundation_slice(self, societe: str, line: str = None, bus=None,
-                        day: str = None, trip_id: int = None) -> Optional[pd.DataFrame]:
+                        day: str = None, trip_id: int = None,
+                        include_live: bool = True) -> Optional[pd.DataFrame]:
         """Trip/stop detail for a scoped request, queried on demand from `trips`/
         `trip_stops` (see `reference_db.query_foundation_slice`) -- replaces the old
         permanently-resident `foundation_arrivals_full.parquet` DataFrame (see git history
@@ -250,6 +251,14 @@ class ModelManager:
         equal to the live day) -- see _score_all_gps_live. Without this, "view details"/the
         map for a trip flagged from live data would come up empty: that trip was never
         written to trips/trip_stops, it only exists in the in-memory live cache.
+
+        `include_live=False` skips that merge entirely -- for a caller that's explicitly
+        after HISTORICAL/typical behaviour (e.g. `reference_trip`, hunting for a normal
+        PAST trip, never today's), `day=None` would otherwise trigger a full company-wide
+        live-GPS webservice fetch + trip reconstruction + scoring for NO benefit, on top of
+        the line's own (potentially large) historical slice -- confirmed 2026-07-19: OOM on
+        `/api/reference-trip` for a big line (S.R.T.K/212, 2000+ trips), the two costs
+        stacking in one request.
         """
         try:
             conn = rdb.init_db()
@@ -263,7 +272,7 @@ class ModelManager:
             return None
 
         potential_live_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-        if day is None or day == potential_live_day:
+        if include_live and (day is None or day == potential_live_day):
             live = _score_all_gps_live(societe, potential_live_day)
             if live is not None and len(live["stops"]):
                 live_stops = live["stops"]
@@ -1190,7 +1199,8 @@ def _trip_quality_flags(trips: pd.DataFrame, models) -> pd.DataFrame:
 
 def _filter_trips(societe: str, line: Optional[str] = None,
                   bus: Optional[int] = None, day: Optional[str] = None,
-                  include_data_bugs: bool = False, dir: Optional[str] = None):
+                  include_data_bugs: bool = False, dir: Optional[str] = None,
+                  include_live: bool = True):
     """Filter the scored-trips table -- precomputed (historical) PLUS, when relevant,
     yesterday's data scored live from the GPS web service (see _score_all_gps_live).
 
@@ -1199,12 +1209,17 @@ def _filter_trips(societe: str, line: Optional[str] = None,
     day never needs a webservice round-trip. `day=None` merges live trips in alongside
     history (so "Historique récent"/patterns naturally include yesterday); `day=<live
     day>` returns ONLY the live trips for that exact day (an explicit pick).
+
+    `include_live=False` skips the merge outright, for callers that are explicitly after
+    HISTORICAL/typical behaviour and never today's (e.g. `reference_trip`) -- avoids
+    paying for a full company-wide live-GPS fetch + reconstruction for no benefit. See the
+    matching note on `ModelManager.foundation_slice`.
     """
     models = model_manager.get("anomaly")
     trips = models["trips"]
 
     potential_live_day = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-    if day is None or day == potential_live_day:
+    if include_live and (day is None or day == potential_live_day):
         live = _score_all_gps_live(societe, potential_live_day)
         if live is not None:
             if day == potential_live_day:
@@ -2589,9 +2604,13 @@ def reference_trip(societe: str, line: str):  # def, pas async def -- voir get_a
     stationnement observé est probablement un service non clôturé plutôt qu'une pause
     normale.
     """
-    df = model_manager.foundation_slice(societe, line=line)
+    # include_live=False : un trajet de référence est par définition HISTORIQUE (un
+    # trajet PASSÉ jugé normal), jamais celui d'aujourd'hui -- voir la note dans
+    # foundation_slice pour l'incident que ça évite (double coût : la tranche historique
+    # de toute la ligne + une reconstruction live de toute la société, en une requête).
+    df = model_manager.foundation_slice(societe, line=line, include_live=False)
     try:
-        models, trips = _filter_trips(societe, line)   # déjà nettoyé des bugs/fragments
+        models, trips = _filter_trips(societe, line, include_live=False)   # déjà nettoyé des bugs/fragments
     except KeyError:
         raise HTTPException(status_code=503, detail="Anomaly models not loaded")
     if df is None or len(trips) == 0:

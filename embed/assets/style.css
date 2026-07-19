@@ -246,7 +246,26 @@
 .wc-alert-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .wc-alert-title { font-weight: 700; font-size: 13.5px; }
 .wc-alert-date { color: var(--wc-text-muted); font-size: 12.5px; }
-.wc-reason { font-size: 12.5px; color: #c8d4e6; margin: 3px 0; padding-left: 14px; position: relative; }
+/* ── Cause principale -- redesign 2026-07-19 (retour utilisateur : "plus d'espace visuel")
+   Remplace l'ancien <p class="wc-muted"> collé sous les métriques par un bloc à part
+   entière, avec accent de couleur + respiration, cohérent avec .wc-banner/.wc-chip mais
+   visuellement distinct puisque c'est LE résumé de la carte, pas un détail secondaire. */
+.wc-cause {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    background: var(--wc-bg-elevated);
+    border: 1px solid var(--wc-border);
+    border-left: 3px solid var(--wc-orange);
+    border-radius: var(--wc-radius-sm);
+    padding: 10px 14px;
+    margin: 2px 0 16px;
+}
+.wc-cause-label { font-size: 11px; color: var(--wc-text-muted); text-transform: uppercase; letter-spacing: .03em; font-weight: 600; }
+.wc-cause-value { font-size: 14px; font-weight: 700; color: var(--wc-text); display: flex; align-items: center; }
+.wc-reason { font-size: 12.5px; color: #c8d4e6; margin: 3px 0; padding-left: 14px; position: relative; cursor: help; }
 .wc-reason::before { content: "•"; position: absolute; left: 0; color: var(--wc-orange); }
 .wc-chip { font-size: 12px; color: var(--wc-text-muted); margin: 4px 0; }
 .wc-chip.detour { color: #c9a8ff; }
@@ -350,6 +369,20 @@ button.wc-link-muted:hover { color: var(--wc-orange); }
     user-select: none;
 }
 .wc-ref summary:hover { color: var(--wc-orange); }
+/* ALLER/RETOUR côte à côte (redesign 2026-07-19, mirrors Streamlit's st.tabs) -- remplace
+   les deux blocs .wc-ref-dir empilés par des onglets, un seul visible à la fois. */
+.wc-ref-tabs { display: flex; gap: 6px; margin: 10px 0 4px; border-bottom: 1px solid var(--wc-border); }
+.wc-embed button.wc-ref-tab {
+    all: unset;
+    cursor: pointer;
+    padding: 7px 16px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--wc-text-muted);
+    border-bottom: 2px solid transparent;
+}
+.wc-embed button.wc-ref-tab:hover { color: var(--wc-text); }
+.wc-embed button.wc-ref-tab.active { color: var(--wc-orange); border-bottom-color: var(--wc-orange); }
 .wc-ref-dir { border-top: 1px solid var(--wc-border); margin-top: 12px; padding-top: 10px; }
 .wc-ref-dir h4 { margin: 0 0 6px; color: var(--wc-orange); }
 .wc-ref-map { margin-top: 8px; }
@@ -487,7 +520,7 @@ button.wc-link-muted:hover { color: var(--wc-orange); }
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-bottom: 14px;
+    margin-bottom: 26px;
 }
 .wc-explain-toggle.active { border-color: var(--wc-orange); color: var(--wc-orange); }
 .wc-explain-panel {
