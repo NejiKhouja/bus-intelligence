@@ -608,7 +608,7 @@ async function renderExplainPanel(root, { onResults }) {
         <div class="wc-filters">
             <div class="wc-field">
                 <label>Ligne</label>
-                <select id="wc-e-line"><option value="">Toutes les lignes</option></select>
+                <select id="wc-e-line"><option value="" disabled selected>— Choisir une ligne —</option></select>
             </div>
             <div class="wc-field">
                 <label>Bus</label>
@@ -649,7 +649,11 @@ async function renderExplainPanel(root, { onResults }) {
         for (const line of (d.lines || [])) {
             lineSel.appendChild(el(`<option value="${esc(line)}">${esc(line)}</option>`));
         }
-        hint.textContent = "Choisissez une ligne précise ou laissez « Toutes les lignes » et cliquez Analyser.";
+        // "Toutes les lignes" retiré (décision utilisateur 2026-07-19) : analyser
+        // l'historique de toutes les lignes d'une société à la fois causait un HTTP 502
+        // (requête trop lourde pour une réponse synchrone) -- une ligne est maintenant
+        // toujours obligatoire, ce qui garde chaque analyse dans un périmètre rapide.
+        hint.textContent = "Choisissez une ligne puis cliquez Analyser.";
     }).catch(() => { hint.textContent = "Impossible de charger la liste des lignes."; });
 
     lineSel.addEventListener("change", async () => {
@@ -780,14 +784,14 @@ async function renderExplainPanel(root, { onResults }) {
         let day = daySel.value || null;
         if (manualDate.value) day = manualDate.value.replace(/-/g, "");
 
-        // "Toutes les lignes" + "Tous les jours" ensemble = tout l'historique de TOUTES
-        // les lignes d'une société en une seule requête synchrone -- confirmé 2026-07-19 :
-        // HTTP 502 (timeout upstream Render), même sans le contrôle de détour. Plutôt que
-        // laisser cette combinaison échouer après une longue attente, on la bloque AVANT
-        // l'appel : il suffit de préciser une ligne OU un jour/une date pour rester dans
-        // un périmètre qui répond de façon fiable.
-        if (!line && !day) {
-            resBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Précisez une ligne ou un jour/une date précise pour analyser — l'historique complet de « Toutes les lignes » à la fois est trop volumineux pour un aperçu instantané.</div>`;
+        // Ligne obligatoire (décision utilisateur 2026-07-19, en plus stricte que le
+        // garde-fou précédent) : "Toutes les lignes" a été retiré du menu ci-dessus, donc
+        // ce cas ne devrait plus se produire depuis l'UI -- gardé quand même en dernier
+        // recours (ex. le <select> pourrait être manipulé). "Toutes les lignes" à la fois
+        // scannait tout l'historique de la société en une seule requête synchrone,
+        // confirmé 2026-07-19 : HTTP 502 (timeout upstream Render).
+        if (!line) {
+            resBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Choisissez une ligne pour analyser.</div>`;
             return;
         }
 

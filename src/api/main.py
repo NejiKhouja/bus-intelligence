@@ -2099,6 +2099,14 @@ def anomaly_explain(  # def, pas async def -- voir la note dans get_anomaly_hist
     which may be None. Keying the detour track cache by (line, bus, day) rather than just
     (bus, day) for the same reason: a bus number isn't guaranteed unique across lines.
 
+    `line` is now ALWAYS required in practice (see the guard right below) -- decision
+    2026-07-19, stricter than the original "line OR day" rule from two days earlier: even
+    "all lines, one specific day" was more than the user wanted to allow through this
+    endpoint at all ("prohibit it, only let the user choose one line at a time"). The
+    `line=None` code path above is kept working rather than deleted, in case this guard is
+    ever relaxed again (e.g. after a move off the 512MB free tier) -- `line: Optional[str]`
+    stays in the signature for that reason, not because it's currently reachable.
+
     `check_detours` is opt-in (default False) -- it needs a LIVE raw-GPS-ping read per
     distinct (line, bus, day) in the list, plus a Kalman filter over each, to reconstruct
     the actual path driven (see `_detect_start_detour`/`_build_gps_track`). Not called by
@@ -2110,17 +2118,16 @@ def anomaly_explain(  # def, pas async def -- voir la note dans get_anomaly_hist
     parameter for callers that genuinely want the bulk version (e.g. a scheduled report
     with no request-latency constraint).
     """
-    # Garde-fou : "toutes les lignes" + "tous les jours" ensemble scanne TOUT l'historique
-    # de la société en une seule requête synchrone -- confirmé 2026-07-19 (502, timeout
-    # upstream Render) même sans le contrôle de détour (déjà retiré par ailleurs). Refusé
-    # explicitement plutôt que laissé échouer après une longue attente ; l'appelant garde
-    # toutes les autres combinaisons (une ligne sur tout l'historique, ou "toutes les
-    # lignes" sur un jour précis), toutes les deux bornées et déjà mesurées rapides.
-    if line is None and day is None:
+    # Garde-fou : ligne TOUJOURS requise (décision utilisateur 2026-07-19, resserré depuis
+    # la version précédente qui acceptait aussi "toutes les lignes + un jour précis") --
+    # "toutes les lignes" à la fois scanne tout l'historique de la société en une seule
+    # requête synchrone, confirmé 2026-07-19 : HTTP 502 (timeout upstream Render) même sans
+    # le contrôle de détour (déjà retiré par ailleurs). Refusé explicitement plutôt que
+    # laissé échouer après une longue attente.
+    if line is None:
         raise HTTPException(status_code=422, detail=(
-            "Précisez une ligne ou un jour/une date pour analyser -- l'historique complet "
-            "de toutes les lignes à la fois dépasse ce que l'instance peut traiter en une "
-            "seule requête."
+            "Choisissez une ligne pour analyser -- l'historique de toutes les lignes à la "
+            "fois n'est pas proposé, quel que soit le jour."
         ))
 
     # Tranche fondation chargée au PLUS ÉTROIT possible -- l'ancienne version chargeait
