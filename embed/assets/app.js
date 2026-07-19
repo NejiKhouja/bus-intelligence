@@ -342,6 +342,17 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
 
     for (const r of reasons) html += `<div class="wc-reason">${esc(r)}</div>`;
 
+    // Stationnement terminus DÉTAILLÉ (quel terminus, de quand à quand) -- parité avec le
+    // dashboard Streamlit (chip_origin_idle/chip_end_idle) : le chiffre "~N min avant
+    // départ/après arrivée" de la raison modèle est mesuré sur les pings GPS (bus immobile
+    // au terminus, temps DÉJÀ RETIRÉ de la durée du trajet affichée), et méritait d'être
+    // nommé + horodaté au lieu d'un chiffre nu (retour utilisateur 2026-07-18).
+    if ((a.origin_idle_min || 0) >= 30 && a.origin_idle_stop) {
+        html += `<div class="wc-chip">${icon("parking")}Stationné au terminus <strong>${esc(a.origin_idle_stop)}</strong> avant le départ : <strong>${a.origin_idle_min.toFixed(0)} min</strong> — le traceur pingait sur place de ${fmtTime(a.origin_idle_from)} à ${dep} (départ réel). Temps non compté dans la durée du trajet ci-dessus.</div>`;
+    }
+    if ((a.end_idle_min || 0) >= 30 && a.end_idle_stop) {
+        html += `<div class="wc-chip">${icon("parking")}Stationné au terminus <strong>${esc(a.end_idle_stop)}</strong> après l'arrivée : <strong>${a.end_idle_min.toFixed(0)} min</strong> — immobile de ${arr} (arrivée réelle) à ${fmtTime(a.end_idle_to)}. Temps non compté dans la durée du trajet ci-dessus.</div>`;
+    }
     if (ps.longest_stop && ps.longest_stop.dwell_min >= 5) {
         html += `<div class="wc-chip">${icon("parking")}Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
     }
@@ -652,10 +663,19 @@ async function renderExplainView(root) {
         for (const d of dirNames) {
             const entry = dirs[d];
             const rt = entry.trip;
+            // Un trajet de référence peut être PARTIEL quand la direction n'a (quasi)
+            // aucun trajet complet -- fait des DONNÉES, pas un bug d'affichage (constaté
+            // 2026-07-18, S.R.T.K/202 : 409/498 ALLER complets contre 2/443 RETOUR, le
+            // traceur s'arrête systématiquement en route au retour). Sans cette note,
+            // l'écart de nombre d'arrêts/durée entre les deux directions est illisible.
+            const partialNote = (rt.is_full === false && rt.geometry_stops)
+                ? `<div class="wc-banner info">${icon("info")}Couverture GPS partielle : le traceur ne couvre que <strong>${rt.covered_stops} des ${rt.geometry_stops} arrêts</strong> de la ligne sur ce trajet — aucun trajet entièrement suivi n'était disponible dans cette direction (fréquent quand le traceur est coupé en cours de route). Durée et arrêts affichés ne portent que sur la partie couverte.</div>`
+                : "";
             inner += `
             <div class="wc-ref-dir">
                 <h4>${esc(d)}</h4>
                 <p class="wc-muted">Trajet réel, jugé normal par le modèle, choisi parmi les mieux suivis (${(rt.match_rate * 100).toFixed(0)}% des arrêts) avec une durée proche de la médiane de la ligne pour cette direction — comparez les anomalies ci-dessous à cette référence.</p>
+                ${partialNote}
                 <div class="wc-metrics">
                     <div class="wc-metric"><div class="wc-metric-label">Bus</div><div class="wc-metric-value">${esc(rt.bus)}</div></div>
                     <div class="wc-metric"><div class="wc-metric-label">Jour</div><div class="wc-metric-value" style="font-size:15px">${fmtDay(rt.day)}</div></div>
@@ -718,14 +738,18 @@ async function renderExplainView(root) {
             return;
         }
 
-        // Avertissement modèle à faible historique -- une seule fois pour la liste (mêmes
-        // textes que le dashboard Streamlit, voir i18n model_warning_*).
+        // Avertissement historique insuffisant -- une seule fois pour la liste, en langage
+        // SIMPLE (retour utilisateur 2026-07-18 : la version citant Isolation Forest /
+        // autoencodeur LSTM / modèle global était trop technique pour un client). Le fond
+        // reste exact : comparaison au réseau entier plutôt qu'à ce périmètre précis.
+        // model_low_data est fiable depuis le correctif côté API (un LSTM désactivé au
+        // niveau du déploiement n'est plus présenté comme un manque de données).
         const a0 = res.anomalies[0];
         let warning = "";
         if (a0 && a0.model_low_data) {
-            const txt = (!a0.model_if_dedicated && !a0.model_lstm_dedicated)
-                ? "Cet opérateur n'a pas encore assez de trajets enregistrés pour un modèle d'anomalie dédié (ni Isolation Forest, ni autoencodeur LSTM). La détection ci-dessous compare donc ces trajets à l'ensemble du réseau (toutes sociétés et lignes confondues), <strong>pas spécifiquement à cette ligne ni à cet opérateur</strong> — le résultat n'est pas garanti à 100% et doit être interprété avec prudence. La précision s'améliorera automatiquement dès que cet opérateur accumulera plus de données."
-                : "Cet opérateur a assez de trajets pour son propre modèle Isolation Forest, mais pas encore assez pour un autoencodeur LSTM dédié — celui-ci retombe sur un modèle <strong>global</strong> entraîné sur toutes les sociétés confondues. Le résultat doit être interprété avec prudence — la précision s'améliorera automatiquement avec plus de données.";
+            const txt = (!a0.model_if_dedicated)
+                ? "Le système a encore peu d'historique pour cet opérateur : ces trajets sont comparés à l'ensemble du réseau, pas à cette ligne précisément. Résultats à prendre avec un peu de recul — la précision s'affinera d'elle-même à mesure que l'historique grandit."
+                : "L'historique de cet opérateur est encore partiel : une partie de l'analyse le compare à l'ensemble du réseau plutôt qu'à cette ligne précisément. Résultats à prendre avec un peu de recul — la précision s'affinera d'elle-même à mesure que l'historique grandit.";
             warning = `<div class="wc-banner warn">${icon("alert")}${txt}</div>`;
         }
 

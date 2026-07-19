@@ -1264,7 +1264,15 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
     # du cas intermédiaire (comparé à l'opérateur entier, toutes lignes poolées), pour que
     # le dashboard puisse nuancer son avertissement au lieu de traiter les deux pareil.
     if_models = models.get("if_models", {})
-    lstm_models = models.get("lstm_models", {})
+    lstm_models = models.get("lstm_models") or {}
+    # LSTM absent ≠ LSTM pas assez entraîné : le déploiement slim (Render) n'installe PAS
+    # torch, donc lstm_models est VIDE quel que soit l'historique -- avant ce correctif,
+    # une ligne avec largement assez de trajets (constaté 2026-07-18 : S.R.T.K/202, 876
+    # trajets, modèle LSTM dédié bien présent dans les artefacts) affichait quand même
+    # "pas assez de données pour un LSTM dédié". Quand le LSTM est indisponible au niveau
+    # du DÉPLOIEMENT, il est exclu du calcul de model_low_data au lieu d'être imputé aux
+    # données ; les scores LSTM précalculés de l'entraînement restent servis tels quels.
+    lstm_enabled = bool(lstm_models)
     driver_lookup = _driver_code_lookup()
     schedules = _scheduled_departures()
 
@@ -1273,9 +1281,9 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
         soc = r.get("societe")
         line = r.get("line")
         if_line_dedicated = (soc, line) in if_models
-        lstm_line_dedicated = (soc, line) in lstm_models
+        lstm_line_dedicated = lstm_enabled and (soc, line) in lstm_models
         if_dedicated = if_line_dedicated or soc in if_models
-        lstm_dedicated = lstm_line_dedicated or soc in lstm_models
+        lstm_dedicated = lstm_enabled and (lstm_line_dedicated or soc in lstm_models)
         driver_code = driver_lookup.get((soc, line, str(int(r["bus"])), r["day"], r["trip_start"]))
 
         # Départ prévu (horaire publié, voir _scheduled_departures) vs départ réel
@@ -1307,8 +1315,9 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
             "schedule_multi_variant": schedule_multi_variant,
             "model_if_dedicated": bool(if_dedicated),
             "model_lstm_dedicated": bool(lstm_dedicated),
-            "model_line_dedicated": bool(if_line_dedicated and lstm_line_dedicated),
-            "model_low_data": not (if_dedicated and lstm_dedicated),
+            "model_lstm_enabled": lstm_enabled,
+            "model_line_dedicated": bool(if_line_dedicated and (lstm_line_dedicated or not lstm_enabled)),
+            "model_low_data": not (if_dedicated and (lstm_dedicated or not lstm_enabled)),
             "societe": soc,
             "day": r["day"],
             "trip_id": int(r["trip_id"]),
@@ -2564,6 +2573,8 @@ async def reference_trip(societe: str, line: str):
     normal_by_dir = {d: _normal(trips[trips["dir"] == d]) for d in ("ALLER", "RETOUR")}
     med_by_dir = {d: float(trips[trips["dir"] == d]["total_elapsed"].median())
                  for d in ("ALLER", "RETOUR")}
+    _usable = _load_usable_lines()
+    _line_geometry_stops = len(_usable.get((line, societe), []))
     idle_by_dir: dict = {}
     for d in ("ALLER", "RETOUR"):
         idle_col = (normal_by_dir[d]["terminus_idle_min"]
@@ -2587,6 +2598,15 @@ async def reference_trip(societe: str, line: str):
                 "typical_terminus_idle_min": (round(typical_idle, 1) if typical_idle is not None else None),
                 "service_not_closed_threshold_min": (round(2 * typical_idle, 1)
                                                      if typical_idle else None),
+                # Couverture : un trajet de référence peut être PARTIEL quand la direction
+                # n'a (quasi) aucun trajet complet -- constaté 2026-07-18 sur S.R.T.K/202 :
+                # 409/498 ALLER complets contre 2/443 RETOUR (le traceur s'arrête
+                # systématiquement en route au retour). Sans ce champ, l'écart de nombre
+                # d'arrêts/durée entre les deux directions ressemble à un bug d'affichage
+                # alors que c'est un fait des données -- l'UI l'explique maintenant.
+                "is_full": (bool(row["full"]) if pd.notna(row.get("full")) else None),
+                "covered_stops": len(seq),
+                "geometry_stops": _line_geometry_stops,
             },
             "sequence": seq,
         }
@@ -2594,7 +2614,7 @@ async def reference_trip(societe: str, line: str):
     directions: dict = {}
     if len(normal_by_dir["ALLER"]) and len(normal_by_dir["RETOUR"]):
         cols = ["day", "bus", "trip_id", "trip_start", "trip_end", "total_elapsed",
-               "match_rate", "n_stops", "mean_dwell_s"]
+               "match_rate", "n_stops", "mean_dwell_s", "full"]
         merged = normal_by_dir["ALLER"][cols].merge(
             normal_by_dir["RETOUR"][cols], on=["day", "bus"], suffixes=("_a", "_r"))
         merged = merged[merged["trip_start_r"] > merged["trip_end_a"]]
