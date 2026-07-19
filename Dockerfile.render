@@ -55,10 +55,14 @@ ENV ENABLED_MODULES=anomaly,ticket_anomaly
 # d'un bus-jour entier + filtre Kalman PAR bus-jour vérifié. Sur cette instance 512MB,
 # la valeur par défaut (8 workers en parallèle) tuait le process par OOM -- constaté
 # 2026-07-17 : redémarrages en boucle dans les logs, 502 côté client pendant la requête.
-# 1 worker = une seule trace en mémoire à la fois ; DETOUR_MAX_TRACKS borne le nombre de
-# bus-jours vérifiés par requête (les plus récents d'abord, le reste rendu "non vérifié").
+# 1 worker = une seule trace en mémoire à la fois. DETOUR_MAX_TRACKS re-réduit 20 -> 8
+# (2026-07-19) après un NOUVEL OOM sur une analyse "historique complet d'une ligne" --
+# vraisemblablement un nombre de bus-jours signalés encore trop grand pour la mémoire
+# restante une fois le reste de l'appli (modèles, cache DB) déjà chargé ; le reste des
+# bus-jours au-delà de la limite est simplement rendu "non vérifié", jamais faussement
+# "pas de détour".
 ENV DETOUR_WORKERS=1
-ENV DETOUR_MAX_TRACKS=20
+ENV DETOUR_MAX_TRACKS=8
 
 # $PORT is provided by Render; the ${PORT:-8000} fallback keeps `docker run` working locally
 CMD ["sh", "-c", "uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

@@ -1839,7 +1839,17 @@ async def anomaly_score_live(request: AnomalyLiveScoreRequest):
 
 
 @app.get("/api/anomaly-history")
-async def get_anomaly_history(
+# `def`, PAS `async def` -- ce handler ne fait QUE du travail pandas/sqlite synchrone (pas
+# un seul `await` réel dessous). Sous `async def`, ce travail bloque l'event loop unique de
+# l'instance Render (WEB_CONCURRENCY=1) pendant toute sa durée -- y compris /health, qui
+# devient alors injoignable -- constaté 2026-07-19 : "HTTP health check failed (timed out
+# after 5 seconds)" pendant un appel synchrone de ~20s, PAS un OOM cette fois. `def` simple
+# fait tourner ce handler dans le threadpool de Starlette, l'event loop restant libre de
+# répondre à /health et aux autres requêtes en parallèle. Appliqué ici aux 5 handlers les
+# plus lourds (ceux exercés par le flux qui a crashé) ; le reste de l'API garde `async def`
+# par cohérence avec le style existant -- à convertir de la même façon si le même symptôme
+# réapparaît ailleurs.
+def get_anomaly_history(
     societe: str,
     line: Optional[str] = None,
     bus: Optional[int] = None,
@@ -1895,7 +1905,7 @@ async def check_bus_anomalies(
 
 
 @app.get("/api/current-anomalies")
-async def get_current_anomalies(
+def get_current_anomalies(  # def, pas async def -- voir la note dans get_anomaly_history
     societe: str,
     line: Optional[str] = None,
     dir: Optional[str] = None
@@ -2072,7 +2082,7 @@ def _detect_start_detour(g, trip_start, longest_stop, cfg, detour_thresh_m: floa
 
 
 @app.get("/api/anomaly-explain")
-async def anomaly_explain(
+def anomaly_explain(  # def, pas async def -- voir la note dans get_anomaly_history
     societe: str,
     line: Optional[str] = None,
     bus: Optional[int] = None,
@@ -2538,7 +2548,7 @@ async def driver_stats(driver_code: str, societe: Optional[str] = None):
 
 
 @app.get("/api/reference-trip")
-async def reference_trip(societe: str, line: str):
+def reference_trip(societe: str, line: str):  # def, pas async def -- voir get_anomaly_history
     """LE trajet « témoin » d'une ligne, PAR DIRECTION : un trajet réel, non anormal, bien
     suivi, de durée proche de la médiane -- affiché au-dessus des anomalies comme référence
     (« voici à quoi ressemble un trajet normal sur cette ligne »). Renforce la confiance : le
@@ -2648,7 +2658,7 @@ async def reference_trip(societe: str, line: str):
 
 
 @app.get("/api/anomaly-patterns")
-async def anomaly_patterns(
+def anomaly_patterns(  # def, pas async def -- voir la note dans get_anomaly_history
     societe: str,
     line: Optional[str] = None
 ):

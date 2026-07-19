@@ -85,6 +85,14 @@ const CACHE_RULES = [
     '/api/ticket-anomaly-reference' => [1800, 21600],
 ];
 
+// Endpoints trop coûteux côté serveur Render pour être revalidés SILENCIEUSEMENT --
+// servis périmés sans déclencher de rafraîchissement en arrière-plan (voir la note dans
+// la branche STALE plus bas). Seul anomaly-explain (détours = filtre de Kalman par
+// bus-jour signalé) l'est aujourd'hui ; ajouter ici tout futur endpoint du même acabit.
+const NO_BG_REFRESH = [
+    '/api/anomaly-explain',
+];
+
 $endpoint = $_GET['endpoint'] ?? '';
 if (!in_array($endpoint, ALLOWED_ENDPOINTS, true)) {
     http_response_code(400);
@@ -183,30 +191,42 @@ if ($age !== null && $cached_status < 400) {
         header("X-Cache-Age: $age");
         http_response_code($cached_status);
         readfile($cache_file);
-        // Déclenchement tir-et-oublie de la revalidation -- CE visiteur ne l'attend pas
-        // (timeout très court côté déclencheur) ; le script continue seul côté serveur
-        // (ignore_user_abort dans la branche _bg=1 ci-dessus), même mécanisme que
-        // autorun.php pour le relais quotidien.
-        $self = sprintf('%s://%s%s', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http',
-                        $_SERVER['HTTP_HOST'] ?? 'localhost', $_SERVER['SCRIPT_NAME'] ?? '/proxy.php');
-        $bg_params = $params;
-        unset($bg_params['societe']);
-        $bg_params['endpoint'] = $endpoint;
-        $bg_params['_bg'] = 1;
-        $bg_params['_bg_key'] = WINICARI_API_KEY;
-        if ($company !== null) {
-            $bg_params['_company'] = $company;
+        // PAS de revalidation en arrière-plan pour les endpoints coûteux (voir
+        // NO_BG_REFRESH) -- anomaly-explain?check_detours=true fait tourner un filtre de
+        // Kalman par bus-jour signalé sur le serveur Render 512MB, déjà responsable de
+        // plusieurs OOM avant même l'ajout du cache. Le déclencher SILENCIEUSEMENT en
+        // arrière-plan (sans qu'aucun visiteur n'ait cliqué "Analyser") pouvait faire
+        // tourner cette analyse en parallèle d'une requête réellement en cours, cumulant
+        // la mémoire des deux -- constaté 2026-07-19 juste après l'ajout du cache. Un
+        // résultat périmé reste servi instantanément (juste sans rafraîchissement
+        // automatique) ; il ne redevient frais que sur un vrai clic "Analyser" du
+        // visiteur, ou après STALE_MAX quand le cache tombe en MISS.
+        if (!in_array($endpoint, NO_BG_REFRESH, true)) {
+            // Déclenchement tir-et-oublie de la revalidation -- CE visiteur ne l'attend pas
+            // (timeout très court côté déclencheur) ; le script continue seul côté serveur
+            // (ignore_user_abort dans la branche _bg=1 ci-dessus), même mécanisme que
+            // autorun.php pour le relais quotidien.
+            $self = sprintf('%s://%s%s', (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http',
+                            $_SERVER['HTTP_HOST'] ?? 'localhost', $_SERVER['SCRIPT_NAME'] ?? '/proxy.php');
+            $bg_params = $params;
+            unset($bg_params['societe']);
+            $bg_params['endpoint'] = $endpoint;
+            $bg_params['_bg'] = 1;
+            $bg_params['_bg_key'] = WINICARI_API_KEY;
+            if ($company !== null) {
+                $bg_params['_company'] = $company;
+            }
+            $ch = curl_init($self . '?' . http_build_query($bg_params));
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT_MS => 400,
+                CURLOPT_CONNECTTIMEOUT_MS => 300,
+                CURLOPT_NOSIGNAL => 1,
+                CURLOPT_SSL_VERIFYPEER => false,
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
         }
-        $ch = curl_init($self . '?' . http_build_query($bg_params));
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT_MS => 400,
-            CURLOPT_CONNECTTIMEOUT_MS => 300,
-            CURLOPT_NOSIGNAL => 1,
-            CURLOPT_SSL_VERIFYPEER => false,
-        ]);
-        curl_exec($ch);
-        curl_close($ch);
         exit;
     }
 }

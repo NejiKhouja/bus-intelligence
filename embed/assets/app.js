@@ -104,12 +104,8 @@ function showLoadingIn(container) {
     container.innerHTML = `
     <div class="wc-loading-inline">
         <div class="wc-loader" aria-hidden="true">
-            <div class="wc-loader-ring r1"></div>
-            <div class="wc-loader-ring r2"></div>
-            <div class="wc-loader-ring r3"></div>
-            <div class="wc-loader-core"></div>
-            <div class="wc-loader-dot d1"></div>
-            <div class="wc-loader-dot d2"></div>
+            <div class="wc-loader-glow"></div>
+            <div class="wc-loader-ring"></div>
         </div>
         <div class="wc-loading-text">${LOADING_MESSAGES[0]}</div>
         <div class="wc-loading-bar"><div class="wc-loading-bar-fill"></div></div>
@@ -459,121 +455,128 @@ function sortAnomalies(list, key) {
     return sorted;
 }
 
-// ── View: Trajets signalés (aujourd'hui en direct + historique complet) ─────────────────
-// Miroir de l'onglet tab_live du dashboard Streamlit -- séparé de "Expliquer un bus"
-// (décision utilisateur 2026-07-17 : revenir aux 2 onglets comme dans Streamlit).
+// ── View: Trajets signalés (fusion "vue d'ensemble" + "Expliquer un bus") ───────────────
+// Redesign 2026-07-19 (retour utilisateur : la 1ère fusion "n'était que les deux anciens
+// onglets empilés, pas vraiment fusionnés"). Une seule liste de trajets signalés (tri +
+// catégories + cartes + pagination), UNE fois -- pas une carte "aujourd'hui" séparée
+// au-dessus d'un "historique" qui la recontient déjà : /api/anomaly-history sans `day`
+// fusionne DÉJÀ les données en direct dans l'historique côté API (voir _filter_trips,
+// day=None -> merge live), donc les afficher deux fois était la vraie source de
+// duplication perçue. Le panneau "Expliquer un bus" reste pour le CONTEXTE (verdict de
+// ligne, trajet de référence, filtres) mais ne produit plus sa propre liste parallèle --
+// il RECADRE cette même liste partagée via setScope(), avec un lien pour revenir à la
+// vue d'ensemble par défaut.
 async function renderTripsView(root) {
-    // Fusion "Trajets signalés" + "Expliquer un bus" (décision utilisateur 2026-07-19) --
-    // un seul onglet : la vue rapide du jour + l'historique s'affiche tout de suite comme
-    // avant, et un bouton révèle/masque le panneau de filtres+analyse (ex-onglet séparé,
-    // voir renderExplainPanel) sans jamais le charger tant qu'on n'en a pas besoin.
     root.innerHTML = `
+    <div id="wc-t-freshness"></div>
     <button id="wc-t-explain-toggle" class="wc-btn-secondary wc-explain-toggle">
-        ${icon("search")}<span>Expliquer un bus</span>
+        ${icon("search")}<span>Filtrer / analyser un bus précis</span>
     </button>
     <div id="wc-t-explain-panel" class="wc-explain-panel" hidden></div>
-    <div id="wc-t-results"></div>
+    <div class="wc-card">
+        <div class="wc-list-head">
+            <h4 id="wc-t-list-title">Trajets signalés</h4>
+            <div class="wc-sort-row"><label>Trier par</label><select id="wc-t-sort">${
+                Object.entries(SORT_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")
+            }</select></div>
+        </div>
+        <button id="wc-t-back" class="wc-link-muted" hidden>&larr; Revenir à la vue d'ensemble</button>
+        <div id="wc-t-pills"></div>
+        <div id="wc-t-cards"><p class="wc-muted"><span class="wc-spin"></span> Chargement…</p></div>
+        <button id="wc-t-more" class="wc-btn-secondary" style="margin-top:10px" hidden>Afficher plus</button>
+    </div>
     `;
+
+    const freshBox = root.querySelector("#wc-t-freshness");
     const toggleBtn = root.querySelector("#wc-t-explain-toggle");
     const explainPanel = root.querySelector("#wc-t-explain-panel");
+    const listTitle = root.querySelector("#wc-t-list-title");
+    const backBtn = root.querySelector("#wc-t-back");
+    const cardsBox = root.querySelector("#wc-t-cards");
+    const pillsBox = root.querySelector("#wc-t-pills");
+    const moreBtn = root.querySelector("#wc-t-more");
+    const sortSel = root.querySelector("#wc-t-sort");
+
+    const PAGE = 15;
+    let shown = PAGE;
+    let currentList = [];
+    let baseList = [];
+
+    function drawList() {
+        cardsBox.innerHTML = "";
+        const sorted = sortAnomalies(currentList, sortSel.value);
+        if (!sorted.length) {
+            cardsBox.innerHTML = `<div class="wc-banner success">${icon("check")}Aucune anomalie trouvée pour ce périmètre.</div>`;
+            moreBtn.hidden = true;
+            return;
+        }
+        for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
+        moreBtn.hidden = shown >= sorted.length;
+        moreBtn.textContent = `Afficher plus (${Math.min(shown, sorted.length)}/${sorted.length})`;
+    }
+    moreBtn.addEventListener("click", () => { shown += PAGE; drawList(); });
+    sortSel.addEventListener("change", () => { shown = PAGE; drawList(); });
+
+    // Un seul point d'entrée pour peupler la liste partagée -- utilisé par le chargement
+    // initial (vue d'ensemble) ET par le panneau "Expliquer un bus" (vue recadrée),
+    // jamais deux instances séparées de tri/catégories/cartes.
+    function setScope(list, { title, scoped = false } = {}) {
+        currentList = list;
+        shown = PAGE;
+        listTitle.textContent = title;
+        backBtn.hidden = !scoped;
+        const getFiltered = categoryFilterPills(pillsBox, list, (filtered) => { currentList = filtered; shown = PAGE; drawList(); });
+        currentList = getFiltered();
+        drawList();
+    }
+    backBtn.addEventListener("click", () => {
+        setScope(baseList, { title: "Trajets signalés" });
+        root.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
     let explainLoaded = false;
     toggleBtn.addEventListener("click", () => {
         const opening = explainPanel.hidden;
         explainPanel.hidden = !opening;
         toggleBtn.classList.toggle("active", opening);
-        toggleBtn.querySelector("span").textContent = opening ? "Masquer l'analyse par bus" : "Expliquer un bus";
+        toggleBtn.querySelector("span").textContent = opening ? "Masquer les filtres" : "Filtrer / analyser un bus précis";
         if (opening && !explainLoaded) {
             explainLoaded = true;
-            renderExplainPanel(explainPanel);
+            renderExplainPanel(explainPanel, {
+                onResults: (anomalies, { title }) => {
+                    setScope(anomalies, { title, scoped: true });
+                    root.querySelector(".wc-card").scrollIntoView({ behavior: "smooth", block: "start" });
+                },
+            });
         }
         if (opening) explainPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
 
-    const resBox = root.querySelector("#wc-t-results");
-    resBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement des trajets signalés aujourd'hui…</p>`;
+    // Fraîcheur (léger) + liste unifiée (déjà fusionnée en direct côté API) en parallèle --
+    // plus de second appel dupliqué à current-anomalies pour peupler une carte séparée.
     try {
-        const today = await api("/api/current-anomalies", {});
-        const freshness = (today.live
+        const [today, hist] = await Promise.all([
+            api("/api/current-anomalies", {}),
+            api("/api/anomaly-history", { limit: 300 }),
+        ]);
+        freshBox.innerHTML = (today.live
             ? `<div class="wc-banner success">${LIVE_DOT}Données en direct — ${fmtDay(today.date)}</div>`
             : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`)
-            + cacheNote(today);
-        if (!today.anomalies || !today.anomalies.length) {
-            resBox.innerHTML = freshness + `<div class="wc-banner success">${icon("check")}Aucune anomalie aujourd'hui pour cet opérateur.</div>`
-                + `<div id="wc-t-history"></div>`;
-        } else {
-            resBox.innerHTML = `<div class="wc-card"><h4>Trajets ce jour</h4>${freshness}<div id="wc-t-pills"></div><div id="wc-t-cards"></div></div>
-                <div id="wc-t-history"></div>`;
-            const cardsBox = resBox.querySelector("#wc-t-cards");
-            const pillsBox = resBox.querySelector("#wc-t-pills");
-            function draw(list) {
-                cardsBox.innerHTML = "";
-                for (const a of list) cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
-            }
-            const getFiltered = categoryFilterPills(pillsBox, today.anomalies, draw);
-            draw(getFiltered());
-        }
-        loadHistory(resBox.querySelector("#wc-t-history"));
+            + cacheNote(today) + cacheNote(hist);
+        baseList = (hist || {}).anomalies || [];
+        setScope(baseList, { title: "Trajets signalés" });
     } catch (e) {
-        resBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
-    }
-
-    // Historique complet des anomalies sous la vue du jour -- même structure que l'onglet
-    // "Trajets signalés" du dashboard Streamlit. Chargé séparément APRÈS la vue du jour
-    // pour que le direct s'affiche vite ; paginé côté client (bouton "Afficher plus") pour
-    // ne pas insérer des centaines de cartes DOM d'un coup.
-    async function loadHistory(box) {
-        box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
-            <p class="wc-muted"><span class="wc-spin"></span> Chargement de l'historique…</p></div>`;
-        let hist;
-        try {
-            hist = await api("/api/anomaly-history", { limit: 300 });
-        } catch (e) {
-            box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
-                <div class="wc-banner error">${icon("alert")}Erreur : ${esc(e.message)}</div></div>`;
-            return;
-        }
-        const all = (hist || {}).anomalies || [];
-        if (!all.length) {
-            box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>
-                <div class="wc-banner info">${icon("info")}Aucun historique d'anomalies pour cet opérateur.</div></div>`;
-            return;
-        }
-        box.innerHTML = `<div class="wc-card"><h4>Historique des anomalies</h4>${cacheNote(hist)}
-            <div class="wc-sort-row"><label>Trier par</label><select id="wc-th-sort">${
-                Object.entries(SORT_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")
-            }</select></div>
-            <div id="wc-th-pills"></div><div id="wc-th-cards"></div>
-            <button id="wc-th-more" class="wc-btn-secondary" style="margin-top:10px">Afficher plus</button></div>`;
-        const cardsBox = box.querySelector("#wc-th-cards");
-        const pillsBox = box.querySelector("#wc-th-pills");
-        const moreBtn = box.querySelector("#wc-th-more");
-        const sortSel = box.querySelector("#wc-th-sort");
-        const PAGE = 15;
-        let shown = PAGE;
-        let current = all;
-        function draw() {
-            cardsBox.innerHTML = "";
-            const sorted = sortAnomalies(current, sortSel.value);
-            for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
-            moreBtn.style.display = shown < sorted.length ? "" : "none";
-            moreBtn.textContent = `Afficher plus (${Math.min(shown, sorted.length)}/${sorted.length})`;
-        }
-        moreBtn.addEventListener("click", () => { shown += PAGE; draw(); });
-        sortSel.addEventListener("change", () => { shown = PAGE; draw(); });
-        const getFiltered = categoryFilterPills(pillsBox, all, (list) => { current = list; shown = PAGE; draw(); });
-        current = getFiltered();
-        draw();
+        freshBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+        cardsBox.innerHTML = "";
     }
 }
 
-// ── Panneau "Expliquer un bus" (filtres + verdict de ligne + référence + analyse) ───────
-// Miroir de l'ex-onglet tab_explain du dashboard Streamlit, maintenant repliable DANS
-// l'onglet "Trajets signalés" (fusion décidée 2026-07-19) plutôt qu'un onglet séparé --
-// `root` ici est le panneau repliable (#wc-t-explain-panel), pas la racine de l'onglet ;
-// self-contained comme avant, seule sa position dans le DOM change. Verdict de ligne,
-// trajet de référence avec carte, avertissements modèle, métriques avec explications,
-// tri, catégories, cartes détaillées avec carte par trajet.
-async function renderExplainPanel(root) {
+// ── Panneau "Expliquer un bus" (filtres + verdict de ligne + référence) ─────────────────
+// Repliable DANS l'onglet "Trajets signalés" (fusion 2026-07-19). Fournit le CONTEXTE
+// (verdict de ligne, trajet de référence, filtres, métriques de la requête) ; les trajets
+// signalés eux-mêmes ne sont plus rendus ici -- `onResults(anomalies, {title})` les
+// pousse vers la liste PARTAGÉE de renderTripsView au lieu d'en dessiner une seconde.
+async function renderExplainPanel(root, { onResults }) {
     root.innerHTML = `
     <div class="wc-card">
         <div class="wc-filters">
@@ -756,10 +759,15 @@ async function renderExplainPanel(root) {
 
         showLoadingIn(resBox);
         try {
-            // check_detours toujours actif sur un clic "Analyser" délibéré -- mesuré
-            // ~30-40s sur une ligne très signalée (et plus sur "toutes les lignes"),
-            // assumé derrière l'animation de chargement.
-            const res = await api("/api/anomaly-explain", { line, bus, day, dir, check_detours: true });
+            // check_detours RETIRÉ (décision utilisateur 2026-07-19) : le contrôle en
+            // masse sur tous les trajets signalés d'une ligne était la cause directe de
+            // plusieurs pannes mémoire côté serveur (Kalman filter par bus-jour signalé,
+            // jusqu'à des dizaines par requête). Un détour n'a de toute façon jamais été
+            // le SEUL signal d'un trajet -- il est déjà repéré par ailleurs (trajet trop
+            // long, perte de signal...) -- et reste visible EN DÉTAIL sur la carte d'un
+            // trajet précis (bouton "Voir la carte du trajet", /api/trip-detail fait sa
+            // propre vérification ciblée sur CE seul trajet, à la demande, sans risque).
+            const res = await api("/api/anomaly-explain", { line, bus, day, dir });
             renderExplainResults(res, { line, bus });
         } catch (e) {
             resBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur d'analyse : ${esc(e.message)}</div>`;
@@ -769,10 +777,14 @@ async function renderExplainPanel(root) {
     }
     root.querySelector("#wc-e-analyze").addEventListener("click", runAnalysis);
 
+    // Ne rend plus la liste des trajets elle-même -- seulement le résumé de la requête
+    // (métriques + avertissement) -- et pousse les trajets vers la liste PARTAGÉE de
+    // renderTripsView via onResults, au lieu d'en dessiner une seconde copie séparée.
     function renderExplainResults(res, scope) {
+        const label = scope.bus ? `Bus ${scope.bus} · Ligne ${scope.line}` : (scope.line ? `Ligne ${scope.line}` : "Toutes les lignes");
         if (!res || res.anomaly_count === 0) {
-            const label = scope.bus ? `Bus ${scope.bus} · Ligne ${scope.line}` : (scope.line ? `Ligne ${scope.line}` : "Toutes les lignes");
             resBox.innerHTML = `<div class="wc-banner success">${icon("check")}${label} : aucun trajet anormal détecté — tout est dans la normale.</div>`;
+            onResults([], { title: `Trajets signalés — ${label}` });
             return;
         }
 
@@ -800,28 +812,9 @@ async function renderExplainPanel(root) {
                 <div class="wc-metric"><div class="wc-metric-label" title="Trajets signalés comme anormaux par le système de détection automatique.">Trajets anormaux ⓘ</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
                 ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label" title="Durée médiane d'un trajet non anormal sur cette ligne — sert de référence pour juger si un trajet est trop long ou trop court.">Durée normale (médiane) ⓘ</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
             </div>
-            <h4 style="margin-top:14px">Trajets signalés</h4>
-            <div class="wc-sort-row"><label>Trier par</label><select id="wc-e-sort">${
-                Object.entries(SORT_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")
-            }</select></div>
-            <div class="wc-pills" id="wc-e-pills"></div>
-            <div id="wc-e-cards"></div>
+            <p class="wc-muted">Les trajets signalés pour ce périmètre sont affichés dans la liste ci-dessous.</p>
         </div>`;
-
-        const cardsBox = resBox.querySelector("#wc-e-cards");
-        const pillsBox = resBox.querySelector("#wc-e-pills");
-        const sortSel = resBox.querySelector("#wc-e-sort");
-        let current = res.anomalies;
-        function draw() {
-            cardsBox.innerHTML = "";
-            for (const a of sortAnomalies(current, sortSel.value)) {
-                cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
-            }
-        }
-        sortSel.addEventListener("change", draw);
-        const getFiltered = categoryFilterPills(pillsBox, res.anomalies, (list) => { current = list; draw(); });
-        current = getFiltered();
-        draw();
+        onResults(res.anomalies, { title: `Trajets signalés — ${label}` });
     }
 }
 
