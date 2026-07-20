@@ -947,7 +947,9 @@ async function renderExplainPanel(root, { onResults }) {
     function renderExplainResults(res, scope) {
         const label = scope.bus ? `Bus ${scope.bus} · Ligne ${scope.line}` : (scope.line ? `Ligne ${scope.line}` : "Toutes les lignes");
         if (!res || res.anomaly_count === 0) {
-            resBox.innerHTML = `<div class="wc-banner success">${icon("check")}${label} : aucun trajet anormal détecté — tout est dans la normale.</div>`;
+            const n = res ? (res.total_trips ?? 0) : 0;
+            const tripsLabel = `${n} trajet${n === 1 ? "" : "s"} analysé${n === 1 ? "" : "s"}`;
+            resBox.innerHTML = `<div class="wc-banner success">${icon("check")}${label} : ${tripsLabel} · aucune anomalie détectée — tout est dans la normale.</div>`;
             onResults([], { title: `Trajets signalés — ${label}` });
             return;
         }

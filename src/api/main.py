@@ -1295,8 +1295,17 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
         trips = trips[trips["anomaly"]]
     if len(trips) == 0:
         return []
+    # Trié par JOUR d'abord (le plus récent en tête), gravité en départage -- pas l'inverse.
+    # `limit` coupe la liste APRÈS ce tri ; trier par seule gravité pouvait faire disparaître
+    # une anomalie du jour même (ex. la seule anomalie "en direct" du jour) d'une liste de
+    # 300 si des milliers d'anomalies historiques plus sévères passaient devant elle --
+    # constaté 2026-07-20 : le bandeau de fraîcheur comptait 1 anomalie "aujourd'hui" côté
+    # /api/current-anomalies, introuvable dans la liste fusionnée /api/anomaly-history
+    # pourtant censée déjà l'inclure (voir _filter_trips, day=None -> merge live). Les deux
+    # interfaces (dashboard Streamlit ET widget embarqué) affichent de toute façon le plus
+    # récent en premier par défaut -- ce tri correspond à ce qu'elles montrent réellement.
     ex = anomaly.explain_trips(models, trips).sort_values(
-        "anomaly_strength", ascending=False)
+        ["day", "anomaly_strength"], ascending=[False, False])
     if limit:
         ex = ex.head(limit)
 
