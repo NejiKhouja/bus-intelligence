@@ -182,9 +182,46 @@ function skeletonCards(n = 4) {
     return html;
 }
 
+// Squelette "carte avec graphique" (métriques + grand bloc) -- pour Tendances/Billetterie,
+// dont le contenu principal est un graphique, pas une liste de cartes d'alerte.
+function skeletonChartCard(height = 240) {
+    return `
+    <div class="wc-skel-card" aria-hidden="true">
+        <div class="wc-skel-metrics">
+            <span class="wc-skel wc-skel-metric"></span>
+            <span class="wc-skel wc-skel-metric"></span>
+            <span class="wc-skel wc-skel-metric"></span>
+        </div>
+        ${height > 0 ? `<span class="wc-skel" style="display:block;height:${height}px;border-radius:8px"></span>` : ""}
+    </div>`;
+}
+
+// Squelette "tableau" (lignes horizontales) -- pour le classement des chauffeurs.
+function skeletonTable(n = 6) {
+    let html = `<div aria-hidden="true">`;
+    for (let i = 0; i < n; i++) {
+        html += `<span class="wc-skel wc-skel-line" style="width:${92 - (i % 3) * 9}%;height:13px;margin:11px 0"></span>`;
+    }
+    return html + `</div>`;
+}
+
+// Cache mémoire des réponses (2026-07-20, retour utilisateur : "ping le serveur une fois
+// puis stocke la donnée -- en réalité on ne regarde que la journée d'hier, rien de neuf
+// n'arrive en cours de session"). Une même requête (endpoint + paramètres identiques)
+// n'est refaite qu'après 5 min -- entre-temps, ré-ouvrir un panneau, relancer la même
+// analyse ou revenir sur un onglet répond instantanément depuis la mémoire. S'ajoute au
+// cache fichier de proxy.php (qui, lui, sert TOUS les visiteurs) ; celui-ci évite même
+// l'aller-retour HTTP local. Un rechargement de page vide ce cache -- c'est le geste
+// naturel pour forcer du frais.
+const _apiMemCache = new Map(); // url -> { t: Date.now(), data }
+const _API_MEM_TTL_MS = 5 * 60 * 1000;
+
 async function api(endpoint, params = {}) {
     const qs = new URLSearchParams({ endpoint, ...cleanParams(params) });
-    const res = await fetch(`${WINICARI_PROXY}?${qs.toString()}`);
+    const url = `${WINICARI_PROXY}?${qs.toString()}`;
+    const hit = _apiMemCache.get(url);
+    if (hit && (Date.now() - hit.t) < _API_MEM_TTL_MS) return hit.data;
+    const res = await fetch(url);
     const cacheStatus = res.headers.get("X-Cache"); // HIT / STALE / MISS -- voir proxy.php
     if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -196,6 +233,7 @@ async function api(endpoint, params = {}) {
     // données réelles. Sert uniquement à afficher une note "résultat en cache" (voir
     // cacheNote ci-dessous) -- ignoré partout ailleurs.
     if (data && typeof data === "object") data.__cache = cacheStatus;
+    if (endpoint !== "/health") _apiMemCache.set(url, { t: Date.now(), data });
     return data;
 }
 // Note "résultat en cache" retirée de l'affichage (décision utilisateur 2026-07-19 :
@@ -1040,7 +1078,7 @@ async function renderExplainPanel(root, { onResults }) {
 
 // ── View: Tendances ──────────────────────────────────────────────────────────────────────
 async function renderTrendsView(root) {
-    root.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> Chargement des tendances…</p></div>`;
+    root.innerHTML = skeletonChartCard(0) + `<div class="wc-charts-grid">${skeletonChartCard(240)}${skeletonChartCard(240)}</div>`;
     let chartsOk = true;
     try { await ensureChartJs(); } catch { chartsOk = false; }
 
@@ -1093,25 +1131,34 @@ async function renderTicketsView(root) {
         <div class="wc-filters">
             <div class="wc-field">
                 <label>Vue</label>
-                <select id="wc-tk-view">
+                <select id="wc-tk-view" data-tip="Vue client : masque les jours explicables par un problème de NOTRE côté (panne probable de la machine à tickets, jour sans service) — seules les vraies anomalies de recette restent. Vue admin : montre tout, ces jours étant marqués plutôt que cachés.">
+                    <option value="client" selected>Client (fiable uniquement)</option>
                     <option value="admin">Admin (tout)</option>
-                    <option value="client">Client (fiable uniquement)</option>
                 </select>
             </div>
             <div class="wc-field">
                 <label>Ligne (optionnel)</label>
                 <select id="wc-tk-line"><option value="">Toutes</option></select>
             </div>
+            <div class="wc-field">
+                <label>Type d'anomalie</label>
+                <select id="wc-tk-recette" data-tip="Une recette AU-DESSUS de la normale est une anomalie statistique mais une bonne nouvelle (plus d'argent rentré que d'habitude) — pas un signal à traiter comme une recette anormalement basse.">
+                    <option value="" selected>Toutes</option>
+                    <option value="bad">À surveiller (recette basse)</option>
+                    <option value="good">Bonnes (recette haute)</option>
+                </select>
+            </div>
         </div>
     </div>
-    <div id="wc-tk-body"><p class="wc-muted">Chargement…</p></div>`;
+    <div id="wc-tk-body"></div>`;
 
     const viewSel = root.querySelector("#wc-tk-view");
     const lineSel = root.querySelector("#wc-tk-line");
+    const recetteSel = root.querySelector("#wc-tk-recette");
     const body = root.querySelector("#wc-tk-body");
 
     async function load() {
-        body.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement…</p>`;
+        body.innerHTML = skeletonChartCard(200) + skeletonCards(3);
         try {
             const clientSafe = viewSel.value === "client";
             const pat = await api("/api/ticket-anomaly-patterns", {});
@@ -1147,7 +1194,12 @@ async function renderTicketsView(root) {
                 line: lineSel.value || null, limit: 150, client_safe: clientSafe,
             });
             const cardsBox = body.querySelector("#wc-tk-cards");
-            const anomalies = (hist || {}).anomalies || [];
+            let anomalies = (hist || {}).anomalies || [];
+            // Filtre bonne/mauvaise anomalie APRÈS coup sur les 150 récupérées (même
+            // logique que Streamlit, voir app.py t_recette_filter) -- c'est un critère
+            // d'affichage, pas un paramètre du modèle ni de l'API.
+            if (recetteSel.value === "bad") anomalies = anomalies.filter((a) => a.is_good_anomaly === false);
+            else if (recetteSel.value === "good") anomalies = anomalies.filter((a) => a.is_good_anomaly === true);
             if (!anomalies.length) {
                 cardsBox.innerHTML = `<div class="wc-banner info">Aucun jour anormal trouvé pour ce filtre.</div>`;
                 return;
@@ -1159,6 +1211,7 @@ async function renderTicketsView(root) {
     }
     viewSel.addEventListener("change", load);
     lineSel.addEventListener("change", load);
+    recetteSel.addEventListener("change", load);
     load();
 }
 // ── Puces de table utilitaires (billetterie) ─────────────────────────────────────────────
@@ -1341,7 +1394,7 @@ async function renderDriversView(root) {
             <div class="wc-field"><label>&nbsp;</label><button id="wc-dr-refresh" class="wc-btn-secondary">Actualiser</button></div>
         </div>
         <h4>Chauffeurs classés par taux d'anomalie</h4>
-        <div id="wc-dr-leaderboard"><p class="wc-muted">Chargement…</p></div>
+        <div id="wc-dr-leaderboard">${skeletonTable(6)}</div>
     </div>
     <div class="wc-card">
         <h4>Rechercher un chauffeur par code</h4>
@@ -1355,7 +1408,7 @@ async function renderDriversView(root) {
     async function loadLeaderboard() {
         const minTrips = root.querySelector("#wc-dr-min").value || 5;
         const box = root.querySelector("#wc-dr-leaderboard");
-        box.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement…</p>`;
+        box.innerHTML = skeletonTable(6);
         try {
             const d = await api("/api/drivers-ranked", { min_trips: minTrips, limit: 50 });
             const drivers = (d || {}).drivers || [];
@@ -1433,15 +1486,32 @@ function init() {
     const root = document.getElementById("wc-view-root");
     if (!root) return; // company picker screen, nothing to wire up
     const tabs = document.querySelectorAll(".wc-tab");
+    // Panneaux PERSISTANTS par onglet (redesign 2026-07-20, retour utilisateur : "naviguer
+    // entre les onglets perd les données et je dois ré-attendre") -- chaque vue est rendue
+    // UNE fois dans son propre <div>, puis simplement masquée/affichée (attribut hidden,
+    // couvert par le filet [hidden] global du CSS) au lieu d'être détruite et re-rendue
+    // avec re-fetch à chaque clic. Cartes déroulées, graphiques, résultats d'analyse et
+    // position de défilement survivent tous à un aller-retour d'onglet. Les données ne
+    // changent de toute façon qu'une fois par jour (la veille poussée par le relais) --
+    // un rechargement de page suffit pour forcer du frais.
+    const panels = {};
+    function show(view) {
+        for (const [name, p] of Object.entries(panels)) p.hidden = name !== view;
+        if (!panels[view]) {
+            const p = document.createElement("div");
+            panels[view] = p;
+            root.appendChild(p);
+            VIEWS[view](p);
+        }
+    }
     tabs.forEach((tab) => {
         tab.addEventListener("click", () => {
             tabs.forEach((t) => t.classList.remove("active"));
             tab.classList.add("active");
-            root.innerHTML = "";
-            VIEWS[tab.dataset.view](root);
+            show(tab.dataset.view);
         });
     });
-    renderTripsView(root); // default view on load
+    show("trips"); // default view on load
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
