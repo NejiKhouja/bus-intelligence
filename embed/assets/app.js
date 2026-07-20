@@ -51,6 +51,19 @@ const REASON_HELP = {
 const REASON_HELP_DEFAULT = "Signal utilisé par le modèle de détection pour juger ce trajet anormal.";
 const FORMULA_HELP = "Durée trajet = dernier ping − premier ping, APRÈS avoir retiré le stationnement immobile en bordure du trajet (bus garé avant le vrai départ / après la vraie arrivée). Un arrêt ou une immobilisation EN COURS de trajet, elle, reste comptée dans cette durée -- ce n'est pas la même chose.";
 
+// ── Explications au survol des puces (mirrors src/dashboard/i18n.py's chip_*_help keys) ──
+const CHIP_HELP = {
+    origin_idle: "Ce temps est RETIRÉ de la « Durée trajet » affichée en haut de la carte -- le bus pingait déjà au terminus DE DÉPART mais n'avait pas encore démarré son service. Signal opérationnel à part entière (chauffeur n'ayant probablement pas coupé le traceur), pas une erreur de mesure.",
+    end_idle: "Ce temps est RETIRÉ de la « Durée trajet » affichée en haut de la carte -- le bus pingait encore au terminus D'ARRIVÉE mais n'avait pas vraiment terminé son service. Signal opérationnel à part entière (chauffeur n'ayant probablement pas coupé le traceur), pas une erreur de mesure.",
+    real_stop: "Immobilisation détectée EN COURS de trajet (pings GPS présents, bus vraiment immobile) -- reste comptée dans la « Durée trajet » ci-dessus, contrairement au stationnement terminus qui lui en est retiré.",
+    signal_loss: "Aucun ping GPS reçu pendant cette durée à cet arrêt -- le bus a pu continuer à rouler normalement pendant ce silence, ce N'EST PAS une immobilisation confirmée.",
+    dark_gap: "Trou de signal survenu ENTRE deux arrêts (pas pendant l'attente à un arrêt déjà repéré) -- invisible au scan arrêt-par-arrêt classique, mais bien réel : le traceur n'a envoyé AUCUN ping pendant cette durée. Explique généralement à lui seul le mauvais taux de suivi et la durée gonflée du reste du trajet -- le bus a très probablement continué de rouler normalement pendant ce silence.",
+    farthest: "Le bus a bien été détecté à cet arrêt, mais sa position GPS était nettement plus loin que la position officielle de l'arrêt -- déviation d'itinéraire ou dérive GPS.",
+    off_route: "Ces arrêts sont dans l'étendue du trajet mais le bus n'y a jamais été détecté à portée GPS -- trajet partiel, itinéraire différent, ou desserte réellement sautée.",
+    suspect_coord: "Ces arrêts ne sont JAMAIS détectés sur AUCUN trajet de cette ligne -- leurs coordonnées géographiques sont probablement fausses dans la base de référence, pas un problème de CE trajet précis. Exclus du diagnostic pour cette raison.",
+    detour: "Détecté sur les positions GPS brutes : le bus a quitté son point de départ, s'est éloigné significativement, puis est revenu quasiment au même endroit avant sa longue immobilisation — probablement une course annexe (dépôt, ravitaillement...) plutôt qu'un simple bruit GPS.",
+};
+
 // ── Small utilities ─────────────────────────────────────────────────────────────────────
 function esc(s) {
     if (s === null || s === undefined) return "";
@@ -384,10 +397,7 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
         </div>`;
 
     if (a.top_feature !== undefined) {
-        html += `<div class="wc-cause">
-            <span class="wc-cause-label">Cause principale</span>
-            <span class="wc-cause-value">${icon("search")}${esc(TOP_FEATURE_LABELS[a.top_feature] || "Non catégorisé")}</span>
-        </div>`;
+        html += `<p class="wc-muted">Cause principale : <strong>${esc(TOP_FEATURE_LABELS[a.top_feature] || "Non catégorisé")}</strong></p>`;
     }
     if (a.is_data_bug) html += `<div class="wc-banner error">${icon("alert")}Probable bug de données (durée/horodatage incohérent) — à vérifier avant d'agir.</div>`;
     else if (a.is_fragment) html += `<div class="wc-banner warn">${icon("fragment")}Trajet trop court/fragmentaire pour être jugé fiable.</div>`;
@@ -401,31 +411,61 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
         html += `<div class="wc-reason" title="${esc(help)}">${esc(r)}</div>`;
     });
 
-    // Stationnement terminus DÉTAILLÉ (quel terminus, de quand à quand) -- parité avec le
-    // dashboard Streamlit (chip_origin_idle/chip_end_idle) : le chiffre "~N min avant
-    // départ/après arrivée" de la raison modèle est mesuré sur les pings GPS (bus immobile
-    // au terminus, temps DÉJÀ RETIRÉ de la durée du trajet affichée), et méritait d'être
-    // nommé + horodaté au lieu d'un chiffre nu (retour utilisateur 2026-07-18).
+    // Puces (arrêts/segments concernés) -- chacune avec sa propre explication au survol
+    // (mirrors src/dashboard/app.py's per-chip help=... calls). Stationnement terminus
+    // DÉTAILLÉ (quel terminus, de quand à quand) : le chiffre "~N min avant départ/après
+    // arrivée" de la raison modèle est mesuré sur les pings GPS (bus immobile au terminus,
+    // temps DÉJÀ RETIRÉ de la durée du trajet affichée), et méritait d'être nommé +
+    // horodaté au lieu d'un chiffre nu (retour utilisateur 2026-07-18).
+    let originIdleShown = false, endIdleShown = false;
     if ((a.origin_idle_min || 0) >= 30 && a.origin_idle_stop) {
-        html += `<div class="wc-chip">${icon("parking")}Stationné au terminus <strong>${esc(a.origin_idle_stop)}</strong> avant le départ : <strong>${a.origin_idle_min.toFixed(0)} min</strong> — le traceur pingait sur place de ${fmtTime(a.origin_idle_from)} à ${dep} (départ réel). Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.origin_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.origin_idle_stop)}</strong> avant le départ : <strong>${a.origin_idle_min.toFixed(0)} min</strong> — le traceur pingait sur place de ${fmtTime(a.origin_idle_from)} à ${dep} (départ réel). Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        originIdleShown = true;
     }
     if ((a.end_idle_min || 0) >= 30 && a.end_idle_stop) {
-        html += `<div class="wc-chip">${icon("parking")}Stationné au terminus <strong>${esc(a.end_idle_stop)}</strong> après l'arrivée : <strong>${a.end_idle_min.toFixed(0)} min</strong> — immobile de ${arr} (arrivée réelle) à ${fmtTime(a.end_idle_to)}. Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.end_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.end_idle_stop)}</strong> après l'arrivée : <strong>${a.end_idle_min.toFixed(0)} min</strong> — immobile de ${arr} (arrivée réelle) à ${fmtTime(a.end_idle_to)}. Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        endIdleShown = true;
     }
     if (ps.longest_stop && ps.longest_stop.dwell_min >= 5) {
-        html += `<div class="wc-chip">${icon("parking")}Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.real_stop)}">${icon("parking")}Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
+        // Même arrêt que le stationnement terminus déjà affiché ci-dessus ? Très probablement
+        // UNE seule immobilisation continue coupée en deux par un sursaut GPS isolé, pas deux
+        // événements distincts -- sinon, hypothèse plus générique (détour possible).
+        const sameOrigin = originIdleShown && ps.longest_stop.stop === a.origin_idle_stop;
+        const sameEnd = endIdleShown && ps.longest_stop.stop === a.end_idle_stop;
+        if (sameOrigin || sameEnd) {
+            const sameIdle = sameOrigin ? a.origin_idle_min : a.end_idle_min;
+            const total = sameIdle + ps.longest_stop.dwell_min;
+            html += `<div class="wc-chip wc-chip-hint">&nbsp;&nbsp;↳ <em>C'est le MÊME arrêt que le stationnement terminus ci-dessus (<strong>${esc(ps.longest_stop.stop)}</strong>) -- très probablement UNE seule immobilisation continue coupée en deux par un bref sursaut GPS isolé, pas deux événements distincts. Durée réelle probable : ~${total.toFixed(0)} min.</em></div>`;
+        } else if (!originIdleShown && !endIdleShown) {
+            html += `<div class="wc-chip wc-chip-hint">&nbsp;&nbsp;↳ <em>Si ce délai suit le stationnement terminus, ce n'est pas forcément le même arrêt : le bus a pu repartir puis revenir avant de s'immobiliser à nouveau (détour non officiel / course non planifiée). « Voir la carte du trajet » vérifie sur les pings GPS réels et affiche le trajet emprunté si c'est le cas.</em></div>`;
+        }
     }
     if (ps.signal_loss_stop) {
-        html += `<div class="wc-chip">${icon("signal")}Perte de signal à <strong>${esc(ps.signal_loss_stop.stop)}</strong> (~${ps.signal_loss_stop.dark_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.signal_loss)}">${icon("signal")}Perte de signal à <strong>${esc(ps.signal_loss_stop.stop)}</strong> (~${ps.signal_loss_stop.dark_min.toFixed(0)} min)</div>`;
+    }
+    // Trou de signal EN ROUTE (entre deux arrêts, jamais rattaché à l'attente d'un arrêt
+    // matché) -- invisible au scan arrêt-par-arrêt ci-dessus, mais peut expliquer à lui
+    // seul un mauvais taux de suivi + une durée gonflée.
+    if (a.dark_gap_before_stop && (a.max_dark_min || 0) >= 15) {
+        const after = a.dark_gap_after_stop;
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.dark_gap)}">${icon("signal")}Perte de signal en route : <strong>${after
+            ? `entre ${esc(a.dark_gap_before_stop)} et ${esc(after)}`
+            : `après ${esc(a.dark_gap_before_stop)}, plus aucun arrêt suivi jusqu'à la fin du trajet`
+        }</strong> (~${a.max_dark_min.toFixed(0)} min sans aucun ping).</div>`;
     }
     if (ps.farthest_stop) {
-        html += `<div class="wc-chip">${icon("pin")}Écart de position à <strong>${esc(ps.farthest_stop.stop)}</strong> (~${ps.farthest_stop.dist_m.toFixed(0)} m)</div>`;
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.farthest)}">${icon("pin")}Écart de position à <strong>${esc(ps.farthest_stop.stop)}</strong> (~${ps.farthest_stop.dist_m.toFixed(0)} m)</div>`;
     }
     if (ps.off_route_stops && ps.off_route_stops.length) {
-        html += `<div class="wc-chip">${icon("ban")}Arrêts non desservis : ${esc(ps.off_route_stops.join(", "))}</div>`;
+        const others = (ps.off_route_count || ps.off_route_stops.length) - ps.off_route_stops.length;
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.off_route)}">${icon("ban")}Arrêts non desservis : ${esc(ps.off_route_stops.join(", "))}${others > 0 ? ` (+${others} autres)` : ""}</div>`;
+    }
+    if (ps.suspect_coord_count) {
+        html += `<div class="wc-chip" title="${esc(CHIP_HELP.suspect_coord)}">${icon("info")}${ps.suspect_coord_count} arrêt(s) aux coordonnées douteuses (jamais suivis sur cette ligne — exclus du diagnostic).</div>`;
     }
     if (a.has_detour && a.detour) {
-        html += `<div class="wc-chip detour">${icon("detour")}Détour non-officiel confirmé — ~${a.detour.distance_km} km pendant ~${a.detour.duration_min.toFixed(0)} min avant de revenir.</div>`;
+        html += `<div class="wc-chip detour" title="${esc(CHIP_HELP.detour)}">${icon("detour")}Détour non-officiel confirmé — ~${a.detour.distance_km} km pendant ~${a.detour.duration_min.toFixed(0)} min avant de revenir.</div>`;
     }
     if (a.scheduled_departure && a.departure_delay_min !== null && a.departure_delay_min !== undefined && Math.abs(a.departure_delay_min) >= 3) {
         const late = a.departure_delay_min > 0;
@@ -469,22 +509,53 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     return card;
 }
 
+// "Filtrer par type d'anomalie" -- mirrors src/dashboard/app.py's category_filter(), a real
+// st.multiselect (label above, selected options as removable tags, all selected by
+// default, a dropdown to re-add a removed one) rather than a plain pill-toggle row
+// (redesign 2026-07-19, retour utilisateur : "je veux que ça ressemble à celui de
+// Streamlit"). Une ligne reste affichée si AU MOINS UNE de ses catégories est cochée.
 function categoryFilterPills(container, anomalies, onChange) {
     const present = [...new Set(anomalies.flatMap(rowCategories))]
         .sort((a, b) => (TOP_FEATURE_LABELS[a] || "").localeCompare(TOP_FEATURE_LABELS[b] || ""));
     if (present.length < 2) { container.innerHTML = ""; return () => anomalies; }
     const selected = new Set(present);
-    container.innerHTML = "";
-    for (const cat of present) {
-        const pill = el(`<span class="wc-pill selected" data-cat="${esc(cat)}">${esc(TOP_FEATURE_LABELS[cat] || cat)}</span>`);
-        pill.addEventListener("click", () => {
-            if (selected.has(cat)) { selected.delete(cat); pill.classList.remove("selected"); }
-            else { selected.add(cat); pill.classList.add("selected"); }
-            onChange(anomalies.filter((a) => rowCategories(a).some((c) => selected.has(c))));
+
+    function filtered() { return anomalies.filter((a) => rowCategories(a).some((c) => selected.has(c))); }
+
+    function draw() {
+        const tagsHtml = present.filter((c) => selected.has(c)).map((c) => `
+            <span class="wc-ms-tag" data-cat="${esc(c)}">${esc(TOP_FEATURE_LABELS[c] || c)}
+                <button type="button" aria-label="Retirer">&times;</button>
+            </span>`).join("");
+        const remaining = present.filter((c) => !selected.has(c));
+        const addHtml = remaining.length
+            ? `<select class="wc-ms-add"><option value="" selected disabled>+ Ajouter…</option>${
+                remaining.map((c) => `<option value="${esc(c)}">${esc(TOP_FEATURE_LABELS[c] || c)}</option>`).join("")
+              }</select>`
+            : "";
+        container.innerHTML = `
+        <div class="wc-multiselect">
+            <label>Filtrer par type d'anomalie</label>
+            <div class="wc-ms-box">${tagsHtml}${addHtml}</div>
+        </div>`;
+        container.querySelectorAll(".wc-ms-tag button").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                selected.delete(btn.closest(".wc-ms-tag").dataset.cat);
+                draw();
+                onChange(filtered());
+            });
         });
-        container.appendChild(pill);
+        const addSel = container.querySelector(".wc-ms-add");
+        if (addSel) {
+            addSel.addEventListener("change", () => {
+                selected.add(addSel.value);
+                draw();
+                onChange(filtered());
+            });
+        }
     }
-    return () => anomalies.filter((a) => rowCategories(a).some((c) => selected.has(c)));
+    draw();
+    return filtered;
 }
 
 // ── Tri des anomalies (mêmes options que le dashboard Streamlit) ────────────────────────

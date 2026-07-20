@@ -185,27 +185,66 @@
 .wc-field-analyze button { min-width: 160px; padding: 10px 24px; }
 .wc-field-checkbox { flex-direction: row; align-items: center; gap: 6px; }
 
-.wc-pills {
+/* "Filtrer par type d'anomalie" -- mirrors Streamlit's st.multiselect: label above, a
+   bordered box holding removable tags for the selected options, plus a plain dropdown to
+   add back anything removed. Replaces the old always-all-selected pill row (redesign
+   2026-07-19, retour utilisateur : "comme celui de Streamlit"). */
+.wc-multiselect { margin: 10px 0 14px; }
+.wc-multiselect label {
+    display: block;
+    font-size: 11.5px;
+    color: var(--wc-text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    margin-bottom: 6px;
+}
+.wc-ms-box {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
-    margin: 10px 0;
+    background: var(--wc-bg-elevated);
+    border: 1px solid var(--wc-border);
+    border-radius: var(--wc-radius-sm);
+    padding: 7px 8px;
+    min-height: 40px;
 }
-.wc-pill {
+.wc-ms-tag {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    background: var(--wc-bg-elevated);
-    border: 1px solid var(--wc-border);
-    color: var(--wc-text-muted);
+    background: var(--wc-orange-soft);
+    color: var(--wc-orange);
     border-radius: 999px;
-    padding: 5px 12px;
-    font-size: 12px;
-    cursor: pointer;
-    user-select: none;
-    transition: all .15s ease;
+    padding: 4px 6px 4px 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
 }
-.wc-pill.selected { background: var(--wc-orange-soft); border-color: var(--wc-orange); color: var(--wc-orange); }
+.wc-embed .wc-ms-tag button {
+    all: unset;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    font-size: 13px;
+    line-height: 1;
+}
+.wc-ms-tag button:hover { background: rgba(0, 0, 0, .15); }
+.wc-ms-box select.wc-ms-add {
+    flex: 1;
+    min-width: 130px;
+    background: transparent;
+    border: none;
+    color: var(--wc-text-muted);
+    font-size: 12.5px;
+    padding: 4px 2px;
+}
+.wc-ms-box select.wc-ms-add:focus { outline: none; }
 
 /* ── Metrics ─────────────────────────────────────────────────────────────────── */
 .wc-metrics { display: flex; flex-wrap: wrap; gap: 20px; margin: 8px 0 14px; }
@@ -246,30 +285,12 @@
 .wc-alert-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 .wc-alert-title { font-weight: 700; font-size: 13.5px; }
 .wc-alert-date { color: var(--wc-text-muted); font-size: 12.5px; }
-/* ── Cause principale -- redesign 2026-07-19 (retour utilisateur : "plus d'espace visuel")
-   Remplace l'ancien <p class="wc-muted"> collé sous les métriques par un bloc à part
-   entière, avec accent de couleur + respiration, cohérent avec .wc-banner/.wc-chip mais
-   visuellement distinct puisque c'est LE résumé de la carte, pas un détail secondaire. */
-.wc-cause {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 8px;
-    background: var(--wc-bg-elevated);
-    border: 1px solid var(--wc-border);
-    border-left: 3px solid var(--wc-orange);
-    border-radius: var(--wc-radius-sm);
-    padding: 10px 14px;
-    margin: 2px 0 16px;
-}
-.wc-cause-label { font-size: 11px; color: var(--wc-text-muted); text-transform: uppercase; letter-spacing: .03em; font-weight: 600; }
-.wc-cause-value { font-size: 14px; font-weight: 700; color: var(--wc-text); display: flex; align-items: center; }
 .wc-reason { font-size: 12.5px; color: #c8d4e6; margin: 3px 0; padding-left: 14px; position: relative; cursor: help; }
 .wc-reason::before { content: "•"; position: absolute; left: 0; color: var(--wc-orange); }
 .wc-chip { font-size: 12px; color: var(--wc-text-muted); margin: 4px 0; }
 .wc-chip.detour { color: #c9a8ff; }
 .wc-chip.driver { color: #8ea0bd; }
+.wc-chip-hint { font-size: 11.5px; opacity: .85; margin: 0 0 6px; }
 .wc-disclaimer {
     font-size: 11px;
     color: var(--wc-text-muted);
