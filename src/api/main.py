@@ -340,15 +340,18 @@ class ModelManager:
         les jours-bus suivants de la même société -- pas de requête par ligne du tableau.
         """
         if societe not in self._gps_trip_counts:
-            # include_live=False : ce lookup ne veut que des COMPTES de trajets historiques
-            # par (ligne, bus, jour) -- déclencher le merge live (webservice + reconstruction
-            # + scoring de TOUTE la société, voir _score_all_gps_live) ici n'apporte rien et
-            # coûte cher, même bug que celui déjà corrigé sur reference_trip (2026-07-19) :
-            # constaté à nouveau 2026-07-20, OOM sur l'onglet "Anomalies billetterie" --
-            # _ticket_rows_with_reasons appelle get_gps_trip_count pour CHAQUE jour-bus
-            # (mis en cache par société après le 1er appel, mais ce 1er appel déclenchait le
-            # merge live en plus de la lecture historique complète de la société).
-            fa = self.foundation_slice(societe, include_live=False)
+            # trip_scopes(), PAS foundation_slice() : ce lookup ne veut qu'un COMPTE de
+            # trajets par (ligne, bus, jour), pas le détail par arrêt -- foundation_slice
+            # interroge `trips` JOINT à `trip_stops` (558k lignes au total, tous arrêts de
+            # tous trajets) pour une société entière, quand trip_scopes lit `trips` SEUL
+            # (47k lignes au total, sans jointure) -- largement suffisant pour un
+            # nunique(trip_id) par (line, bus, day). Corrigé en 2 temps le 2026-07-20 après
+            # un OOM sur l'onglet "Anomalies billetterie" (_ticket_rows_with_reasons appelle
+            # ce lookup pour CHAQUE jour-bus, mis en cache par société après le 1er appel) :
+            # d'abord include_live=False sur foundation_slice (évitait le merge live inutile,
+            # insuffisant seul -- la lecture par-arrêt elle-même restait trop grosse), puis
+            # ce remplacement par trip_scopes qui n'a de toute façon aucun merge live du tout.
+            fa = self.trip_scopes(societe)
             if fa is None:
                 return None  # BDD injoignable -- pas vérifiable, distinct de "0 trajet"
             if len(fa) == 0:
