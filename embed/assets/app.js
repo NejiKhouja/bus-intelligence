@@ -442,23 +442,27 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
             <span class="wc-alert-date">${fmtDay(a.day)}</span>
         </div>
         <div class="wc-metrics">
-            <div class="wc-metric"><div class="wc-metric-label" title="${esc(FORMULA_HELP)}">Durée du trajet ⓘ</div><div class="wc-metric-value">${fmtDuration(dur)}</div></div>
+            <div class="wc-metric"><div class="wc-metric-label" data-tip="${esc(FORMULA_HELP)}">Durée du trajet ⓘ</div><div class="wc-metric-value">${fmtDuration(dur)}</div></div>
             <div class="wc-metric"><div class="wc-metric-label">Départ → Arrivée</div><div class="wc-metric-value" style="font-size:16px">${dep} → ${arr}</div></div>
         </div>`;
 
     if (a.top_feature !== undefined) {
         html += `<p class="wc-muted">Cause principale : <strong>${esc(TOP_FEATURE_LABELS[a.top_feature] || "Non catégorisé")}</strong></p>`;
     }
-    if (a.is_data_bug) html += `<div class="wc-banner error">${icon("alert")}Probable bug de données (durée/horodatage incohérent) — à vérifier avant d'agir.</div>`;
-    else if (a.is_fragment) html += `<div class="wc-banner warn">${icon("fragment")}Trajet trop court/fragmentaire pour être jugé fiable.</div>`;
-    else if (a.is_dark_inflated) html += `<div class="wc-banner info">${icon("signal")}Durée gonflée par une perte de signal GPS prolongée, pas une vraie immobilisation.</div>`;
-    else if (a.is_implausible) html += `<div class="wc-banner info">${icon("clock")}Durée improbable — à vérifier.</div>`;
-    else if (a.is_partial_coverage) html += `<div class="wc-banner info">${icon("pin")}Couverture partielle (${a.n_stops ?? "?"} arrêts vs ${a.line_median_n_stops ?? "?"} normalement).</div>`;
+    // Boîtes qualité DÉTAILLÉES -- texte complet des q_* de src/dashboard/i18n.py (retour
+    // utilisateur 2026-07-20 : les one-liners précédents ("Durée improbable — à vérifier")
+    // n'expliquaient pas la CAUSE probable, alors que Streamlit dit explicitement
+    // "chauffeur n'ayant pas clôturé son service", "trou de signal GPS", etc.).
+    if (a.is_data_bug) html += `<div class="wc-banner error">${icon("alert")}<strong>Bug de données</strong> : durée &gt; 24h physiquement impossible — horodatages corrompus dans la source GPS (pas un vrai trajet). Sera éliminé définitivement au prochain rebuild.</div>`;
+    else if (a.is_fragment) html += `<div class="wc-banner warn">${icon("fragment")}<strong>Fragment de suivi</strong> : durée très inférieure à la normale de la ligne avec presque aucun arrêt suivi — trajet partiel ou couverture GPS lacunaire, pas comparable à un trajet complet.</div>`;
+    else if (a.is_dark_inflated) html += `<div class="wc-banner info">${icon("signal")}<strong>Pourquoi cette durée ?</strong> L'essentiel de cette « durée » est un trou de signal GPS : le boîtier s'est tu en cours de route puis a réémis bien plus tard. Le bus a très probablement terminé son service normalement pendant ce silence — la durée affichée reflète le comportement du boîtier, pas le temps de conduite réel. Ce n'est pas une erreur du système de détection : il signale correctement un suivi GPS défaillant, à traiter comme tel.</div>`;
+    else if (a.is_implausible) html += `<div class="wc-banner info">${icon("clock")}<strong>Pourquoi cette durée ?</strong> Le boîtier GPS a continué d'émettre après la fin du service (chauffeur n'ayant probablement pas clôturé son service / bus garé au terminus ou au dépôt) — ce temps de stationnement s'est fondu dans le trajet. Le vrai temps de conduite est nettement plus court. Ce n'est pas un défaut du système : c'est une pratique d'exploitation (service non clôturé), corrigée automatiquement au prochain rebuild des données.</div>`;
+    else if (a.is_partial_coverage) html += `<div class="wc-banner info">${icon("pin")}<strong>Pourquoi cette durée ?</strong> Ce trajet n'a couvert que <strong>${a.n_stops ?? "?"} arrêt(s)</strong> contre <strong>${a.line_median_n_stops ?? "?"} habituellement</strong> sur cette ligne/direction — le bus a réellement parcouru une distance plus courte, donc une durée plus courte est normale pour CE trajet précis. Ce n'est pas une anomalie de vitesse : le comparer à la médiane des trajets complets serait injuste, comme comparer un aller simple à un aller-retour.</div>`;
 
     const reasonFeats = a.reason_features || [];
     reasons.forEach((r, i) => {
         const help = REASON_HELP[reasonFeats[i]] || REASON_HELP_DEFAULT;
-        html += `<div class="wc-reason" title="${esc(help)}">${esc(r)}</div>`;
+        html += `<div class="wc-reason" data-tip="${esc(help)}">${esc(r)}</div>`;
     });
 
     // Puces (arrêts/segments concernés) -- chacune avec sa propre explication au survol
@@ -469,15 +473,15 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     // horodaté au lieu d'un chiffre nu (retour utilisateur 2026-07-18).
     let originIdleShown = false, endIdleShown = false;
     if ((a.origin_idle_min || 0) >= 30 && a.origin_idle_stop) {
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.origin_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.origin_idle_stop)}</strong> avant le départ : <strong>${a.origin_idle_min.toFixed(0)} min</strong> — le traceur pingait sur place de ${fmtTime(a.origin_idle_from)} à ${dep} (départ réel). Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.origin_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.origin_idle_stop)}</strong> avant le départ : <strong>${a.origin_idle_min.toFixed(0)} min</strong> — le traceur pingait sur place de ${fmtTime(a.origin_idle_from)} à ${dep} (départ réel). Temps non compté dans la durée du trajet ci-dessus.</div>`;
         originIdleShown = true;
     }
     if ((a.end_idle_min || 0) >= 30 && a.end_idle_stop) {
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.end_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.end_idle_stop)}</strong> après l'arrivée : <strong>${a.end_idle_min.toFixed(0)} min</strong> — immobile de ${arr} (arrivée réelle) à ${fmtTime(a.end_idle_to)}. Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.end_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.end_idle_stop)}</strong> après l'arrivée : <strong>${a.end_idle_min.toFixed(0)} min</strong> — immobile de ${arr} (arrivée réelle) à ${fmtTime(a.end_idle_to)}. Temps non compté dans la durée du trajet ci-dessus.</div>`;
         endIdleShown = true;
     }
     if (ps.longest_stop && ps.longest_stop.dwell_min >= 5) {
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.real_stop)}">${icon("parking")}Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.real_stop)}">${icon("parking")}Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
         // Même arrêt que le stationnement terminus déjà affiché ci-dessus ? Très probablement
         // UNE seule immobilisation continue coupée en deux par un sursaut GPS isolé, pas deux
         // événements distincts -- sinon, hypothèse plus générique (détour possible).
@@ -492,30 +496,30 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
         }
     }
     if (ps.signal_loss_stop) {
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.signal_loss)}">${icon("signal")}Perte de signal à <strong>${esc(ps.signal_loss_stop.stop)}</strong> (~${ps.signal_loss_stop.dark_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.signal_loss)}">${icon("signal")}Perte de signal à <strong>${esc(ps.signal_loss_stop.stop)}</strong> (~${ps.signal_loss_stop.dark_min.toFixed(0)} min)</div>`;
     }
     // Trou de signal EN ROUTE (entre deux arrêts, jamais rattaché à l'attente d'un arrêt
     // matché) -- invisible au scan arrêt-par-arrêt ci-dessus, mais peut expliquer à lui
     // seul un mauvais taux de suivi + une durée gonflée.
     if (a.dark_gap_before_stop && (a.max_dark_min || 0) >= 15) {
         const after = a.dark_gap_after_stop;
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.dark_gap)}">${icon("signal")}Perte de signal en route : <strong>${after
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.dark_gap)}">${icon("signal")}Perte de signal en route : <strong>${after
             ? `entre ${esc(a.dark_gap_before_stop)} et ${esc(after)}`
             : `après ${esc(a.dark_gap_before_stop)}, plus aucun arrêt suivi jusqu'à la fin du trajet`
         }</strong> (~${a.max_dark_min.toFixed(0)} min sans aucun ping).</div>`;
     }
     if (ps.farthest_stop) {
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.farthest)}">${icon("pin")}Écart de position à <strong>${esc(ps.farthest_stop.stop)}</strong> (~${ps.farthest_stop.dist_m.toFixed(0)} m)</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.farthest)}">${icon("pin")}Écart de position à <strong>${esc(ps.farthest_stop.stop)}</strong> (~${ps.farthest_stop.dist_m.toFixed(0)} m)</div>`;
     }
     if (ps.off_route_stops && ps.off_route_stops.length) {
         const others = (ps.off_route_count || ps.off_route_stops.length) - ps.off_route_stops.length;
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.off_route)}">${icon("ban")}Arrêts non desservis : ${esc(ps.off_route_stops.join(", "))}${others > 0 ? ` (+${others} autres)` : ""}</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.off_route)}">${icon("ban")}Arrêts non desservis : ${esc(ps.off_route_stops.join(", "))}${others > 0 ? ` (+${others} autres)` : ""}</div>`;
     }
     if (ps.suspect_coord_count) {
-        html += `<div class="wc-chip" title="${esc(CHIP_HELP.suspect_coord)}">${icon("info")}${ps.suspect_coord_count} arrêt(s) aux coordonnées douteuses (jamais suivis sur cette ligne — exclus du diagnostic).</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.suspect_coord)}">${icon("info")}${ps.suspect_coord_count} arrêt(s) aux coordonnées douteuses (jamais suivis sur cette ligne — exclus du diagnostic).</div>`;
     }
     if (a.has_detour && a.detour) {
-        html += `<div class="wc-chip detour" title="${esc(CHIP_HELP.detour)}">${icon("detour")}Détour non-officiel confirmé — ~${a.detour.distance_km} km pendant ~${a.detour.duration_min.toFixed(0)} min avant de revenir.</div>`;
+        html += `<div class="wc-chip detour" data-tip="${esc(CHIP_HELP.detour)}">${icon("detour")}Détour non-officiel confirmé — ~${a.detour.distance_km} km pendant ~${a.detour.duration_min.toFixed(0)} min avant de revenir.</div>`;
     }
     if (a.scheduled_departure && a.departure_delay_min !== null && a.departure_delay_min !== undefined && Math.abs(a.departure_delay_min) >= 3) {
         const late = a.departure_delay_min > 0;
@@ -774,7 +778,7 @@ async function renderExplainPanel(root, { onResults }) {
                 <select id="wc-e-day"><option value="">Tous les jours</option></select>
             </div>
             <div class="wc-field">
-                <label title="Prioritaire sur le menu « Jour » si renseignée — utile pour un jour tout juste arrivé via les webservices en direct et pas encore dans la liste précalculée.">Ou date précise</label>
+                <label data-tip="Prioritaire sur le menu « Jour » si renseignée — utile pour un jour tout juste arrivé via les webservices en direct et pas encore dans la liste précalculée.">Ou date précise</label>
                 <input type="date" id="wc-e-manual-date">
             </div>
             <div class="wc-field">
@@ -852,7 +856,7 @@ async function renderExplainPanel(root, { onResults }) {
         <div class="wc-card">
             <div class="wc-banner ${cls}" style="margin-bottom:10px">${icon(ic)}<strong>${label}</strong> — Ligne ${esc(line)} · basé sur ${pat.total_trips.toLocaleString("fr-FR")} trajets analysés.</div>
             <div class="wc-metrics">
-                <div class="wc-metric"><div class="wc-metric-label" title="Part des trajets signalés comme anormaux. Le modèle est calibré pour ~5% d'anomalies « naturelles » — le delta est mesuré par rapport à cette base.">Taux d'anomalie ⓘ</div>
+                <div class="wc-metric"><div class="wc-metric-label" data-tip="Part des trajets signalés comme anormaux. Le modèle est calibré pour ~5% d'anomalies « naturelles » — le delta est mesuré par rapport à cette base.">Taux d'anomalie ⓘ</div>
                     <div class="wc-metric-value">${(rate * 100).toFixed(1)} %</div>
                     <div class="wc-metric-sub">${delta >= 0 ? "+" : ""}${delta.toFixed(1)} pts vs base 5%</div></div>
                 <div class="wc-metric"><div class="wc-metric-label">Trajets signalés</div>
@@ -1024,9 +1028,9 @@ async function renderExplainPanel(root, { onResults }) {
         <div class="wc-card">
             ${warning}${cacheNote(res)}
             <div class="wc-metrics">
-                <div class="wc-metric"><div class="wc-metric-label" title="Nombre total de trajets dans la période sélectionnée pour ce périmètre.">Trajets analysés ⓘ</div><div class="wc-metric-value">${res.total_trips}</div></div>
-                <div class="wc-metric"><div class="wc-metric-label" title="Trajets signalés comme anormaux par le système de détection automatique.">Trajets anormaux ⓘ</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
-                ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label" title="Durée médiane d'un trajet non anormal sur cette ligne — sert de référence pour juger si un trajet est trop long ou trop court.">Durée normale (médiane) ⓘ</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
+                <div class="wc-metric"><div class="wc-metric-label" data-tip="Nombre total de trajets dans la période sélectionnée pour ce périmètre.">Trajets analysés ⓘ</div><div class="wc-metric-value">${res.total_trips}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label" data-tip="Trajets signalés comme anormaux par le système de détection automatique.">Trajets anormaux ⓘ</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
+                ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label" data-tip="Durée médiane d'un trajet non anormal sur cette ligne — sert de référence pour juger si un trajet est trop long ou trop court.">Durée normale (médiane) ⓘ</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
             </div>
             <p class="wc-muted">Les trajets signalés pour ce périmètre sont affichés dans la liste ci-dessous.</p>
         </div>`;

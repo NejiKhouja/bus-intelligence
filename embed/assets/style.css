@@ -380,7 +380,38 @@ button.wc-link-muted {
 }
 button.wc-link-muted:hover { color: var(--wc-orange); }
 .wc-metric-sub { font-size: 11.5px; color: var(--wc-text-muted); margin-top: 2px; }
-.wc-metric-label[title] { cursor: help; }
+
+/* ── Info-bulles maison ([data-tip]) ──────────────────────────────────────────────
+   Remplace l'attribut natif `title` (2026-07-20, retour utilisateur : "le texte au
+   survol n'apparaît pas") -- le tooltip natif du navigateur a 1-2 s de délai avant
+   d'apparaître, se referme vite, et n'existe pas du tout au tactile : en pratique
+   les utilisateurs ne le voyaient jamais. Ici : apparition immédiate au survol via
+   ::after + attr(data-tip), même contenu, aucune dépendance JS. */
+.wc-embed [data-tip] { position: relative; cursor: help; }
+.wc-embed [data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: 0;
+    top: 100%;
+    margin-top: 6px;
+    z-index: 60;
+    width: min(420px, 78vw);
+    background: var(--wc-bg-card);
+    color: var(--wc-text);
+    border: 1px solid var(--wc-border);
+    border-left: 3px solid var(--wc-orange);
+    border-radius: var(--wc-radius-sm);
+    padding: 10px 12px;
+    font-size: 12px;
+    font-weight: 400;
+    font-style: normal;
+    line-height: 1.55;
+    text-transform: none;
+    letter-spacing: normal;
+    white-space: normal;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+    pointer-events: none;
+}
 .wc-ref summary {
     cursor: pointer;
     font-weight: 600;
