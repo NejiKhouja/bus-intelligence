@@ -262,6 +262,56 @@ function verticalBarChart(canvas, labels, values, color) {
     });
 }
 
+// Volume de tickets par jour, coloré Normal/Anormal -- mirrors app.py's `figh` (px.bar,
+// color="état"). `rows` = jours triés chronologiquement (voir /api/ticket-anomaly-explain).
+function ticketVolumeChart(canvas, rows) {
+    const colors = rows.map((r) => (r.anomaly ? "#ef4444" : "#22c55e"));
+    return new Chart(canvas, {
+        type: "bar",
+        data: { labels: rows.map((r) => fmtDay(r.day)), datasets: [{ data: rows.map((r) => r.nbr_ticket), backgroundColor: colors, borderRadius: 3 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, title: { display: true, text: "Tickets/jour", color: "#c8d4e6", font: { size: 12 } } },
+            scales: {
+                y: { ticks: { color: "#8ea0bd" }, grid: { color: "#1a2c47" }, beginAtZero: true },
+                x: { ticks: { color: "#8ea0bd", maxRotation: 60, minRotation: 60, font: { size: 10 } }, grid: { display: false } },
+            },
+            animation: { duration: 400 },
+        },
+    });
+}
+// Prix moyen par jour (points colorés Normal/Anormal) vs médiane ligne (ligne pointillée) --
+// mirrors app.py's `figf` (px.scatter + add_hline).
+function ticketFareChart(canvas, rows, lineMedian) {
+    const colors = rows.map((r) => (r.anomaly ? "#ef4444" : "#22c55e"));
+    const datasets = [{
+        label: "Prix moyen", data: rows.map((r) => r.avg_fare), showLine: false,
+        pointBackgroundColor: colors, pointBorderColor: colors, pointRadius: 4,
+    }];
+    if (lineMedian !== null && lineMedian !== undefined) {
+        datasets.push({
+            label: "Médiane ligne", data: rows.map(() => lineMedian),
+            borderColor: "#8ea0bd", borderDash: [5, 5], pointRadius: 0, fill: false,
+        });
+    }
+    return new Chart(canvas, {
+        type: "line",
+        data: { labels: rows.map((r) => fmtDay(r.day)), datasets },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true, labels: { color: "#c8d4e6", font: { size: 10 } } },
+                title: { display: true, text: "Prix moyen (DT) vs médiane ligne", color: "#c8d4e6", font: { size: 12 } },
+            },
+            scales: {
+                y: { ticks: { color: "#8ea0bd" }, grid: { color: "#1a2c47" }, beginAtZero: true },
+                x: { ticks: { color: "#8ea0bd", maxRotation: 60, minRotation: 60, font: { size: 10 } }, grid: { display: false } },
+            },
+            animation: { duration: 400 },
+        },
+    });
+}
+
 // ── Leaflet (trip map) -- lazy CDN load, same pattern as Chart.js ───────────────────────
 // Free OSM tiles, no API key -- mirrors the Streamlit map (plotly "open-street-map" style).
 let _leafletPromise = null;
@@ -1098,7 +1148,7 @@ async function renderTicketsView(root) {
                 cardsBox.innerHTML = `<div class="wc-banner info">Aucun jour anormal trouvé pour ce filtre.</div>`;
                 return;
             }
-            for (const a of anomalies) cardsBox.appendChild(renderTicketCard(a));
+            for (const a of anomalies) cardsBox.appendChild(renderTicketCard(a, clientSafe));
         } catch (e) {
             body.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
         }
@@ -1107,7 +1157,39 @@ async function renderTicketsView(root) {
     lineSel.addEventListener("change", load);
     load();
 }
-function renderTicketCard(a) {
+// ── Puces de table utilitaires (billetterie) ─────────────────────────────────────────────
+function _tcell(v, fmt) { return (v === null || v === undefined) ? "—" : fmt(v); }
+
+function stationTableHtml(rows, withType) {
+    let html = `<table class="wc-table"><thead><tr><th>Arrêt</th><th>Tickets</th><th>Recette</th><th>Prix moyen</th>${withType ? "<th>Type</th>" : ""}</tr></thead><tbody>`;
+    for (const r of rows) {
+        const type = r.anomaly ? (r.is_good_anomaly ? "Bonne" : "À surveiller") : "—";
+        html += `<tr><td>${esc(r.station)}</td><td>${r.nbr_ticket}</td><td>${r.recette.toFixed(0)} DT</td><td>${r.avg_fare.toFixed(2)} DT</td>${withType ? `<td>${esc(type)}</td>` : ""}</tr>`;
+    }
+    html += `</tbody></table>`;
+    return html;
+}
+// ALLER/RETOUR séparés quand la direction est connue pour ce bus-jour (voir
+// /api/ticket-anomaly-stations `by_direction`), sinon repli sur la vue combinée -- mirrors
+// src/dashboard/app.py::_render_trip_breakdown.
+function tripBreakdownHtml(label, combinedRows, byDirection) {
+    const aller = (byDirection || {}).ALLER || [];
+    const retour = (byDirection || {}).RETOUR || [];
+    if (!aller.length && !retour.length) {
+        return `<p class="wc-muted"><strong>${esc(label)}</strong></p>${stationTableHtml(combinedRows, true)}`;
+    }
+    let html = `<p class="wc-muted"><strong>${esc(label)}</strong> — direction connue pour ce trajet (ALLER/RETOUR séparés)</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">`;
+    for (const [dname, rows] of [["ALLER", aller], ["RETOUR", retour]]) {
+        const nT = rows.reduce((s, r) => s + r.nbr_ticket, 0);
+        const nR = rows.reduce((s, r) => s + r.recette, 0);
+        html += `<div><p class="wc-muted">${dname} — ${rows.length ? `${nT} tickets / ${nR.toFixed(0)} DT` : "pas de vente enregistrée"}</p>${rows.length ? stationTableHtml(rows, false) : ""}</div>`;
+    }
+    html += `</div>`;
+    return html;
+}
+
+function renderTicketCard(a, clientSafe) {
     const sev = SEV_META[a.severity] || SEV_META.medium;
     let html = `<div class="wc-alert-card">
         <div class="wc-alert-head">
@@ -1128,11 +1210,118 @@ function renderTicketCard(a) {
         <div class="wc-metric"><div class="wc-metric-label">Prix moyen</div><div class="wc-metric-value">${a.avg_fare.toFixed(1)} DT</div></div>
     </div>`;
     for (const r of (a.reasons || [])) html += `<div class="wc-reason">${esc(r)}</div>`;
+
+    // Contexte de jugement -- tableau, pas une ligne de texte (retour utilisateur 2026-07-20
+    // : "je veux plus de détails comme dans app.py, un tableau etc etc") -- mirrors
+    // src/dashboard/app.py's `ctx` DataFrame (Ce jour / Médiane ligne / Médiane de ce bus).
     if (a.line_median_avg_fare !== undefined && a.line_median_avg_fare !== null) {
-        html += `<p class="wc-muted">Médiane ligne : ${a.line_median_nbr_ticket ?? "—"} tickets · ${(a.line_median_recette ?? 0).toFixed(0)} DT · ${(a.line_median_avg_fare ?? 0).toFixed(2)} DT/ticket</p>`;
+        html += `<table class="wc-table" style="margin-top:8px">
+            <thead><tr><th></th><th>Ce jour</th><th>Médiane ligne</th><th>Médiane de ce bus</th></tr></thead>
+            <tbody>
+                <tr><td>Tickets</td><td>${a.nbr_ticket}</td>
+                    <td>${_tcell(a.line_median_nbr_ticket, (v) => v.toFixed(0))}</td>
+                    <td>${_tcell(a.bus_median_nbr_ticket, (v) => v.toFixed(0))}</td></tr>
+                <tr><td>Recette</td><td>${a.recette.toFixed(0)} DT</td>
+                    <td>${_tcell(a.line_median_recette, (v) => v.toFixed(0) + " DT")}</td>
+                    <td>${_tcell(a.bus_median_recette, (v) => v.toFixed(0) + " DT")}</td></tr>
+                <tr><td>Prix moyen</td><td>${a.avg_fare.toFixed(2)} DT</td>
+                    <td>${_tcell(a.line_median_avg_fare, (v) => v.toFixed(2) + " DT")}</td>
+                    <td>${_tcell(a.bus_median_avg_fare, (v) => v.toFixed(2) + " DT")}</td></tr>
+            </tbody>
+        </table>`;
     }
+
+    // Ligne structurellement atypique (quasi tous ses jours signalés) -- pas un incident de
+    // CE jour, à réévaluer après un réentraînement par ligne plutôt qu'à traiter au cas par
+    // cas (mirrors app.py's `rate >= 0.9` warning).
+    if (a.line_anomaly_rate !== undefined && a.line_anomaly_rate !== null && a.line_anomaly_rate >= 0.9) {
+        html += `<div class="wc-banner warn">${icon("alert")}${(a.line_anomaly_rate * 100).toFixed(0)}% des jours de cette ligne sont signalés — écart structurel de la ligne (tarification), pas un incident de ce jour précis.</div>`;
+    }
+
     html += `</div>`;
-    return el(html);
+    const card = el(html);
+
+    // ── "Historique de ce bus sur cette ligne" -- volume + prix moyen dans le temps ───────
+    const histBtn = el(`<button class="wc-btn-secondary" style="margin-top:8px">${icon("chart")}Historique de ce bus sur cette ligne</button>`);
+    const histBox = el(`<div class="wc-map-holder" hidden></div>`);
+    let histLoaded = false;
+    histBtn.addEventListener("click", async () => {
+        if (histLoaded) { histBox.hidden = !histBox.hidden; return; }
+        histBtn.disabled = true;
+        histBox.hidden = false;
+        histBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement de l'historique…</p>`;
+        try {
+            const detail = await api("/api/ticket-anomaly-explain", { line: a.line, bus: a.bus, client_safe: clientSafe });
+            const rows = ((detail || {}).days || []).slice().sort((x, y) => String(x.day).localeCompare(String(y.day)));
+            if (!rows.length) {
+                histBox.innerHTML = `<div class="wc-banner info">${icon("info")}Pas d'historique disponible pour ce bus.</div>`;
+            } else {
+                histBox.innerHTML = `<div class="wc-charts-grid">
+                    <div class="wc-chart-wrap"><canvas class="wc-tk-vol"></canvas></div>
+                    <div class="wc-chart-wrap"><canvas class="wc-tk-fare"></canvas></div>
+                </div>`;
+                try {
+                    await ensureChartJs();
+                    ticketVolumeChart(histBox.querySelector(".wc-tk-vol"), rows);
+                    ticketFareChart(histBox.querySelector(".wc-tk-fare"), rows, a.line_median_avg_fare);
+                } catch {
+                    histBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Graphiques indisponibles (bibliothèque injoignable).</div>`;
+                }
+            }
+            histLoaded = true;
+        } catch (e) {
+            histBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur : ${esc(e.message)}</div>`;
+        } finally {
+            histBtn.disabled = false;
+        }
+    });
+    card.appendChild(histBtn);
+    card.appendChild(histBox);
+
+    // ── "Voir le détail par arrêt" -- répartition par arrêt pour CE trajet + comparaison ──
+    // au trajet de référence (bus-jour normal de cette ligne), voir /api/ticket-anomaly-
+    // stations et /api/ticket-anomaly-reference.
+    const stBtn = el(`<button class="wc-btn-secondary" style="margin-top:8px;margin-left:8px">${icon("pin")}Voir le détail par arrêt</button>`);
+    const stBox = el(`<div class="wc-map-holder" hidden></div>`);
+    let stLoaded = false;
+    stBtn.addEventListener("click", async () => {
+        if (stLoaded) { stBox.hidden = !stBox.hidden; return; }
+        stBtn.disabled = true;
+        stBox.hidden = false;
+        stBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement du détail par arrêt…</p>`;
+        try {
+            const [stRes, refRes] = await Promise.all([
+                api("/api/ticket-anomaly-stations", { line: a.line, bus: a.bus, day: a.day }),
+                api("/api/ticket-anomaly-reference", { line: a.line }).catch(() => null),
+            ]);
+            const stations = (stRes || {}).stations || [];
+            if (!stations.length) {
+                stBox.innerHTML = `<div class="wc-banner info">${icon("info")}Aucune donnée par arrêt pour ce trajet (modèle par arrêt pas encore entraîné, ou trop peu de données).</div>`;
+            } else {
+                const sumTicket = stations.reduce((s, r) => s + r.nbr_ticket, 0);
+                const sumRecette = stations.reduce((s, r) => s + r.recette, 0);
+                let inner = `<p class="wc-muted">${stations.length} arrêt(s) desservi(s) par le bus ${esc(a.bus)} ce jour-là — ${sumTicket} tickets / ${sumRecette.toFixed(0)} DT au total (vs ${a.nbr_ticket} tickets / ${a.recette.toFixed(0)} DT affiché ci-dessus pour ce bus-jour).</p>`;
+                inner += tripBreakdownHtml(`Ce trajet — bus ${a.bus} · ${fmtDay(a.day)}`, stations, (stRes || {}).by_direction);
+                const refTrip = (refRes || {}).trip;
+                const refStations = (refRes || {}).stations || [];
+                if (refTrip && refStations.length) {
+                    inner += tripBreakdownHtml(
+                        `Trajet de référence (normal) — bus ${esc(refTrip.bus)} · ${fmtDay(refTrip.day)} — ${refTrip.nbr_ticket} tickets / ${refTrip.recette.toFixed(0)} DT`,
+                        refStations, (refRes || {}).by_direction);
+                }
+                stBox.innerHTML = inner;
+            }
+            stLoaded = true;
+        } catch (e) {
+            stBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur : ${esc(e.message)}</div>`;
+        } finally {
+            stBtn.disabled = false;
+        }
+    });
+    card.appendChild(stBtn);
+    card.appendChild(stBox);
+
+    return card;
 }
 
 // ── View: Chauffeurs ─────────────────────────────────────────────────────────────────────
