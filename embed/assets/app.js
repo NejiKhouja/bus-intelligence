@@ -684,9 +684,15 @@ async function renderTripsView(root) {
             api("/api/current-anomalies", {}),
             api("/api/anomaly-history", { limit: 300 }),
         ]);
-        freshBox.innerHTML = (today.live
-            ? `<div class="wc-banner success">${LIVE_DOT}Données en direct — ${fmtDay(today.date)}</div>`
-            : `<div class="wc-banner info">${icon("chart")}Dernier jour historique disponible — ${fmtDay(today.date)}</div>`)
+        // Toujours dire COMBIEN de trajets ont été analysés, et le dire explicitement quand
+        // AUCUN n'est anormal (retour utilisateur 2026-07-20) -- sans ça, "pas d'anomalie
+        // hier" et "les données d'hier ne sont pas encore arrivées" se ressemblaient trop.
+        const dayLabel = today.live ? `Données en direct — ${fmtDay(today.date)}` : `Dernier jour historique disponible — ${fmtDay(today.date)}`;
+        const nTrips = today.total_trips ?? 0;
+        const tripsLabel = `${nTrips} trajet${nTrips === 1 ? "" : "s"} analysé${nTrips === 1 ? "" : "s"}`;
+        const nAnom = today.anomaly_count ?? 0;
+        const anomLabel = nAnom === 0 ? "aucune anomalie détectée" : `${nAnom} anomalie${nAnom === 1 ? "" : "s"} détectée${nAnom === 1 ? "" : "s"}`;
+        freshBox.innerHTML = `<div class="wc-banner ${today.live ? "success" : "info"}">${today.live ? LIVE_DOT : icon("chart")}${dayLabel} · ${tripsLabel} · ${anomLabel}</div>`
             + cacheNote(today) + cacheNote(hist);
         baseList = (hist || {}).anomalies || [];
         setScope(baseList, { title: "Trajets signalés" });
