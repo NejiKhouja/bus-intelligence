@@ -340,7 +340,15 @@ class ModelManager:
         les jours-bus suivants de la même société -- pas de requête par ligne du tableau.
         """
         if societe not in self._gps_trip_counts:
-            fa = self.foundation_slice(societe)
+            # include_live=False : ce lookup ne veut que des COMPTES de trajets historiques
+            # par (ligne, bus, jour) -- déclencher le merge live (webservice + reconstruction
+            # + scoring de TOUTE la société, voir _score_all_gps_live) ici n'apporte rien et
+            # coûte cher, même bug que celui déjà corrigé sur reference_trip (2026-07-19) :
+            # constaté à nouveau 2026-07-20, OOM sur l'onglet "Anomalies billetterie" --
+            # _ticket_rows_with_reasons appelle get_gps_trip_count pour CHAQUE jour-bus
+            # (mis en cache par société après le 1er appel, mais ce 1er appel déclenchait le
+            # merge live en plus de la lecture historique complète de la société).
+            fa = self.foundation_slice(societe, include_live=False)
             if fa is None:
                 return None  # BDD injoignable -- pas vérifiable, distinct de "0 trajet"
             if len(fa) == 0:
