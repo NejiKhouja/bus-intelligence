@@ -769,13 +769,29 @@ async function renderTripsView(root) {
         if (opening) explainPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
 
-    // Fraîcheur (léger) + liste unifiée (déjà fusionnée en direct côté API) en parallèle --
-    // plus de second appel dupliqué à current-anomalies pour peupler une carte séparée.
+    // DÉCOUPLÉ en deux temps (2026-07-20, retour utilisateur : "l'utilisateur ne voit
+    // d'abord que les anciennes anomalies, puis il doit recharger la page pour voir celles
+    // de la veille") -- avant, les deux appels étaient attendus ENSEMBLE (Promise.all) :
+    // current-anomalies peut être long (à froid, il déclenche la reconstruction + le
+    // scoring de toute la société sur les pings de la veille) et l'historique, souvent
+    // servi instantanément par le cache du proxy, restait bloqué derrière lui -- ou
+    // l'inverse, un historique en cache SANS la veille s'affichait à côté d'un bandeau qui
+    // comptait pourtant une anomalie de la veille introuvable dans la liste.
+    // Ici : (1) l'historique s'affiche dès qu'il arrive ; (2) le bandeau garde son
+    // animation de chargement pendant que la veille se calcule ; (3) à l'arrivée, les
+    // anomalies de la veille manquantes sont FUSIONNÉES en tête de liste, sans rechargement.
     try {
-        const [today, hist] = await Promise.all([
-            api("/api/current-anomalies", {}),
-            api("/api/anomaly-history", { limit: 300 }),
-        ]);
+        const hist = await api("/api/anomaly-history", { limit: 300 });
+        baseList = (hist || {}).anomalies || [];
+        setScope(baseList, { title: "Trajets signalés" });
+    } catch (e) {
+        freshBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+        cardsBox.innerHTML = "";
+        return;
+    }
+
+    freshBox.innerHTML = `<div class="wc-banner info"><span class="wc-spin"></span> Récupération des résultats de la veille… (l'historique ci-dessous est déjà consultable)</div>`;
+    api("/api/current-anomalies", {}).then((today) => {
         // Toujours dire COMBIEN de trajets ont été analysés, et le dire explicitement quand
         // AUCUN n'est anormal (retour utilisateur 2026-07-20) -- sans ça, "pas d'anomalie
         // hier" et "les données d'hier ne sont pas encore arrivées" se ressemblaient trop.
@@ -784,14 +800,24 @@ async function renderTripsView(root) {
         const tripsLabel = `${nTrips} trajet${nTrips === 1 ? "" : "s"} analysé${nTrips === 1 ? "" : "s"}`;
         const nAnom = today.anomaly_count ?? 0;
         const anomLabel = nAnom === 0 ? "aucune anomalie détectée" : `${nAnom} anomalie${nAnom === 1 ? "" : "s"} détectée${nAnom === 1 ? "" : "s"}`;
-        freshBox.innerHTML = `<div class="wc-banner ${today.live ? "success" : "info"}">${today.live ? LIVE_DOT : icon("chart")}${dayLabel} · ${tripsLabel} · ${anomLabel}</div>`
-            + cacheNote(today) + cacheNote(hist);
-        baseList = (hist || {}).anomalies || [];
-        setScope(baseList, { title: "Trajets signalés" });
-    } catch (e) {
-        freshBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
-        cardsBox.innerHTML = "";
-    }
+        freshBox.innerHTML = `<div class="wc-banner ${today.live ? "success" : "info"}">${today.live ? LIVE_DOT : icon("chart")}${dayLabel} · ${tripsLabel} · ${anomLabel}</div>`;
+        // Fusion : si l'historique servi (cache proxy possiblement antérieur au push du
+        // jour) ne contenait pas encore les anomalies de la veille, on les insère en tête
+        // -- clef (jour, bus, trip_start), le même trajet ne peut pas y être deux fois.
+        const liveAnoms = (today.anomalies || []);
+        if (liveAnoms.length) {
+            const have = new Set(baseList.map((a) => `${a.day}|${a.bus}|${a.trip_start}`));
+            const missing = liveAnoms.filter((a) => !have.has(`${a.day}|${a.bus}|${a.trip_start}`));
+            if (missing.length) {
+                baseList = [...missing, ...baseList];
+                // Ne re-rend la liste partagée que si l'utilisateur est encore sur la vue
+                // d'ensemble -- pas s'il a déjà recadré via "Filtrer / analyser un bus".
+                if (backBtn.hidden) setScope(baseList, { title: "Trajets signalés" });
+            }
+        }
+    }).catch(() => {
+        freshBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Résultats de la veille indisponibles pour l'instant — l'historique ci-dessous reste consultable, réessayez dans quelques minutes.</div>`;
+    });
 }
 
 // ── Panneau "Expliquer un bus" (filtres + verdict de ligne + référence) ─────────────────
