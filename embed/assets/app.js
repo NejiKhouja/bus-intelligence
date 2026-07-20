@@ -593,7 +593,7 @@ function sortAnomalies(list, key) {
 // vue d'ensemble par défaut.
 async function renderTripsView(root) {
     root.innerHTML = `
-    <div id="wc-t-freshness"><span class="wc-skel" style="display:block;width:220px;height:32px;border-radius:var(--wc-radius-sm);margin-bottom:14px"></span></div>
+    <div id="wc-t-freshness"><div class="wc-banner info"><span class="wc-spin"></span> Vérification des données en direct…</div></div>
     <button id="wc-t-explain-toggle" class="wc-btn-secondary wc-explain-toggle">
         ${icon("search")}<span>Filtrer / analyser un bus précis</span>
     </button>

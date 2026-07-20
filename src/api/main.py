@@ -1,10 +1,12 @@
 """FastAPI serving layer for WiniCari AI"""
 from __future__ import annotations
 
+import functools
 import gzip
 import json
 import logging
 import math
+import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -495,6 +497,33 @@ async def log_requests(request: Request, call_next):
         f"model_commit={(_model_version_info or {}).get('git_commit', 'n/a')}"
     )
     return response
+
+# Limite la concurrence des handlers les plus lourds (scans historique/live à l'échelle
+# d'une société entière) -- Starlette envoie les `def` (voir get_anomaly_history) dans son
+# threadpool SANS plafond propre, donc plusieurs visiteurs qui arrivent à la même minute
+# (plusieurs opérateurs qui ouvrent le widget) peuvent chacun garder des DataFrames
+# entiers en mémoire EN MÊME TEMPS et dépasser les 512MB de l'instance même si AUCUNE
+# requête individuelle n'est anormalement grosse (constaté 2026-07-20 : OOM immédiatement
+# après une ligne de log "webservice injoignable" qui, elle, est bénigne -- le disjoncteur
+# de src/data/webservices.py la rend quasi instantanée après le 1er échec ; la vraie cause
+# est la charge concurrente, pas cette requête-là). Au-delà de la limite, on attend
+# quelques secondes puis on échoue vite avec un 503 réessayable plutôt que de s'entasser
+# et de se faire tuer silencieusement par l'OOM killer.
+_HEAVY_ENDPOINT_CONCURRENCY = int(os.getenv("HEAVY_ENDPOINT_CONCURRENCY", "2"))
+_heavy_endpoint_semaphore = threading.BoundedSemaphore(_HEAVY_ENDPOINT_CONCURRENCY)
+
+
+def _limit_concurrency(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not _heavy_endpoint_semaphore.acquire(timeout=8):
+            raise HTTPException(status_code=503,
+                                detail="Serveur chargé, réessayez dans quelques secondes.")
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _heavy_endpoint_semaphore.release()
+    return wrapper
 
 # Helper Functions
 def get_available_options(societe: Optional[str] = None, line: Optional[str] = None) -> Dict:
@@ -1864,6 +1893,7 @@ async def anomaly_score_live(request: AnomalyLiveScoreRequest):
 # plus lourds (ceux exercés par le flux qui a crashé) ; le reste de l'API garde `async def`
 # par cohérence avec le style existant -- à convertir de la même façon si le même symptôme
 # réapparaît ailleurs.
+@_limit_concurrency
 def get_anomaly_history(
     societe: str,
     line: Optional[str] = None,
@@ -1920,6 +1950,7 @@ async def check_bus_anomalies(
 
 
 @app.get("/api/current-anomalies")
+@_limit_concurrency
 def get_current_anomalies(  # def, pas async def -- voir la note dans get_anomaly_history
     societe: str,
     line: Optional[str] = None,
@@ -2097,6 +2128,7 @@ def _detect_start_detour(g, trip_start, longest_stop, cfg, detour_thresh_m: floa
 
 
 @app.get("/api/anomaly-explain")
+@_limit_concurrency
 def anomaly_explain(  # def, pas async def -- voir la note dans get_anomaly_history
     societe: str,
     line: Optional[str] = None,
@@ -2584,6 +2616,7 @@ async def driver_stats(driver_code: str, societe: Optional[str] = None):
 
 
 @app.get("/api/reference-trip")
+@_limit_concurrency
 def reference_trip(societe: str, line: str):  # def, pas async def -- voir get_anomaly_history
     """LE trajet « témoin » d'une ligne, PAR DIRECTION : un trajet réel, non anormal, bien
     suivi, de durée proche de la médiane -- affiché au-dessus des anomalies comme référence
@@ -2698,6 +2731,7 @@ def reference_trip(societe: str, line: str):  # def, pas async def -- voir get_a
 
 
 @app.get("/api/anomaly-patterns")
+@_limit_concurrency
 def anomaly_patterns(  # def, pas async def -- voir la note dans get_anomaly_history
     societe: str,
     line: Optional[str] = None
