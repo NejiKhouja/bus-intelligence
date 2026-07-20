@@ -1571,7 +1571,15 @@ def _ticket_rows_with_reasons(models, days, anomalies_only: bool = True,
 
 
 @app.get("/api/ticket-anomaly-history")
-async def ticket_anomaly_history(
+# `def`, pas `async def` -- voir la note dans get_anomaly_history. Constaté ici aussi
+# 2026-07-20 : "HTTP health check failed (timed out after 5 seconds)" pendant que l'onglet
+# "Anomalies billetterie" de l'embed enchaîne DEUX appels synchrones l'un après l'autre
+# (ticket-anomaly-patterns puis ticket-anomaly-history, voir embed/assets/app.js) -- sous
+# `async def`, leur temps de blocage s'ADDITIONNE sur l'unique event loop au lieu de
+# tourner dans le threadpool de Starlette. Même correctif que les 5 handlers GPS déjà
+# convertis, appliqué maintenant aux 5 handlers billetterie équivalents.
+@_limit_concurrency
+def ticket_anomaly_history(
     societe: str,
     line: Optional[str] = None,
     bus: Optional[str] = None,
@@ -1591,7 +1599,8 @@ async def ticket_anomaly_history(
 
 
 @app.get("/api/ticket-anomaly-explain")
-async def ticket_anomaly_explain(
+@_limit_concurrency
+def ticket_anomaly_explain(  # def, pas async def -- voir la note dans ticket_anomaly_history
     societe: str,
     line: Optional[str] = None,
     bus: Optional[str] = None,
@@ -1615,7 +1624,8 @@ async def ticket_anomaly_explain(
 
 
 @app.get("/api/ticket-anomaly-patterns")
-async def ticket_anomaly_patterns(societe: str, line: Optional[str] = None):
+@_limit_concurrency
+def ticket_anomaly_patterns(societe: str, line: Optional[str] = None):  # def, pas async def -- voir ticket_anomaly_history
     """Anomaly-RATE aggregations by line and by bus (no hour/direction -- daily grain)."""
     try:
         _models, days = _filter_ticket_days(societe, line)
@@ -1755,7 +1765,8 @@ def _station_trip_breakdown(societe: str, line: str, bus: str, day: str) -> dict
 
 
 @app.get("/api/ticket-anomaly-stations")
-async def ticket_anomaly_stations(societe: str, line: str, bus: str, day: str):
+@_limit_concurrency
+def ticket_anomaly_stations(societe: str, line: str, bus: str, day: str):  # def, pas async def -- voir ticket_anomaly_history
     """Per-station ticket breakdown for ONE EXACT trip (societe, line, bus, day) -- Phase 2
     drill-down from a flagged bus-day card (see docs/WEBSERVICES_NEEDED.md service 3 and
     the `recursive-bubbling-curry` plan). Returns one row per origin station with lat/lon
@@ -1773,7 +1784,8 @@ async def ticket_anomaly_stations(societe: str, line: str, bus: str, day: str):
 
 
 @app.get("/api/ticket-anomaly-reference")
-async def ticket_anomaly_reference(societe: str, line: str):
+@_limit_concurrency
+def ticket_anomaly_reference(societe: str, line: str):  # def, pas async def -- voir ticket_anomaly_history
     """A NORMAL (non-anomalous) bus-day for this line, with its per-station ticket
     breakdown -- companion to `/api/reference-trip` (GPS), so the admin can compare a
     flagged trip's per-station sales against what a normal trip's sales look like, not
