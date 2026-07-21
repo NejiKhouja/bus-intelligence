@@ -50,6 +50,11 @@ const REASON_HELP = {
 };
 const REASON_HELP_DEFAULT = "Signal utilisé par le modèle de détection pour juger ce trajet anormal.";
 const FORMULA_HELP = "Durée trajet = dernier ping − premier ping, APRÈS avoir retiré le stationnement immobile en bordure du trajet (bus garé avant le vrai départ / après la vraie arrivée). Un arrêt ou une immobilisation EN COURS de trajet, elle, reste comptée dans cette durée -- ce n'est pas la même chose.";
+// Aide au survol de la 3e métrique « Activité GPS vérifiable » -- texte de
+// verifiable_activity_caption dans src/dashboard/i18n.py (paramètres remplis à l'affichage).
+function verifiableActivityHelp(est, dur, dwell, dark, match) {
+    return `Activité GPS vérifiable ≈ ${est}  (${dur} − ${dwell.toFixed(0)} min immobile − ${dark.toFixed(0)} min sans signal), avec ${(match * 100).toFixed(0)}% des arrêts suivis. Estimation basse : le temps de conduite pendant les trous de signal et le stationnement hors des arrêts reconnus ne sont pas décomptables.`;
+}
 
 // ── Explications au survol des puces (mirrors src/dashboard/i18n.py's chip_*_help keys) ──
 const CHIP_HELP = {
@@ -236,6 +241,48 @@ async function api(endpoint, params = {}) {
     if (endpoint !== "/health") _apiMemCache.set(url, { t: Date.now(), data });
     return data;
 }
+
+// ── Indicateur "serveur en veille" ──────────────────────────────────────────────────────
+// L'API (Render, hébergement gratuit) se met en pause après une période sans trafic et met
+// généralement 30 à 50s à redémarrer (voir CURLOPT_TIMEOUT => 90 dans proxy.php). Sans
+// indication, la toute première requête après une pause ressemble à une page cassée plutôt
+// qu'à une attente normale. Si l'appel n'a pas répondu après COLD_START_HINT_MS, on
+// remplace le contenu de `container` (bandeau ou squelette, peu importe -- l'appelant
+// réécrit ce même conteneur au succès/à l'échec de toute façon) par un message explicite +
+// un chrono qui tourne. Cas normal (donnée déjà en cache) : le message n'a même pas le
+// temps d'apparaître.
+const COLD_START_HINT_MS = 3000;
+
+function withColdStartHint(promise, container) {
+    let settled = false;
+    let interval = null;
+    const start = Date.now();
+    const timer = setTimeout(() => {
+        if (settled) return;
+        const tick = () => {
+            if (!container.isConnected) return;
+            const s = Math.round((Date.now() - start) / 1000);
+            container.innerHTML = `
+            <div class="wc-banner info wc-coldstart">
+                <span class="wc-spin"></span>
+                <div>
+                    <strong>Le serveur se réveille…</strong>
+                    <div class="wc-muted">Mis en veille après une période d'inactivité, il redémarre généralement en 30 à 50 secondes. Ça ne se reproduira pas au prochain chargement.</div>
+                    <div class="wc-coldstart-bar"><span></span></div>
+                    <div class="wc-muted">${s}s écoulées…</div>
+                </div>
+            </div>`;
+        };
+        tick();
+        interval = setInterval(tick, 1000);
+    }, COLD_START_HINT_MS);
+    return promise.finally(() => {
+        settled = true;
+        clearTimeout(timer);
+        if (interval) clearInterval(interval);
+    });
+}
+
 // Note "résultat en cache" retirée de l'affichage (décision utilisateur 2026-07-19 :
 // "je n'aime pas que ce message apparaisse") -- le cache stale-while-revalidate lui-même
 // reste actif côté proxy.php (la donnée EST réellement rafraîchie en arrière-plan), on
@@ -473,6 +520,19 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     const reasons = a.reasons || [];
     const ps = a.problem_stops || {};
 
+    // 3e métrique « Activité GPS vérifiable » (≈ temps de conduite réel), affichée seulement
+    // quand la durée est GONFLÉE et interprétable -- mêmes conditions que src/dashboard/app.py
+    // (_show_est) : estimation dispo, immobilisation+trou de signal >= 15 min, durée au-dessus
+    // de la médiane de la ligne, et trajet correctement suivi (>= 50% des arrêts). Sur un
+    // trajet à peine suivi, « X min » est vrai mais se lit comme une absurdité -- on l'omet.
+    const est = a.driving_time_est_min;
+    const dwellM = a.max_dwell_min || 0;
+    const darkM = a.max_dark_min || 0;
+    const medM = a.line_median_elapsed_min;
+    const matchR = a.match_rate || 0;
+    const showEst = est !== undefined && est !== null && (dwellM + darkM) >= 15
+                    && medM && dur > medM && matchR >= 0.5;
+
     let html = `<div class="wc-alert-card">
         <div class="wc-alert-head">
             <span class="wc-badge ${sev.cls}">${sev.label}</span>
@@ -482,6 +542,7 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
         <div class="wc-metrics">
             <div class="wc-metric"><div class="wc-metric-label" data-tip="${esc(FORMULA_HELP)}">Durée du trajet ⓘ</div><div class="wc-metric-value">${fmtDuration(dur)}</div></div>
             <div class="wc-metric"><div class="wc-metric-label">Départ → Arrivée</div><div class="wc-metric-value" style="font-size:16px">${dep} → ${arr}</div></div>
+            ${showEst ? `<div class="wc-metric"><div class="wc-metric-label" data-tip="${esc(verifiableActivityHelp(fmtDuration(est), fmtDuration(dur), dwellM, darkM, matchR))}">Activité GPS vérifiable ⓘ</div><div class="wc-metric-value">≈ ${fmtDuration(est)}</div></div>` : ""}
         </div>`;
 
     if (a.top_feature !== undefined) {
@@ -781,7 +842,7 @@ async function renderTripsView(root) {
     // animation de chargement pendant que la veille se calcule ; (3) à l'arrivée, les
     // anomalies de la veille manquantes sont FUSIONNÉES en tête de liste, sans rechargement.
     try {
-        const hist = await api("/api/anomaly-history", { limit: 300 });
+        const hist = await withColdStartHint(api("/api/anomaly-history", { limit: 300 }), freshBox);
         baseList = (hist || {}).anomalies || [];
         setScope(baseList, { title: "Trajets signalés" });
     } catch (e) {
@@ -791,7 +852,7 @@ async function renderTripsView(root) {
     }
 
     freshBox.innerHTML = `<div class="wc-banner info"><span class="wc-spin"></span> Récupération des résultats de la veille… (l'historique ci-dessous est déjà consultable)</div>`;
-    api("/api/current-anomalies", {}).then((today) => {
+    withColdStartHint(api("/api/current-anomalies", {}), freshBox).then((today) => {
         // Toujours dire COMBIEN de trajets ont été analysés, et le dire explicitement quand
         // AUCUN n'est anormal (retour utilisateur 2026-07-20) -- sans ça, "pas d'anomalie
         // hier" et "les données d'hier ne sont pas encore arrivées" se ressemblaient trop.
@@ -1110,7 +1171,7 @@ async function renderTrendsView(root) {
 
     let pat;
     try {
-        pat = await api("/api/anomaly-patterns", {});
+        pat = await withColdStartHint(api("/api/anomaly-patterns", {}), root);
     } catch (e) {
         root.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
         return;
@@ -1187,7 +1248,7 @@ async function renderTicketsView(root) {
         body.innerHTML = skeletonChartCard(200) + skeletonCards(3);
         try {
             const clientSafe = viewSel.value === "client";
-            const pat = await api("/api/ticket-anomaly-patterns", {});
+            const pat = await withColdStartHint(api("/api/ticket-anomaly-patterns", {}), body);
             if (!pat || pat.total_days === 0) {
                 body.innerHTML = `<div class="wc-banner info">Aucune donnée de billetterie anormale pour cet opérateur.</div>`;
                 return;
@@ -1332,9 +1393,9 @@ function renderTicketCard(a, clientSafe) {
         if (histLoaded) { histBox.hidden = !histBox.hidden; return; }
         histBtn.disabled = true;
         histBox.hidden = false;
-        histBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement de l'historique…</p>`;
+        histBox.innerHTML = `<div class="wc-charts-grid">${skeletonChartCard(200)}${skeletonChartCard(200)}</div>`;
         try {
-            const detail = await api("/api/ticket-anomaly-explain", { line: a.line, bus: a.bus, client_safe: clientSafe });
+            const detail = await withColdStartHint(api("/api/ticket-anomaly-explain", { line: a.line, bus: a.bus, client_safe: clientSafe }), histBox);
             const rows = ((detail || {}).days || []).slice().sort((x, y) => String(x.day).localeCompare(String(y.day)));
             if (!rows.length) {
                 histBox.innerHTML = `<div class="wc-banner info">${icon("info")}Pas d'historique disponible pour ce bus.</div>`;
@@ -1371,12 +1432,12 @@ function renderTicketCard(a, clientSafe) {
         if (stLoaded) { stBox.hidden = !stBox.hidden; return; }
         stBtn.disabled = true;
         stBox.hidden = false;
-        stBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement du détail par arrêt…</p>`;
+        stBox.innerHTML = `<div class="wc-skel-card" aria-hidden="true"><span class="wc-skel wc-skel-line w70"></span>${skeletonTable(8)}</div>`;
         try {
-            const [stRes, refRes] = await Promise.all([
+            const [stRes, refRes] = await withColdStartHint(Promise.all([
                 api("/api/ticket-anomaly-stations", { line: a.line, bus: a.bus, day: a.day }),
                 api("/api/ticket-anomaly-reference", { line: a.line }).catch(() => null),
-            ]);
+            ]), stBox);
             const stations = (stRes || {}).stations || [];
             if (!stations.length) {
                 stBox.innerHTML = `<div class="wc-banner info">${icon("info")}Aucune donnée par arrêt pour ce trajet (modèle par arrêt pas encore entraîné, ou trop peu de données).</div>`;
@@ -1436,7 +1497,7 @@ async function renderDriversView(root) {
         const box = root.querySelector("#wc-dr-leaderboard");
         box.innerHTML = skeletonTable(6);
         try {
-            const d = await api("/api/drivers-ranked", { min_trips: minTrips, limit: 50 });
+            const d = await withColdStartHint(api("/api/drivers-ranked", { min_trips: minTrips, limit: 50 }), box);
             const drivers = (d || {}).drivers || [];
             if (!drivers.length) { box.innerHTML = `<div class="wc-banner info">Aucun chauffeur avec assez de trajets.</div>`; return; }
             let rows = drivers.map((r) => `<tr>

@@ -307,6 +307,31 @@
 .wc-banner.error { background: var(--wc-red-soft); color: #ff8f9c; }
 .wc-banner.success { background: var(--wc-green-soft); color: var(--wc-green); }
 
+/* ── Bandeau "serveur en veille" (Render, hébergement gratuit) ─────────────────────────
+   L'API se met en pause après une période sans trafic ; le réveil prend généralement
+   30 à 50s. Durée inconnue à l'avance -> barre INDÉTERMINÉE (même animation de balayage
+   que .wc-loading-bar-fill, voir wc-bar-slide) plutôt qu'une fausse barre de progression
+   qui prétendrait connaître le temps restant. Voir withColdStartHint() dans app.js. */
+.wc-coldstart { display: flex; align-items: flex-start; gap: 10px; }
+.wc-coldstart .wc-spin { flex-shrink: 0; margin-top: 3px; }
+.wc-coldstart-bar {
+    width: 100%;
+    max-width: 260px;
+    height: 4px;
+    background: var(--wc-border);
+    border-radius: 999px;
+    overflow: hidden;
+    margin: 8px 0 6px;
+}
+.wc-coldstart-bar span {
+    display: block;
+    height: 100%;
+    width: 34%;
+    background: linear-gradient(90deg, var(--wc-blue), var(--wc-orange));
+    border-radius: 999px;
+    animation: wc-bar-slide 1.3s ease-in-out infinite;
+}
+
 /* ── Tables ──────────────────────────────────────────────────────────────────── */
 .wc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .wc-table th, .wc-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--wc-border-soft); }
