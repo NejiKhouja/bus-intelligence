@@ -25,3 +25,20 @@ function winicari_set_company(string $company): void {
 function winicari_clear_company(): void {
     unset($_SESSION['winicari_company']);
 }
+
+// ── Langue de l'interface (fr/ar) ────────────────────────────────────────────────────
+// Session, pas cookie/query-string permanent : même pattern que winicari_company --
+// l'intégration finale pourrait aussi la fixer directement depuis le compte de
+// l'opérateur (langue préférée du client) sans toucher ce fichier.
+const WINICARI_SUPPORTED_LANGS = ['fr', 'ar'];
+
+function winicari_current_lang(): string {
+    $l = $_SESSION['winicari_lang'] ?? 'fr';
+    return in_array($l, WINICARI_SUPPORTED_LANGS, true) ? $l : 'fr';
+}
+
+function winicari_set_lang(string $lang): void {
+    if (in_array($lang, WINICARI_SUPPORTED_LANGS, true)) {
+        $_SESSION['winicari_lang'] = $lang;
+    }
+}

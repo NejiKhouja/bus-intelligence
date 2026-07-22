@@ -9,64 +9,100 @@
 (() => {
 "use strict";
 
-// ── Labels (mirrors src/dashboard/app.py's TOP_FEATURE_FR / i18n) ──────────────────────
+// ── Labels (traduits via assets/i18n.js -- clés topfeat_*/sev_*) ───────────────────────
 const TOP_FEATURE_LABELS = {
-    max_dwell_s: "Immobilisation anormale",
-    total_elapsed: "Trajet anormalement long",
-    mean_dwell_s: "Durée d'arrêt moyenne élevée",
-    dist_m_max: "Déviation de l'itinéraire",
-    match_rate: "Mauvais suivi GPS / hors itinéraire",
-    n_stops: "Arrêts desservis anormalement faible",
-    max_dark_s: "Perte de signal GPS",
-    terminus_idle_min: "Stationnement terminus (service non clôturé)",
-    elapsed_vs_bus_z: "Durée inhabituelle pour ce bus",
-    elapsed_vs_line_z: "Durée inhabituelle pour cette ligne",
-    unofficial_detour: "Détour non-officiel",
-    null: "Autre / non catégorisé",
+    max_dwell_s: t("topfeat_max_dwell_s"),
+    total_elapsed: t("topfeat_total_elapsed"),
+    mean_dwell_s: t("topfeat_mean_dwell_s"),
+    dist_m_max: t("topfeat_dist_m_max"),
+    match_rate: t("topfeat_match_rate"),
+    n_stops: t("topfeat_n_stops"),
+    max_dark_s: t("topfeat_max_dark_s"),
+    terminus_idle_min: t("topfeat_terminus_idle_min"),
+    elapsed_vs_bus_z: t("topfeat_elapsed_vs_bus_z"),
+    elapsed_vs_line_z: t("topfeat_elapsed_vs_line_z"),
+    unofficial_detour: t("topfeat_unofficial_detour"),
+    null: t("topfeat_other"),
 };
 const SEV_META = {
-    high: { label: "Élevée", cls: "high" },
-    medium: { label: "Moyenne", cls: "medium" },
-    low: { label: "Faible", cls: "low" },
+    high: { label: t("sev_high"), cls: "high" },
+    medium: { label: t("sev_medium"), cls: "medium" },
+    low: { label: t("sev_low"), cls: "low" },
 };
 
 // ── Explications au survol des raisons (mirrors src/dashboard/i18n.py's REASON_HELP /
-// exp_* keys, FR) -- portées ici pour donner la même explicabilité que le dashboard
+// exp_* keys) -- portées ici pour donner la même explicabilité que le dashboard
 // Streamlit (retour utilisateur 2026-07-19 : "expliquer tout avec le survol comme dans
 // app.py"). Affichées via l'attribut title (tooltip natif), même convention que
 // .wc-metric-label[title] déjà utilisée pour "Taux d'anomalie".
 const REASON_HELP = {
-    max_dwell_s: "Le plus long arrêt immobile détecté sur ce trajet dépasse nettement la normale. Mesuré pings-GPS-présents (bus vraiment immobile), pas un trou de signal.",
-    total_elapsed: "Durée totale du trajet (arrivée − départ), après retrait du stationnement en bordure de trajet (voir Formule) -- donc déjà nettoyée du service-non-clôturé aux deux bouts, mais PAS des arrêts survenus en cours de route.",
-    mean_dwell_s: "Durée moyenne d'immobilisation par arrêt sur ce trajet, plus élevée que la normale de la ligne -- suggère un ralentissement généralisé (trafic, retards en cascade) plutôt qu'un incident ponctuel à un seul arrêt.",
-    dist_m_max: "Écart maximal observé entre la position GPS du bus et la position théorique d'un arrêt qu'il a quand même été compté comme ayant desservi -- déviation d'itinéraire ou dérive GPS.",
-    match_rate: "Part des arrêts de la ligne effectivement détectés par le GPS sur ce trajet. Un taux bas peut venir d'un trajet partiel, d'un mauvais suivi GPS, ou d'arrêts aux coordonnées douteuses.",
-    n_stops: "Nombre d'arrêts couverts par ce trajet, nettement inférieur à la normale de la ligne/direction -- indique un trajet partiel plutôt qu'un problème de vitesse.",
-    max_dark_s: "Le plus long trou de signal GPS détecté (aucun ping reçu) sur ce trajet. Le bus a pu continuer à rouler normalement pendant ce silence -- ce temps N'EST PAS compté comme immobilisation, seulement comme incertitude.",
-    terminus_idle_min: "Temps où le traceur GPS a continué à pinger alors que le bus était garé au terminus -- avant le vrai départ ou après la vraie arrivée. Ce temps est DÉJÀ RETIRÉ de la durée du trajet affichée ; ce chiffre le montre séparément.",
-    elapsed_vs_bus_z: "Écart-type (z-score) de la durée de CE trajet par rapport à l'historique de CE BUS précis sur cette ligne. La durée comparée exclut déjà le stationnement en bordure de trajet -- ce n'est pas un artefact de stationnement non retiré.",
-    elapsed_vs_line_z: "Écart-type (z-score) de la durée de CE trajet par rapport à la médiane de TOUS les bus sur cette ligne/direction. La durée comparée exclut déjà le stationnement en bordure de trajet -- ce n'est pas un artefact de stationnement non retiré.",
-    unofficial_detour: "Le trajet réel suivi par GPS s'écarte de l'itinéraire officiel de la ligne sur une portion significative, avant de revenir dans le circuit normal.",
+    max_dwell_s: t("exp_max_dwell_s"),
+    total_elapsed: t("exp_total_elapsed"),
+    mean_dwell_s: t("exp_mean_dwell_s"),
+    dist_m_max: t("exp_dist_m_max"),
+    match_rate: t("exp_match_rate"),
+    n_stops: t("exp_n_stops"),
+    max_dark_s: t("exp_max_dark_s"),
+    terminus_idle_min: t("exp_terminus_idle_min"),
+    elapsed_vs_bus_z: t("exp_elapsed_vs_bus_z"),
+    elapsed_vs_line_z: t("exp_elapsed_vs_line_z"),
+    unofficial_detour: t("exp_unofficial_detour"),
+    // Note informationnelle de perte de signal (voir models/anomaly.py::explain_trips) --
+    // même explication que la raison "max_dark_s" normale, seul le phrasing affiché change.
+    max_dark_s_info: t("exp_max_dark_s"),
 };
-const REASON_HELP_DEFAULT = "Signal utilisé par le modèle de détection pour juger ce trajet anormal.";
-const FORMULA_HELP = "Durée trajet = dernier ping − premier ping, APRÈS avoir retiré le stationnement immobile en bordure du trajet (bus garé avant le vrai départ / après la vraie arrivée). Un arrêt ou une immobilisation EN COURS de trajet, elle, reste comptée dans cette durée -- ce n'est pas la même chose.";
+const REASON_HELP_DEFAULT = t("exp_default");
+const FORMULA_HELP = t("formula_help");
 // Aide au survol de la 3e métrique « Activité GPS vérifiable » -- texte de
 // verifiable_activity_caption dans src/dashboard/i18n.py (paramètres remplis à l'affichage).
 function verifiableActivityHelp(est, dur, dwell, dark, match) {
-    return `Activité GPS vérifiable ≈ ${est}  (${dur} − ${dwell.toFixed(0)} min immobile − ${dark.toFixed(0)} min sans signal), avec ${(match * 100).toFixed(0)}% des arrêts suivis. Estimation basse : le temps de conduite pendant les trous de signal et le stationnement hors des arrêts reconnus ne sont pas décomptables.`;
+    return t("verifiable_activity_help", {
+        est, dur, dwell: dwell.toFixed(0), dark: dark.toFixed(0), match: (match * 100).toFixed(0),
+    });
+}
+
+// ── Raisons du modèle (mirrors src/models/anomaly.py's _REASON_BUILDERS) ──────────────
+// L'API renvoie `reason_features` (clé) + `reason_values` (valeur brute, MÊMES unités
+// que les lambdas Python -- secondes pour *_s, minutes déjà pour terminus_idle_min,
+// z-score brut pour elapsed_vs_*_z) plutôt qu'un texte français déjà composé, pour que
+// CE widget puisse reconstruire la phrase dans la langue active au lieu d'afficher le
+// français en dur (retour utilisateur 2026-07-22).
+function formatReasonValue(feat, v) {
+    switch (feat) {
+        case "max_dwell_s": case "mean_dwell_s":
+            return (v / 60).toFixed(feat === "mean_dwell_s" ? 1 : 0);
+        case "total_elapsed": {
+            const iv = Math.trunc(v);
+            return `${Math.trunc(iv / 60)}h${String(iv % 60).padStart(2, "0")}`;
+        }
+        case "dist_m_max": return v.toFixed(0);
+        case "match_rate": return (v * 100).toFixed(0);
+        case "n_stops": return String(Math.trunc(v));
+        case "max_dark_s": case "max_dark_s_info": return (v / 60).toFixed(0);
+        case "elapsed_vs_bus_z": case "elapsed_vs_line_z": return `${v >= 0 ? "+" : ""}${v.toFixed(1)}`;
+        case "terminus_idle_min": return v.toFixed(0);
+        default: return String(v);
+    }
+}
+function reasonText(feat, v) {
+    const val = formatReasonValue(feat, v);
+    if (feat === "elapsed_vs_bus_z" || feat === "elapsed_vs_line_z") {
+        return t(`reason_${feat}`, { val, dir: t(v > 0 ? "reason_longer" : "reason_shorter") });
+    }
+    return t(`reason_${feat}`, { val });
 }
 
 // ── Explications au survol des puces (mirrors src/dashboard/i18n.py's chip_*_help keys) ──
 const CHIP_HELP = {
-    origin_idle: "Ce temps est RETIRÉ de la « Durée trajet » affichée en haut de la carte -- le bus pingait déjà au terminus DE DÉPART mais n'avait pas encore démarré son service. Signal opérationnel à part entière (chauffeur n'ayant probablement pas coupé le traceur), pas une erreur de mesure.",
-    end_idle: "Ce temps est RETIRÉ de la « Durée trajet » affichée en haut de la carte -- le bus pingait encore au terminus D'ARRIVÉE mais n'avait pas vraiment terminé son service. Signal opérationnel à part entière (chauffeur n'ayant probablement pas coupé le traceur), pas une erreur de mesure.",
-    real_stop: "Immobilisation détectée EN COURS de trajet (pings GPS présents, bus vraiment immobile) -- reste comptée dans la « Durée trajet » ci-dessus, contrairement au stationnement terminus qui lui en est retiré.",
-    signal_loss: "Aucun ping GPS reçu pendant cette durée à cet arrêt -- le bus a pu continuer à rouler normalement pendant ce silence, ce N'EST PAS une immobilisation confirmée.",
-    dark_gap: "Trou de signal survenu ENTRE deux arrêts (pas pendant l'attente à un arrêt déjà repéré) -- invisible au scan arrêt-par-arrêt classique, mais bien réel : le traceur n'a envoyé AUCUN ping pendant cette durée. Explique généralement à lui seul le mauvais taux de suivi et la durée gonflée du reste du trajet -- le bus a très probablement continué de rouler normalement pendant ce silence.",
-    farthest: "Le bus a bien été détecté à cet arrêt, mais sa position GPS était nettement plus loin que la position officielle de l'arrêt -- déviation d'itinéraire ou dérive GPS.",
-    off_route: "Ces arrêts sont dans l'étendue du trajet mais le bus n'y a jamais été détecté à portée GPS -- trajet partiel, itinéraire différent, ou desserte réellement sautée.",
-    suspect_coord: "Ces arrêts ne sont JAMAIS détectés sur AUCUN trajet de cette ligne -- leurs coordonnées géographiques sont probablement fausses dans la base de référence, pas un problème de CE trajet précis. Exclus du diagnostic pour cette raison.",
-    detour: "Détecté sur les positions GPS brutes : le bus a quitté son point de départ, s'est éloigné significativement, puis est revenu quasiment au même endroit avant sa longue immobilisation — probablement une course annexe (dépôt, ravitaillement...) plutôt qu'un simple bruit GPS.",
+    origin_idle: t("chip_help_origin_idle"),
+    end_idle: t("chip_help_end_idle"),
+    real_stop: t("chip_help_real_stop"),
+    signal_loss: t("chip_help_signal_loss"),
+    dark_gap: t("chip_help_dark_gap"),
+    farthest: t("chip_help_farthest"),
+    off_route: t("chip_help_off_route"),
+    suspect_coord: t("chip_help_suspect_coord"),
+    detour: t("chip_help_detour"),
 };
 
 // ── Small utilities ─────────────────────────────────────────────────────────────────────
@@ -76,11 +112,22 @@ function esc(s) {
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[c]));
 }
+// Repli client si l'API ne renvoie pas encore `yesterday_date` (backend pas encore
+// redéployé avec ce champ, ou réponse mise en cache par proxy.php AVANT le déploiement)
+// -- sans ça, fmtDay(undefined) affichait juste "—" à la place de la date (retour
+// utilisateur 2026-07-22). Même fuseau que le serveur visé (Tunisie), calcul local au
+// navigateur donc potentiellement décalé de quelques heures autour de minuit, mais
+// nettement mieux qu'un tiret vide.
+function ymdYesterday() {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+}
 function fmtDay(d) {
     if (!d) return "—";
     const s = String(d);
     const y = s.slice(0, 4), m = s.slice(4, 6), day = s.slice(6, 8);
-    const MOIS = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+    const MOIS = WC_MONTHS[WC_LANG] || WC_MONTHS.fr;
     const mi = parseInt(m, 10) - 1;
     return (mi >= 0 && mi < 12) ? `${parseInt(day, 10)} ${MOIS[mi]} ${y}` : s;
 }
@@ -88,7 +135,7 @@ function fmtTime(iso) {
     if (!iso) return "—";
     const d = new Date(iso);
     if (isNaN(d)) return "—";
-    return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleTimeString(WC_LOCALE, { hour: "2-digit", minute: "2-digit" });
 }
 function fmtDuration(min) {
     min = Math.round(min || 0);
@@ -130,8 +177,7 @@ const LIVE_DOT = '<span class="wc-live-dot" aria-hidden="true"></span> ';
 
 // ── API + inline loading block ──────────────────────────────────────────────────────────
 const LOADING_MESSAGES = [
-    "Analyse des trajets…", "Détection des anomalies…", "Vérification des détours…",
-    "Recoupement des horaires…", "Presque prêt…",
+    t("loading_1"), t("loading_2"), t("loading_3"), t("loading_4"), t("loading_5"),
 ];
 let _loadingTimer = null;
 
@@ -266,10 +312,10 @@ function withColdStartHint(promise, container) {
             <div class="wc-banner info wc-coldstart">
                 <span class="wc-spin"></span>
                 <div>
-                    <strong>Le serveur se réveille…</strong>
-                    <div class="wc-muted">Mis en veille après une période d'inactivité, il redémarre généralement en 30 à 50 secondes. Ça ne se reproduira pas au prochain chargement.</div>
+                    <strong>${t("coldstart_title")}</strong>
+                    <div class="wc-muted">${t("coldstart_body")}</div>
                     <div class="wc-coldstart-bar"><span></span></div>
-                    <div class="wc-muted">${s}s écoulées…</div>
+                    <div class="wc-muted">${t("coldstart_elapsed", { s })}</div>
                 </div>
             </div>`;
         };
@@ -356,7 +402,7 @@ function ticketVolumeChart(canvas, rows) {
         data: { labels: rows.map((r) => fmtDay(r.day)), datasets: [{ data: rows.map((r) => r.nbr_ticket), backgroundColor: colors, borderRadius: 3 }] },
         options: {
             responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: false }, title: { display: true, text: "Tickets/jour", color: "#c8d4e6", font: { size: 12 } } },
+            plugins: { legend: { display: false }, title: { display: true, text: t("chart_tickets_per_day"), color: "#c8d4e6", font: { size: 12 } } },
             scales: {
                 y: { ticks: { color: "#8ea0bd" }, grid: { color: "#1a2c47" }, beginAtZero: true },
                 x: { ticks: { color: "#8ea0bd", maxRotation: 60, minRotation: 60, font: { size: 10 } }, grid: { display: false } },
@@ -370,12 +416,12 @@ function ticketVolumeChart(canvas, rows) {
 function ticketFareChart(canvas, rows, lineMedian) {
     const colors = rows.map((r) => (r.anomaly ? "#ef4444" : "#22c55e"));
     const datasets = [{
-        label: "Prix moyen", data: rows.map((r) => r.avg_fare), showLine: false,
+        label: t("legend_avg_price"), data: rows.map((r) => r.avg_fare), showLine: false,
         pointBackgroundColor: colors, pointBorderColor: colors, pointRadius: 4,
     }];
     if (lineMedian !== null && lineMedian !== undefined) {
         datasets.push({
-            label: "Médiane ligne", data: rows.map(() => lineMedian),
+            label: t("legend_line_median"), data: rows.map(() => lineMedian),
             borderColor: "#8ea0bd", borderDash: [5, 5], pointRadius: 0, fill: false,
         });
     }
@@ -386,7 +432,7 @@ function ticketFareChart(canvas, rows, lineMedian) {
             responsive: true, maintainAspectRatio: false,
             plugins: {
                 legend: { display: true, labels: { color: "#c8d4e6", font: { size: 10 } } },
-                title: { display: true, text: "Prix moyen (DT) vs médiane ligne", color: "#c8d4e6", font: { size: 12 } },
+                title: { display: true, text: t("chart_avg_price_vs_median"), color: "#c8d4e6", font: { size: 12 } },
             },
             scales: {
                 y: { ticks: { color: "#8ea0bd" }, grid: { color: "#1a2c47" }, beginAtZero: true },
@@ -429,16 +475,19 @@ function stopColor(s) {
 function renderTripMap(container, seqList, direction, detour) {
     const rows = (seqList || []).filter((s) => s.lat && s.lon);
     if (!rows.length) {
-        container.innerHTML = `<div class="wc-banner info">${icon("info")}Coordonnées GPS non disponibles pour les arrêts de cette ligne.</div>`;
+        container.innerHTML = `<div class="wc-banner info">${icon("info")}${t("map_no_coords")}</div>`;
         return;
     }
     const dot = (c) => `<span class="wc-legend-dot" style="background:${c}"></span>`;
-    let html = `<p class="wc-muted wc-map-legend">Chaque cercle représente un arrêt, numéroté dans l'ordre de passage (départ → terminus). La taille reflète la durée d'immobilisation + perte de signal.<br>
-        ${dot("#22c55e")}Normal ${dot("#2563eb")}Immobilisation longue (≥10 min) ${dot("#f59e0b")}Perte de signal (≥5 min) ${dot("#ef4444")}Arrêt non desservi ${dot("#9ca3af")}Coordonnées douteuses</p>`;
+    let html = `<p class="wc-muted wc-map-legend">${t("map_legend_caption")}<br>
+        ${dot("#22c55e")}${t("map_dot_normal")} ${dot("#2563eb")}${t("map_dot_long_stop")} ${dot("#f59e0b")}${t("map_dot_signal_loss")} ${dot("#ef4444")}${t("map_dot_unserved")} ${dot("#9ca3af")}${t("map_dot_suspect")}</p>`;
 
     if (detour && detour.track) {
-        const t = (v) => v ? fmtTime(v) : "—";
-        html += `<div class="wc-banner warn">${icon("detour")}Détour non-officiel détecté : le bus a quitté son point de départ à <strong>${t(detour.left_at)}</strong>, s'est éloigné de ~${detour.distance_km} km (point le plus éloigné à ${t(detour.farthest_at)}), puis est revenu à <strong>${t(detour.returned_at)}</strong> — ~${(detour.duration_min || 0).toFixed(0)} min au total. Tracé orange = aller, violet = retour.</div>`;
+        const tt = (v) => v ? fmtTime(v) : "—";
+        html += `<div class="wc-banner warn">${icon("detour")}${t("map_detour_banner", {
+            left: `<strong>${tt(detour.left_at)}</strong>`, km: detour.distance_km, far: tt(detour.farthest_at),
+            back: `<strong>${tt(detour.returned_at)}</strong>`, min: (detour.duration_min || 0).toFixed(0),
+        })}</div>`;
     }
     html += `<div class="wc-map"></div>`;
 
@@ -448,7 +497,10 @@ function renderTripMap(container, seqList, direction, detour) {
     const tracked = sorted.filter((s) => s.arrival);
     if (tracked.length) {
         const first = tracked[0], last = tracked[tracked.length - 1];
-        html += `<p class="wc-muted">${icon("pin")}Premier passage suivi : <strong>${fmtTime(first.arrival)}</strong> (${esc(first.stop)}) → dernier passage suivi : <strong>${fmtTime(last.arrival)}</strong> (${esc(last.stop)})</p>`;
+        html += `<p class="wc-muted">${icon("pin")}${t("map_first_last_tracked", {
+            t0: `<strong>${fmtTime(first.arrival)}</strong>`, stop0: esc(first.stop),
+            t1: `<strong>${fmtTime(last.arrival)}</strong>`, stop1: esc(last.stop),
+        })}</p>`;
     }
     container.innerHTML = html;
 
@@ -484,11 +536,11 @@ function renderTripMap(container, seqList, direction, detour) {
             iconAnchor: [size / 2, size / 2],
         });
         const popup = `<b>${i + 1} : ${esc(s.stop)}</b><br>
-            Passage : ${s.arrival ? fmtTime(s.arrival) : "—"}<br>
-            Immobilisation : ${(s.dwell_min || 0).toFixed(1)} min<br>
-            Perte de signal : ${(s.dark_min || 0).toFixed(1)} min<br>
-            Écart de position : ${(s.dist_m || 0).toFixed(0)} m<br>
-            Suivi : ${s.matched ? "oui" : "non"}${s.coord_suspect ? "<br><i>Coordonnées d'arrêt douteuses</i>" : ""}`;
+            ${t("map_popup_pass", { v: s.arrival ? fmtTime(s.arrival) : "—" })}<br>
+            ${t("map_popup_dwell", { v: (s.dwell_min || 0).toFixed(1) })}<br>
+            ${t("map_popup_dark", { v: (s.dark_min || 0).toFixed(1) })}<br>
+            ${t("map_popup_dist", { v: (s.dist_m || 0).toFixed(0) })}<br>
+            ${t("map_popup_tracked", { v: s.matched ? t("map_popup_yes") : t("map_popup_no") })}${s.coord_suspect ? `<br><i>${t("map_popup_suspect")}</i>` : ""}`;
         L.marker([s.lat, s.lon], { icon: iconEl }).addTo(map).bindPopup(popup);
     });
 
@@ -501,8 +553,8 @@ function renderTripMap(container, seqList, direction, detour) {
         });
         L.marker([s.lat, s.lon], { icon: ic, interactive: false }).addTo(map);
     };
-    mkEnd(sorted[0], "#16a34a", `Départ${direction ? " (" + direction + ")" : ""}`);
-    mkEnd(sorted[sorted.length - 1], "#dc2626", "Terminus");
+    mkEnd(sorted[0], "#16a34a", `${t("map_departure")}${direction ? " (" + direction + ")" : ""}`);
+    mkEnd(sorted[sorted.length - 1], "#dc2626", t("map_terminus"));
 
     map.fitBounds(L.latLngBounds(latlngs).pad(0.15));
 }
@@ -536,32 +588,40 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     let html = `<div class="wc-alert-card">
         <div class="wc-alert-head">
             <span class="wc-badge ${sev.cls}">${sev.label}</span>
-            <span class="wc-alert-title">Bus ${esc(a.bus)} · Ligne ${esc(a.line)} · ${esc(a.dir)}</span>
+            <span class="wc-alert-title">${t("alert_bus_line_dir", { bus: esc(a.bus), line: esc(a.line), dir: esc(a.dir) })}</span>
             <span class="wc-alert-date">${fmtDay(a.day)}</span>
         </div>
         <div class="wc-metrics">
-            <div class="wc-metric"><div class="wc-metric-label" data-tip="${esc(FORMULA_HELP)}">Durée du trajet ⓘ</div><div class="wc-metric-value">${fmtDuration(dur)}</div></div>
-            <div class="wc-metric"><div class="wc-metric-label">Départ → Arrivée</div><div class="wc-metric-value" style="font-size:16px">${dep} → ${arr}</div></div>
-            ${showEst ? `<div class="wc-metric"><div class="wc-metric-label" data-tip="${esc(verifiableActivityHelp(fmtDuration(est), fmtDuration(dur), dwellM, darkM, matchR))}">Activité GPS vérifiable ⓘ</div><div class="wc-metric-value">≈ ${fmtDuration(est)}</div></div>` : ""}
+            <div class="wc-metric"><div class="wc-metric-label" data-tip="${esc(FORMULA_HELP)}">${t("metric_trip_duration")}</div><div class="wc-metric-value">${fmtDuration(dur)}</div></div>
+            <div class="wc-metric"><div class="wc-metric-label">${t("metric_departure_arrival")}</div><div class="wc-metric-value" style="font-size:16px">${dep} → ${arr}</div></div>
+            ${showEst ? `<div class="wc-metric"><div class="wc-metric-label" data-tip="${esc(verifiableActivityHelp(fmtDuration(est), fmtDuration(dur), dwellM, darkM, matchR))}">${t("metric_verifiable_activity")}</div><div class="wc-metric-value">≈ ${fmtDuration(est)}</div></div>` : ""}
         </div>`;
 
     if (a.top_feature !== undefined) {
-        html += `<p class="wc-muted">Cause principale : <strong>${esc(TOP_FEATURE_LABELS[a.top_feature] || "Non catégorisé")}</strong></p>`;
+        html += `<p class="wc-muted">${t("main_cause", { label: `<strong>${esc(TOP_FEATURE_LABELS[a.top_feature] || t("uncategorized"))}</strong>` })}</p>`;
     }
     // Boîtes qualité DÉTAILLÉES -- texte complet des q_* de src/dashboard/i18n.py (retour
     // utilisateur 2026-07-20 : les one-liners précédents ("Durée improbable — à vérifier")
     // n'expliquaient pas la CAUSE probable, alors que Streamlit dit explicitement
     // "chauffeur n'ayant pas clôturé son service", "trou de signal GPS", etc.).
-    if (a.is_data_bug) html += `<div class="wc-banner error">${icon("alert")}<strong>Bug de données</strong> : durée &gt; 24h physiquement impossible — horodatages corrompus dans la source GPS (pas un vrai trajet). Sera éliminé définitivement au prochain rebuild.</div>`;
-    else if (a.is_fragment) html += `<div class="wc-banner warn">${icon("fragment")}<strong>Fragment de suivi</strong> : durée très inférieure à la normale de la ligne avec presque aucun arrêt suivi — trajet partiel ou couverture GPS lacunaire, pas comparable à un trajet complet.</div>`;
-    else if (a.is_dark_inflated) html += `<div class="wc-banner info">${icon("signal")}<strong>Pourquoi cette durée ?</strong> L'essentiel de cette « durée » est un trou de signal GPS : le boîtier s'est tu en cours de route puis a réémis bien plus tard. Le bus a très probablement terminé son service normalement pendant ce silence — la durée affichée reflète le comportement du boîtier, pas le temps de conduite réel. Ce n'est pas une erreur du système de détection : il signale correctement un suivi GPS défaillant, à traiter comme tel.</div>`;
-    else if (a.is_implausible) html += `<div class="wc-banner info">${icon("clock")}<strong>Pourquoi cette durée ?</strong> Le boîtier GPS a continué d'émettre après la fin du service (chauffeur n'ayant probablement pas clôturé son service / bus garé au terminus ou au dépôt) — ce temps de stationnement s'est fondu dans le trajet. Le vrai temps de conduite est nettement plus court. Ce n'est pas un défaut du système : c'est une pratique d'exploitation (service non clôturé), corrigée automatiquement au prochain rebuild des données.</div>`;
-    else if (a.is_partial_coverage) html += `<div class="wc-banner info">${icon("pin")}<strong>Pourquoi cette durée ?</strong> Ce trajet n'a couvert que <strong>${a.n_stops ?? "?"} arrêt(s)</strong> contre <strong>${a.line_median_n_stops ?? "?"} habituellement</strong> sur cette ligne/direction — le bus a réellement parcouru une distance plus courte, donc une durée plus courte est normale pour CE trajet précis. Ce n'est pas une anomalie de vitesse : le comparer à la médiane des trajets complets serait injuste, comme comparer un aller simple à un aller-retour.</div>`;
+    if (a.is_data_bug) html += `<div class="wc-banner error">${icon("alert")}${t("q_data_bug")}</div>`;
+    else if (a.is_fragment) html += `<div class="wc-banner warn">${icon("fragment")}${t("q_fragment")}</div>`;
+    else if (a.is_dark_inflated) html += `<div class="wc-banner info">${icon("signal")}${t("q_dark_inflated")}</div>`;
+    else if (a.is_implausible) html += `<div class="wc-banner info">${icon("clock")}${t("q_implausible")}</div>`;
+    else if (a.is_partial_coverage) html += `<div class="wc-banner info">${icon("pin")}${t("q_partial_coverage", { ns: a.n_stops ?? "?", mns: a.line_median_n_stops ?? "?" })}</div>`;
 
     const reasonFeats = a.reason_features || [];
+    const reasonVals = a.reason_values || [];
     reasons.forEach((r, i) => {
-        const help = REASON_HELP[reasonFeats[i]] || REASON_HELP_DEFAULT;
-        html += `<div class="wc-reason" data-tip="${esc(help)}">${esc(r)}</div>`;
+        const feat = reasonFeats[i];
+        const help = REASON_HELP[feat] || REASON_HELP_DEFAULT;
+        // Texte reconstruit dans LA LANGUE ACTIVE à partir de (feature, valeur brute) --
+        // `r` (texte déjà rendu en français par l'API, voir models/anomaly.py) sert
+        // seulement de repli si `reason_values` manque (vieille réponse en cache) ou si
+        // la feature est inconnue du frontend.
+        const v = reasonVals[i];
+        const text = (feat && v !== undefined && v !== null) ? reasonText(feat, v) : r;
+        html += `<div class="wc-reason" data-tip="${esc(help)}">${esc(text)}</div>`;
     });
 
     // Puces (arrêts/segments concernés) -- chacune avec sa propre explication au survol
@@ -572,15 +632,23 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     // horodaté au lieu d'un chiffre nu (retour utilisateur 2026-07-18).
     let originIdleShown = false, endIdleShown = false;
     if ((a.origin_idle_min || 0) >= 30 && a.origin_idle_stop) {
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.origin_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.origin_idle_stop)}</strong> avant le départ : <strong>${a.origin_idle_min.toFixed(0)} min</strong> — le traceur pingait sur place de ${fmtTime(a.origin_idle_from)} à ${dep} (départ réel). Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.origin_idle)}">${icon("parking")}${t("chip_origin_idle", {
+            stop: `<strong>${esc(a.origin_idle_stop)}</strong>`, min: `<strong>${a.origin_idle_min.toFixed(0)}</strong>`,
+            from: fmtTime(a.origin_idle_from), to: dep,
+        })}</div>`;
         originIdleShown = true;
     }
     if ((a.end_idle_min || 0) >= 30 && a.end_idle_stop) {
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.end_idle)}">${icon("parking")}Stationné au terminus <strong>${esc(a.end_idle_stop)}</strong> après l'arrivée : <strong>${a.end_idle_min.toFixed(0)} min</strong> — immobile de ${arr} (arrivée réelle) à ${fmtTime(a.end_idle_to)}. Temps non compté dans la durée du trajet ci-dessus.</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.end_idle)}">${icon("parking")}${t("chip_end_idle", {
+            stop: `<strong>${esc(a.end_idle_stop)}</strong>`, min: `<strong>${a.end_idle_min.toFixed(0)}</strong>`,
+            from: arr, to: fmtTime(a.end_idle_to),
+        })}</div>`;
         endIdleShown = true;
     }
     if (ps.longest_stop && ps.longest_stop.dwell_min >= 5) {
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.real_stop)}">${icon("parking")}Immobilisation la plus longue : <strong>${esc(ps.longest_stop.stop)}</strong> (${ps.longest_stop.dwell_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.real_stop)}">${icon("parking")}${t("chip_longest_stop", {
+            stop: `<strong>${esc(ps.longest_stop.stop)}</strong>`, min: ps.longest_stop.dwell_min.toFixed(0),
+        })}</div>`;
         // Même arrêt que le stationnement terminus déjà affiché ci-dessus ? Très probablement
         // UNE seule immobilisation continue coupée en deux par un sursaut GPS isolé, pas deux
         // événements distincts -- sinon, hypothèse plus générique (détour possible).
@@ -589,44 +657,59 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
         if (sameOrigin || sameEnd) {
             const sameIdle = sameOrigin ? a.origin_idle_min : a.end_idle_min;
             const total = sameIdle + ps.longest_stop.dwell_min;
-            html += `<div class="wc-chip wc-chip-hint">&nbsp;&nbsp;↳ <em>C'est le MÊME arrêt que le stationnement terminus ci-dessus (<strong>${esc(ps.longest_stop.stop)}</strong>) -- très probablement UNE seule immobilisation continue coupée en deux par un bref sursaut GPS isolé, pas deux événements distincts. Durée réelle probable : ~${total.toFixed(0)} min.</em></div>`;
+            html += `<div class="wc-chip wc-chip-hint">&nbsp;&nbsp;↳ <em>${t("chip_same_terminus_hint", {
+                stop: `<strong>${esc(ps.longest_stop.stop)}</strong>`, total: total.toFixed(0),
+            })}</em></div>`;
         } else if (!originIdleShown && !endIdleShown) {
-            html += `<div class="wc-chip wc-chip-hint">&nbsp;&nbsp;↳ <em>Si ce délai suit le stationnement terminus, ce n'est pas forcément le même arrêt : le bus a pu repartir puis revenir avant de s'immobiliser à nouveau (détour non officiel / course non planifiée). « Voir la carte du trajet » vérifie sur les pings GPS réels et affiche le trajet emprunté si c'est le cas.</em></div>`;
+            html += `<div class="wc-chip wc-chip-hint">&nbsp;&nbsp;↳ <em>${t("chip_detour_hint")}</em></div>`;
         }
     }
     if (ps.signal_loss_stop) {
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.signal_loss)}">${icon("signal")}Perte de signal à <strong>${esc(ps.signal_loss_stop.stop)}</strong> (~${ps.signal_loss_stop.dark_min.toFixed(0)} min)</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.signal_loss)}">${icon("signal")}${t("chip_signal_loss_at", {
+            stop: `<strong>${esc(ps.signal_loss_stop.stop)}</strong>`, min: ps.signal_loss_stop.dark_min.toFixed(0),
+        })}</div>`;
     }
     // Trou de signal EN ROUTE (entre deux arrêts, jamais rattaché à l'attente d'un arrêt
     // matché) -- invisible au scan arrêt-par-arrêt ci-dessus, mais peut expliquer à lui
     // seul un mauvais taux de suivi + une durée gonflée.
     if (a.dark_gap_before_stop && (a.max_dark_min || 0) >= 15) {
         const after = a.dark_gap_after_stop;
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.dark_gap)}">${icon("signal")}Perte de signal en route : <strong>${after
-            ? `entre ${esc(a.dark_gap_before_stop)} et ${esc(after)}`
-            : `après ${esc(a.dark_gap_before_stop)}, plus aucun arrêt suivi jusqu'à la fin du trajet`
-        }</strong> (~${a.max_dark_min.toFixed(0)} min sans aucun ping).</div>`;
+        const gapKey = after ? "chip_dark_gap_between" : "chip_dark_gap_after_only";
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.dark_gap)}">${icon("signal")}${t(gapKey, {
+            before: `<strong>${esc(a.dark_gap_before_stop)}</strong>`, after: `<strong>${esc(after)}</strong>`, min: a.max_dark_min.toFixed(0),
+        })}</div>`;
     }
     if (ps.farthest_stop) {
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.farthest)}">${icon("pin")}Écart de position à <strong>${esc(ps.farthest_stop.stop)}</strong> (~${ps.farthest_stop.dist_m.toFixed(0)} m)</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.farthest)}">${icon("pin")}${t("chip_farthest_at", {
+            stop: `<strong>${esc(ps.farthest_stop.stop)}</strong>`, dist: ps.farthest_stop.dist_m.toFixed(0),
+        })}</div>`;
     }
     if (ps.off_route_stops && ps.off_route_stops.length) {
         const others = (ps.off_route_count || ps.off_route_stops.length) - ps.off_route_stops.length;
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.off_route)}">${icon("ban")}Arrêts non desservis : ${esc(ps.off_route_stops.join(", "))}${others > 0 ? ` (+${others} autres)` : ""}</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.off_route)}">${icon("ban")}${t("chip_off_route", {
+            stops: esc(ps.off_route_stops.join(", ")), suffix: others > 0 ? t("and_others", { n: others }) : "",
+        })}</div>`;
     }
     if (ps.suspect_coord_count) {
-        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.suspect_coord)}">${icon("info")}${ps.suspect_coord_count} arrêt(s) aux coordonnées douteuses (jamais suivis sur cette ligne — exclus du diagnostic).</div>`;
+        html += `<div class="wc-chip" data-tip="${esc(CHIP_HELP.suspect_coord)}">${icon("info")}${t("chip_suspect_coord", { n: ps.suspect_coord_count })}</div>`;
     }
     if (a.has_detour && a.detour) {
-        html += `<div class="wc-chip detour" data-tip="${esc(CHIP_HELP.detour)}">${icon("detour")}Détour non-officiel confirmé — ~${a.detour.distance_km} km pendant ~${a.detour.duration_min.toFixed(0)} min avant de revenir.</div>`;
+        html += `<div class="wc-chip detour" data-tip="${esc(CHIP_HELP.detour)}">${icon("detour")}${t("chip_detour_confirmed", {
+            km: a.detour.distance_km, min: a.detour.duration_min.toFixed(0),
+        })}</div>`;
     }
     if (a.scheduled_departure && a.departure_delay_min !== null && a.departure_delay_min !== undefined && Math.abs(a.departure_delay_min) >= 3) {
         const late = a.departure_delay_min > 0;
-        html += `<div class="wc-chip">${icon("clock")}Départ prévu <strong>${esc(a.scheduled_departure)}</strong>, départ réel <strong>${dep}</strong> — ${Math.abs(a.departure_delay_min).toFixed(0)} min ${late ? "de retard" : "d'avance"}${a.schedule_multi_variant ? " (horaire multiple, à titre indicatif)" : ""}.</div>`;
+        const key = late ? "chip_departure_late" : "chip_departure_early";
+        html += `<div class="wc-chip">${icon("clock")}${t(key, {
+            sched: `<strong>${esc(a.scheduled_departure)}</strong>`, dep: `<strong>${dep}</strong>`,
+            min: Math.abs(a.departure_delay_min).toFixed(0),
+            variant: a.schedule_multi_variant ? t("chip_departure_multi_variant") : "",
+        })}</div>`;
     }
     if (a.driver_code) {
-        html += `<div class="wc-chip driver">${icon("driver")}Chauffeur : <strong>${esc(a.driver_code)}</strong></div>
-        <div class="wc-disclaimer">Information fournie à titre indicatif — une corrélation entre un chauffeur et des trajets signalés n'est pas un verdict automatique. À interpréter selon le contexte (trafic, panne, météo…).</div>`;
+        html += `<div class="wc-chip driver">${icon("driver")}${t("chip_driver", { code: `<strong>${esc(a.driver_code)}</strong>` })}</div>
+        <div class="wc-disclaimer">${t("chip_driver_disclaimer")}</div>`;
     }
 
     html += `</div>`;
@@ -636,13 +719,13 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     // est chargée À LA DEMANDE (/api/trip-detail), pas avec la liste (une carte Leaflet par
     // carte d'alerte chargée d'office serait ruineux en DOM et en appels API).
     if (withMap && a.trip_start) {
-        const btn = el(`<button class="wc-btn-secondary wc-btn-map">${icon("pin")}Voir la carte du trajet</button>`);
+        const btn = el(`<button class="wc-btn-secondary wc-btn-map">${icon("pin")}${t("btn_show_map")}</button>`);
         const mapBox = el(`<div class="wc-map-holder"></div>`);
         let loaded = false;
         btn.addEventListener("click", async () => {
             if (loaded) { mapBox.hidden = !mapBox.hidden; return; }
             btn.disabled = true;
-            mapBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Chargement de la carte…</p>`;
+            mapBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> ${t("map_loading")}</p>`;
             try {
                 await ensureLeaflet();
                 const d = await api("/api/trip-detail", {
@@ -651,7 +734,7 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
                 renderTripMap(mapBox, d.sequence, a.dir, (d.problem_stops || {}).unofficial_detour || a.detour);
                 loaded = true;
             } catch (e) {
-                mapBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Carte indisponible : ${esc(e.message)}</div>`;
+                mapBox.innerHTML = `<div class="wc-banner error">${icon("alert")}${t("map_unavailable", { msg: esc(e.message) })}</div>`;
             } finally {
                 btn.disabled = false;
             }
@@ -678,17 +761,17 @@ function categoryFilterPills(container, anomalies, onChange) {
     function draw() {
         const tagsHtml = present.filter((c) => selected.has(c)).map((c) => `
             <span class="wc-ms-tag" data-cat="${esc(c)}">${esc(TOP_FEATURE_LABELS[c] || c)}
-                <button type="button" aria-label="Retirer">&times;</button>
+                <button type="button" aria-label="${t("remove_tag")}">&times;</button>
             </span>`).join("");
         const remaining = present.filter((c) => !selected.has(c));
         const addHtml = remaining.length
-            ? `<select class="wc-ms-add"><option value="" selected disabled>+ Ajouter…</option>${
+            ? `<select class="wc-ms-add"><option value="" selected disabled>${t("add_category")}</option>${
                 remaining.map((c) => `<option value="${esc(c)}">${esc(TOP_FEATURE_LABELS[c] || c)}</option>`).join("")
               }</select>`
             : "";
         container.innerHTML = `
         <div class="wc-multiselect">
-            <label>Filtrer par type d'anomalie</label>
+            <label>${t("filter_by_category")}</label>
             <div class="wc-ms-box">${tagsHtml}${addHtml}</div>
         </div>`;
         container.querySelectorAll(".wc-ms-tag button").forEach((btn) => {
@@ -713,11 +796,11 @@ function categoryFilterPills(container, anomalies, onChange) {
 
 // ── Tri des anomalies (mêmes options que le dashboard Streamlit) ────────────────────────
 const SORT_OPTIONS = {
-    date_desc: "Plus récent d'abord",
-    date_asc: "Plus ancien d'abord",
-    severity_desc: "Gravité décroissante",
-    severity_asc: "Gravité croissante",
-    duration_desc: "Durée décroissante",
+    date_desc: t("sort_date_desc"),
+    date_asc: t("sort_date_asc"),
+    severity_desc: t("sort_severity_desc"),
+    severity_asc: t("sort_severity_asc"),
+    duration_desc: t("sort_duration_desc"),
 };
 const SEV_RANK = { high: 3, medium: 2, low: 1 };
 function sortAnomalies(list, key) {
@@ -746,22 +829,22 @@ function sortAnomalies(list, key) {
 // vue d'ensemble par défaut.
 async function renderTripsView(root) {
     root.innerHTML = `
-    <div id="wc-t-freshness"><div class="wc-banner info"><span class="wc-spin"></span> Vérification des données en direct…</div></div>
+    <div id="wc-t-freshness"><div class="wc-banner info"><span class="wc-spin"></span> ${t("checking_live_data")}</div></div>
     <button id="wc-t-explain-toggle" class="wc-btn-secondary wc-explain-toggle">
-        ${icon("search")}<span>Filtrer / analyser un bus précis</span>
+        ${icon("search")}<span>${t("explain_toggle_open")}</span>
     </button>
     <div id="wc-t-explain-panel" class="wc-explain-panel" hidden></div>
     <div class="wc-card">
         <div class="wc-list-head">
-            <h4 id="wc-t-list-title">Trajets signalés</h4>
-            <div class="wc-sort-row"><label>Trier par</label><select id="wc-t-sort">${
+            <h4 id="wc-t-list-title">${t("flagged_trips_title")}</h4>
+            <div class="wc-sort-row"><label>${t("sort_by")}</label><select id="wc-t-sort">${
                 Object.entries(SORT_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")
             }</select></div>
         </div>
-        <button id="wc-t-back" class="wc-link-muted" hidden>&larr; Revenir à la vue d'ensemble</button>
+        <button id="wc-t-back" class="wc-link-muted" hidden>&larr; ${t("back_to_overview")}</button>
         <div id="wc-t-pills"></div>
         <div id="wc-t-cards">${skeletonCards(4)}</div>
-        <button id="wc-t-more" class="wc-btn-secondary" style="margin-top:10px" hidden>Afficher plus</button>
+        <button id="wc-t-more" class="wc-btn-secondary" style="margin-top:10px" hidden>${t("show_more", { shown: 0, total: 0 })}</button>
     </div>
     `;
 
@@ -784,13 +867,13 @@ async function renderTripsView(root) {
         cardsBox.innerHTML = "";
         const sorted = sortAnomalies(currentList, sortSel.value);
         if (!sorted.length) {
-            cardsBox.innerHTML = `<div class="wc-banner success">${icon("check")}Aucune anomalie trouvée pour ce périmètre.</div>`;
+            cardsBox.innerHTML = `<div class="wc-banner success">${icon("check")}${t("no_anomaly_for_scope")}</div>`;
             moreBtn.hidden = true;
             return;
         }
         for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
         moreBtn.hidden = shown >= sorted.length;
-        moreBtn.textContent = `Afficher plus (${Math.min(shown, sorted.length)}/${sorted.length})`;
+        moreBtn.textContent = t("show_more", { shown: Math.min(shown, sorted.length), total: sorted.length });
     }
     moreBtn.addEventListener("click", () => { shown += PAGE; drawList(); });
     sortSel.addEventListener("change", () => { shown = PAGE; drawList(); });
@@ -808,7 +891,7 @@ async function renderTripsView(root) {
         drawList();
     }
     backBtn.addEventListener("click", () => {
-        setScope(baseList, { title: "Trajets signalés" });
+        setScope(baseList, { title: t("flagged_trips_title") });
         root.scrollIntoView({ behavior: "smooth", block: "start" });
     });
 
@@ -817,7 +900,7 @@ async function renderTripsView(root) {
         const opening = explainPanel.hidden;
         explainPanel.hidden = !opening;
         toggleBtn.classList.toggle("active", opening);
-        toggleBtn.querySelector("span").textContent = opening ? "Masquer les filtres" : "Filtrer / analyser un bus précis";
+        toggleBtn.querySelector("span").textContent = opening ? t("explain_toggle_close") : t("explain_toggle_open");
         if (opening && !explainLoaded) {
             explainLoaded = true;
             renderExplainPanel(explainPanel, {
@@ -844,24 +927,43 @@ async function renderTripsView(root) {
     try {
         const hist = await withColdStartHint(api("/api/anomaly-history", { limit: 300 }), freshBox);
         baseList = (hist || {}).anomalies || [];
-        setScope(baseList, { title: "Trajets signalés" });
+        setScope(baseList, { title: t("flagged_trips_title") });
     } catch (e) {
-        freshBox.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+        freshBox.innerHTML = `<div class="wc-banner error">${t("error_generic", { msg: esc(e.message) })}</div>`;
         cardsBox.innerHTML = "";
         return;
     }
 
-    freshBox.innerHTML = `<div class="wc-banner info"><span class="wc-spin"></span> Récupération des résultats de la veille… (l'historique ci-dessous est déjà consultable)</div>`;
+    freshBox.innerHTML = `<div class="wc-banner info"><span class="wc-spin"></span> ${t("fetching_yesterday")}</div>`;
     withColdStartHint(api("/api/current-anomalies", {}), freshBox).then((today) => {
         // Toujours dire COMBIEN de trajets ont été analysés, et le dire explicitement quand
         // AUCUN n'est anormal (retour utilisateur 2026-07-20) -- sans ça, "pas d'anomalie
         // hier" et "les données d'hier ne sont pas encore arrivées" se ressemblaient trop.
-        const dayLabel = today.live ? `Données en direct — ${fmtDay(today.date)}` : `Dernier jour historique disponible — ${fmtDay(today.date)}`;
         const nTrips = today.total_trips ?? 0;
-        const tripsLabel = `${nTrips} trajet${nTrips === 1 ? "" : "s"} analysé${nTrips === 1 ? "" : "s"}`;
+        const tripsLabel = tPlural("trips_analyzed", nTrips);
         const nAnom = today.anomaly_count ?? 0;
-        const anomLabel = nAnom === 0 ? "aucune anomalie détectée" : `${nAnom} anomalie${nAnom === 1 ? "" : "s"} détectée${nAnom === 1 ? "" : "s"}`;
-        freshBox.innerHTML = `<div class="wc-banner ${today.live ? "success" : "info"}">${today.live ? LIVE_DOT : icon("chart")}${dayLabel} · ${tripsLabel} · ${anomLabel}</div>`;
+        const anomLabel = nAnom === 0 ? t("no_anomaly_detected") : tPlural("anomaly_detected", nAnom);
+        let mainLine, secondLine = "";
+        if (today.live) {
+            // Jour d'hier confirmé par le web service GPS -- éventuellement 0 trajet
+            // (férié, grève, rien en circulation ce jour-là), mais c'est une réponse
+            // réelle, pas une absence de donnée (voir _score_all_gps_live côté API).
+            mainLine = `<div class="wc-banner success">${LIVE_DOT}${t("live_data_badge", { date: fmtDay(today.date) })} · ${tripsLabel} · ${anomLabel}</div>`;
+            // Repère supplémentaire : la dernière journée avec de VRAIES données
+            // historiques, pour que l'admin ne se retrouve jamais sans aucune autre
+            // date exploitable sous les yeux (retour utilisateur 2026-07-22).
+            if (today.historical_date) {
+                secondLine = `<div class="wc-muted" style="margin-top:4px">${t("historical_data_badge", { date: fmtDay(today.historical_date) })}</div>`;
+            }
+        } else {
+            // Aucun signal live du tout pour hier (web service pas configuré / pas prêt /
+            // injoignable) -- on le DIT explicitement au lieu de montrer l'historique en
+            // silence comme si c'était la réponse à "hier" (retour utilisateur 2026-07-22).
+            // `today.date`/`total_trips`/`anomaly_count` restent le repli historique réel.
+            mainLine = `<div class="wc-banner info">${icon("chart")}${t("live_data_badge", { date: fmtDay(today.yesterday_date || ymdYesterday()) })} · ${t("live_data_unavailable")}</div>`;
+            secondLine = `<div class="wc-muted" style="margin-top:4px">${t("historical_data_badge", { date: fmtDay(today.date) })} · ${tripsLabel} · ${anomLabel}</div>`;
+        }
+        freshBox.innerHTML = mainLine + secondLine;
         // Fusion : si l'historique servi (cache proxy possiblement antérieur au push du
         // jour) ne contenait pas encore les anomalies de la veille, on les insère en tête
         // -- clef (jour, bus, trip_start), le même trajet ne peut pas y être deux fois.
@@ -873,11 +975,11 @@ async function renderTripsView(root) {
                 baseList = [...missing, ...baseList];
                 // Ne re-rend la liste partagée que si l'utilisateur est encore sur la vue
                 // d'ensemble -- pas s'il a déjà recadré via "Filtrer / analyser un bus".
-                if (backBtn.hidden) setScope(baseList, { title: "Trajets signalés" });
+                if (backBtn.hidden) setScope(baseList, { title: t("flagged_trips_title") });
             }
         }
     }).catch(() => {
-        freshBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Résultats de la veille indisponibles pour l'instant — l'historique ci-dessous reste consultable, réessayez dans quelques minutes.</div>`;
+        freshBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}${t("yesterday_unavailable")}</div>`;
     });
 }
 
@@ -891,28 +993,28 @@ async function renderExplainPanel(root, { onResults }) {
     <div class="wc-card">
         <div class="wc-filters">
             <div class="wc-field">
-                <label>Ligne</label>
-                <select id="wc-e-line"><option value="" disabled selected>— Choisir une ligne —</option></select>
+                <label>${t("field_line")}</label>
+                <select id="wc-e-line"><option value="" disabled selected>${t("choose_line_placeholder")}</option></select>
             </div>
             <div class="wc-field">
-                <label>Bus</label>
-                <select id="wc-e-bus"><option value="">Tous les bus</option></select>
+                <label>${t("field_bus")}</label>
+                <select id="wc-e-bus"><option value="">${t("all_buses")}</option></select>
             </div>
             <div class="wc-field">
-                <label>Jour</label>
-                <select id="wc-e-day"><option value="">Tous les jours</option></select>
+                <label>${t("field_day")}</label>
+                <select id="wc-e-day"><option value="">${t("all_days")}</option></select>
             </div>
             <div class="wc-field">
-                <label data-tip="Prioritaire sur le menu « Jour » si renseignée — utile pour un jour tout juste arrivé via les webservices en direct et pas encore dans la liste précalculée.">Ou date précise</label>
+                <label data-tip="${t("field_manual_date_help")}">${t("field_manual_date")}</label>
                 <input type="date" id="wc-e-manual-date">
             </div>
             <div class="wc-field">
-                <label>Direction</label>
-                <select id="wc-e-dir"><option value="">Les deux</option><option value="ALLER">ALLER</option><option value="RETOUR">RETOUR</option></select>
+                <label>${t("field_direction")}</label>
+                <select id="wc-e-dir"><option value="">${t("dir_both")}</option><option value="ALLER">ALLER</option><option value="RETOUR">RETOUR</option></select>
             </div>
         </div>
-        <div class="wc-field-analyze"><button id="wc-e-analyze">Analyser</button></div>
-        <p class="wc-muted" id="wc-e-hint">Chargement des lignes…</p>
+        <div class="wc-field-analyze"><button id="wc-e-analyze">${t("analyze_btn")}</button></div>
+        <p class="wc-muted" id="wc-e-hint">${t("loading_lines")}</p>
     </div>
     <div id="wc-e-verdict"></div>
     <div id="wc-e-reference"></div>
@@ -937,12 +1039,12 @@ async function renderExplainPanel(root, { onResults }) {
         // l'historique de toutes les lignes d'une société à la fois causait un HTTP 502
         // (requête trop lourde pour une réponse synchrone) -- une ligne est maintenant
         // toujours obligatoire, ce qui garde chaque analyse dans un périmètre rapide.
-        hint.textContent = "Choisissez une ligne puis cliquez Analyser.";
-    }).catch(() => { hint.textContent = "Impossible de charger la liste des lignes."; });
+        hint.textContent = t("choose_line_and_analyze");
+    }).catch(() => { hint.textContent = t("lines_load_failed"); });
 
     lineSel.addEventListener("change", async () => {
-        busSel.innerHTML = `<option value="">Tous les bus</option>`;
-        daySel.innerHTML = `<option value="">Tous les jours</option>`;
+        busSel.innerHTML = `<option value="">${t("all_buses")}</option>`;
+        daySel.innerHTML = `<option value="">${t("all_days")}</option>`;
         verdictBox.innerHTML = "";
         refBox.innerHTML = "";
         if (!lineSel.value) return;
@@ -962,29 +1064,29 @@ async function renderExplainPanel(root, { onResults }) {
     // calibrée pour ~5% d'anomalies par construction, donc <=7% = bon état, <=15% = à
     // surveiller, au-delà = risque élevé. Delta affiché vs cette base de 5%.
     async function loadLineVerdict(line) {
-        verdictBox.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> Évaluation de la ligne…</p></div>`;
+        verdictBox.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> ${t("evaluating_line")}</p></div>`;
         let pat;
         try { pat = await api("/api/anomaly-patterns", { line }); }
         catch { verdictBox.innerHTML = ""; return; }
         if (!pat || pat.total_trips < 5) {
             verdictBox.innerHTML = pat && pat.total_trips
-                ? `<div class="wc-banner info">${icon("info")}Ligne ${esc(line)} : seulement ${pat.total_trips} trajet(s) enregistré(s) — pas assez de données pour juger l'état général de la ligne.</div>`
+                ? `<div class="wc-banner info">${icon("info")}${t("line_not_enough_data", { line: esc(line), n: pat.total_trips })}</div>`
                 : "";
             return;
         }
         const rate = pat.overall_rate;
-        let cls = "success", label = "Ligne en bon état", ic = "check";
-        if (rate > 0.15) { cls = "error"; label = "Ligne à risque élevé"; ic = "alert"; }
-        else if (rate > 0.07) { cls = "warn"; label = "Ligne à surveiller"; ic = "alert"; }
+        let cls = "success", label = t("line_good"), ic = "check";
+        if (rate > 0.15) { cls = "error"; label = t("line_risk"); ic = "alert"; }
+        else if (rate > 0.07) { cls = "warn"; label = t("line_watch"); ic = "alert"; }
         const delta = (rate - 0.05) * 100;
         verdictBox.innerHTML = `
         <div class="wc-card">
-            <div class="wc-banner ${cls}" style="margin-bottom:10px">${icon(ic)}<strong>${label}</strong> — Ligne ${esc(line)} · basé sur ${pat.total_trips.toLocaleString("fr-FR")} trajets analysés.</div>
+            <div class="wc-banner ${cls}" style="margin-bottom:10px">${icon(ic)}<strong>${label}</strong> — ${t("line_verdict_caption", { line: esc(line), n: pat.total_trips.toLocaleString(WC_LOCALE) })}</div>
             <div class="wc-metrics">
-                <div class="wc-metric"><div class="wc-metric-label" data-tip="Part des trajets signalés comme anormaux. Le modèle est calibré pour ~5% d'anomalies « naturelles » — le delta est mesuré par rapport à cette base.">Taux d'anomalie ⓘ</div>
+                <div class="wc-metric"><div class="wc-metric-label" data-tip="${t("anomaly_rate_tip")}">${t("metric_anomaly_rate")}</div>
                     <div class="wc-metric-value">${(rate * 100).toFixed(1)} %</div>
-                    <div class="wc-metric-sub">${delta >= 0 ? "+" : ""}${delta.toFixed(1)} pts vs base 5%</div></div>
-                <div class="wc-metric"><div class="wc-metric-label">Trajets signalés</div>
+                    <div class="wc-metric-sub">${t("delta_vs_base", { sign: delta >= 0 ? "+" : "", delta: delta.toFixed(1) })}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">${t("metric_flagged_trips")}</div>
                     <div class="wc-metric-value">${pat.total_anomalies} / ${pat.total_trips}</div></div>
             </div>
         </div>`;
@@ -993,24 +1095,24 @@ async function renderExplainPanel(root, { onResults }) {
     // Trajet de référence -- « voici à quoi ressemble un trajet NORMAL sur cette ligne » :
     // ancre de confiance, comme l'expander Streamlit, avec carte par direction.
     async function loadReferenceTrip(line) {
-        refBox.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> Recherche d'un trajet de référence…</p></div>`;
+        refBox.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> ${t("finding_reference_trip")}</p></div>`;
         let ref;
         try { ref = await api("/api/reference-trip", { line }); }
         catch { refBox.innerHTML = ""; return; }
         const dirs = (ref || {}).directions || {};
         const dirNames = Object.keys(dirs);
         if (!dirNames.length) {
-            refBox.innerHTML = `<div class="wc-banner info">${icon("info")}Pas de trajet de référence disponible pour cette ligne.</div>`;
+            refBox.innerHTML = `<div class="wc-banner info">${icon("info")}${t("no_reference_trip")}</div>`;
             return;
         }
-        let inner = `<details class="wc-ref"><summary>${icon("check")}Trajet de référence — à quoi ressemble un trajet NORMAL sur la ligne ${esc(line)} ?</summary>`;
+        let inner = `<details class="wc-ref"><summary>${icon("check")}${t("ref_trip_summary", { line: esc(line) })}</summary>`;
         if (dirNames.length === 2) {
             const at = dirs["ALLER"] && dirs["ALLER"].trip, rt = dirs["RETOUR"] && dirs["RETOUR"].trip;
             if (at && rt && at.bus === rt.bus && at.day === rt.day) {
-                inner += `<p class="wc-muted">Cycle complet : bus <strong>${esc(at.bus)}</strong>, le <strong>${fmtDay(at.day)}</strong> — l'ALLER et le RETOUR ci-dessous sont le même bus le même jour, donc la pause au terminus reflète une vraie pause entre l'arrivée et le redépart.</p>`;
+                inner += `<p class="wc-muted">${t("ref_same_cycle", { bus: `<strong>${esc(at.bus)}</strong>`, day: `<strong>${fmtDay(at.day)}</strong>` })}</p>`;
             }
         } else {
-            inner += `<p class="wc-muted">Direction : <strong>${esc(dirNames[0])}</strong> (aucun trajet normal exploitable trouvé pour l'autre direction sur cette ligne).</p>`;
+            inner += `<p class="wc-muted">${t("ref_missing_other_dir", { dir: `<strong>${esc(dirNames[0])}</strong>` })}</p>`;
         }
         // Onglets ALLER/RETOUR côte à côte (redesign 2026-07-19, retour utilisateur : "je
         // veux y accéder à travers les tabs comme dans Streamlit" -- st.tabs(dirs.keys())).
@@ -1029,24 +1131,27 @@ async function renderExplainPanel(root, { onResults }) {
             // traceur s'arrête systématiquement en route au retour). Sans cette note,
             // l'écart de nombre d'arrêts/durée entre les deux directions est illisible.
             const partialNote = (rt.is_full === false && rt.geometry_stops)
-                ? `<div class="wc-banner info">${icon("info")}Couverture GPS partielle : le traceur ne couvre que <strong>${rt.covered_stops} des ${rt.geometry_stops} arrêts</strong> de la ligne sur ce trajet — aucun trajet entièrement suivi n'était disponible dans cette direction (fréquent quand le traceur est coupé en cours de route). Durée et arrêts affichés ne portent que sur la partie couverte.</div>`
+                ? `<div class="wc-banner info">${icon("info")}${t("ref_partial_coverage", { covered: `<strong>${rt.covered_stops}</strong>`, total: rt.geometry_stops })}</div>`
                 : "";
             inner += `
             <div class="wc-ref-dir" data-dir="${esc(d)}"${d === dirNames[0] ? "" : " hidden"}>
                 ${dirNames.length > 1 ? "" : `<h4>${esc(d)}</h4>`}
-                <p class="wc-muted">Trajet réel, jugé normal par le modèle, choisi parmi les mieux suivis (${(rt.match_rate * 100).toFixed(0)}% des arrêts) avec une durée proche de la médiane de la ligne pour cette direction — comparez les anomalies ci-dessous à cette référence.</p>
+                <p class="wc-muted">${t("ref_trip_caption", { match: (rt.match_rate * 100).toFixed(0) })}</p>
                 ${partialNote}
                 <div class="wc-metrics">
-                    <div class="wc-metric"><div class="wc-metric-label">Bus</div><div class="wc-metric-value">${esc(rt.bus)}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">Jour</div><div class="wc-metric-value" style="font-size:15px">${fmtDay(rt.day)}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">Durée</div><div class="wc-metric-value">${fmtDuration(rt.duration_min)}</div>
-                        <div class="wc-metric-sub">médiane ligne : ${fmtDuration(rt.line_median_min)}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">Arrêts suivis</div><div class="wc-metric-value">${rt.n_stops}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">Immobilisation moy.</div><div class="wc-metric-value">${(rt.mean_dwell_min || 0).toFixed(1)} min</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">Départ → Arrivée</div><div class="wc-metric-value" style="font-size:15px">${fmtTime(rt.trip_start)} → ${fmtTime(rt.trip_end)}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_bus")}</div><div class="wc-metric-value">${esc(rt.bus)}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_day")}</div><div class="wc-metric-value" style="font-size:15px">${fmtDay(rt.day)}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_duration")}</div><div class="wc-metric-value">${fmtDuration(rt.duration_min)}</div>
+                        <div class="wc-metric-sub">${t("ref_line_median", { med: fmtDuration(rt.line_median_min) })}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_stops_tracked")}</div><div class="wc-metric-value">${rt.n_stops}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_avg_dwell")}</div><div class="wc-metric-value">${(rt.mean_dwell_min || 0).toFixed(1)} min</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("metric_departure_arrival")}</div><div class="wc-metric-value" style="font-size:15px">${fmtTime(rt.trip_start)} → ${fmtTime(rt.trip_end)}</div></div>
                 </div>
                 ${rt.typical_terminus_idle_min !== null && rt.typical_terminus_idle_min !== undefined ? `
-                <div class="wc-chip">${icon("parking")}Stationnement terminus typique pour cette direction : <strong>~${rt.typical_terminus_idle_min.toFixed(0)} min</strong> avant le vrai départ / après la vraie arrivée (médiane sur les trajets normaux).${rt.service_not_closed_threshold_min ? ` Au-delà d'environ <strong>${rt.service_not_closed_threshold_min.toFixed(0)} min</strong> (~2x la normale), un stationnement observé est probablement un <strong>service non clôturé</strong> (chauffeur n'ayant pas coupé le traceur) plutôt qu'une pause normale.` : ""}</div>` : ""}
+                <div class="wc-chip">${icon("parking")}${t("ref_typical_idle", {
+                    typ: rt.typical_terminus_idle_min.toFixed(0),
+                    extra: rt.service_not_closed_threshold_min ? t("ref_typical_idle_extra", { thr: rt.service_not_closed_threshold_min.toFixed(0) }) : "",
+                })}</div>` : ""}
                 <div class="wc-ref-map" data-dir="${esc(d)}"></div>
             </div>`;
         }
@@ -1096,7 +1201,7 @@ async function renderExplainPanel(root, { onResults }) {
         // scannait tout l'historique de la société en une seule requête synchrone,
         // confirmé 2026-07-19 : HTTP 502 (timeout upstream Render).
         if (!line) {
-            resBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Choisissez une ligne pour analyser.</div>`;
+            resBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}${t("choose_line_to_analyze")}</div>`;
             return;
         }
 
@@ -1113,7 +1218,7 @@ async function renderExplainPanel(root, { onResults }) {
             const res = await api("/api/anomaly-explain", { line, bus, day, dir });
             renderExplainResults(res, { line, bus });
         } catch (e) {
-            resBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur d'analyse : ${esc(e.message)}</div>`;
+            resBox.innerHTML = `<div class="wc-banner error">${icon("alert")}${t("analysis_error", { msg: esc(e.message) })}</div>`;
         } finally {
             stopLoading();
         }
@@ -1124,12 +1229,12 @@ async function renderExplainPanel(root, { onResults }) {
     // (métriques + avertissement) -- et pousse les trajets vers la liste PARTAGÉE de
     // renderTripsView via onResults, au lieu d'en dessiner une seconde copie séparée.
     function renderExplainResults(res, scope) {
-        const label = scope.bus ? `Bus ${scope.bus} · Ligne ${scope.line}` : (scope.line ? `Ligne ${scope.line}` : "Toutes les lignes");
+        const label = scope.bus ? t("scope_bus_line", { bus: scope.bus, line: scope.line }) : (scope.line ? t("scope_line", { line: scope.line }) : t("scope_all_lines"));
         if (!res || res.anomaly_count === 0) {
             const n = res ? (res.total_trips ?? 0) : 0;
-            const tripsLabel = `${n} trajet${n === 1 ? "" : "s"} analysé${n === 1 ? "" : "s"}`;
-            resBox.innerHTML = `<div class="wc-banner success">${icon("check")}${label} : ${tripsLabel} · aucune anomalie détectée — tout est dans la normale.</div>`;
-            onResults([], { title: `Trajets signalés — ${label}` });
+            const tripsLabel = tPlural("trips_analyzed", n);
+            resBox.innerHTML = `<div class="wc-banner success">${icon("check")}${t("no_anomaly_scope", { label, trips: tripsLabel })}</div>`;
+            onResults([], { title: t("flagged_trips_for_scope", { label }) });
             return;
         }
 
@@ -1142,9 +1247,7 @@ async function renderExplainPanel(root, { onResults }) {
         const a0 = res.anomalies[0];
         let warning = "";
         if (a0 && a0.model_low_data) {
-            const txt = (!a0.model_if_dedicated)
-                ? "Le système a encore peu d'historique pour cet opérateur : ces trajets sont comparés à l'ensemble du réseau, pas à cette ligne précisément. Résultats à prendre avec un peu de recul — la précision s'affinera d'elle-même à mesure que l'historique grandit."
-                : "L'historique de cet opérateur est encore partiel : une partie de l'analyse le compare à l'ensemble du réseau plutôt qu'à cette ligne précisément. Résultats à prendre avec un peu de recul — la précision s'affinera d'elle-même à mesure que l'historique grandit.";
+            const txt = t(a0.model_if_dedicated ? "model_low_data_partial" : "model_low_data_line");
             warning = `<div class="wc-banner warn">${icon("alert")}${txt}</div>`;
         }
 
@@ -1153,13 +1256,13 @@ async function renderExplainPanel(root, { onResults }) {
         <div class="wc-card">
             ${warning}${cacheNote(res)}
             <div class="wc-metrics">
-                <div class="wc-metric"><div class="wc-metric-label" data-tip="Nombre total de trajets dans la période sélectionnée pour ce périmètre.">Trajets analysés ⓘ</div><div class="wc-metric-value">${res.total_trips}</div></div>
-                <div class="wc-metric"><div class="wc-metric-label" data-tip="Trajets signalés comme anormaux par le système de détection automatique.">Trajets anormaux ⓘ</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
-                ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label" data-tip="Durée médiane d'un trajet non anormal sur cette ligne — sert de référence pour juger si un trajet est trop long ou trop court.">Durée normale (médiane) ⓘ</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
+                <div class="wc-metric"><div class="wc-metric-label" data-tip="${t("metric_trips_analyzed_tip")}">${t("metric_trips_analyzed")}</div><div class="wc-metric-value">${res.total_trips}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label" data-tip="${t("metric_abnormal_trips_tip")}">${t("metric_abnormal_trips")}</div><div class="wc-metric-value">${res.anomaly_count} (${pct.toFixed(1)}%)</div></div>
+                ${res.avg_duration_min ? `<div class="wc-metric"><div class="wc-metric-label" data-tip="${t("metric_normal_duration_tip")}">${t("metric_normal_duration")}</div><div class="wc-metric-value">${fmtDuration(res.avg_duration_min)}</div></div>` : ""}
             </div>
-            <p class="wc-muted">Les trajets signalés pour ce périmètre sont affichés dans la liste ci-dessous.</p>
+            <p class="wc-muted">${t("scope_trips_shown_below")}</p>
         </div>`;
-        onResults(res.anomalies, { title: `Trajets signalés — ${label}` });
+        onResults(res.anomalies, { title: t("flagged_trips_for_scope", { label }) });
     }
 }
 
@@ -1173,25 +1276,25 @@ async function renderTrendsView(root) {
     try {
         pat = await withColdStartHint(api("/api/anomaly-patterns", {}), root);
     } catch (e) {
-        root.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+        root.innerHTML = `<div class="wc-banner error">${t("error_generic", { msg: esc(e.message) })}</div>`;
         return;
     }
     if (!pat || pat.total_trips === 0) {
-        root.innerHTML = `<div class="wc-banner info">Aucune donnée de tendance disponible pour cet opérateur.</div>`;
+        root.innerHTML = `<div class="wc-banner info">${t("no_trend_data")}</div>`;
         return;
     }
     root.innerHTML = `
     <div class="wc-card">
         <div class="wc-metrics">
-            <div class="wc-metric"><div class="wc-metric-label">Trajets au total</div><div class="wc-metric-value">${pat.total_trips.toLocaleString("fr-FR")}</div></div>
-            <div class="wc-metric"><div class="wc-metric-label">Anomalies signalées</div><div class="wc-metric-value">${pat.total_anomalies}</div></div>
-            <div class="wc-metric"><div class="wc-metric-label">Taux d'anomalie global</div><div class="wc-metric-value">${(pat.overall_rate * 100).toFixed(1)}%</div></div>
+            <div class="wc-metric"><div class="wc-metric-label">${t("metric_total_trips")}</div><div class="wc-metric-value">${pat.total_trips.toLocaleString(WC_LOCALE)}</div></div>
+            <div class="wc-metric"><div class="wc-metric-label">${t("metric_flagged_anomalies")}</div><div class="wc-metric-value">${pat.total_anomalies}</div></div>
+            <div class="wc-metric"><div class="wc-metric-label">${t("metric_overall_rate")}</div><div class="wc-metric-value">${(pat.overall_rate * 100).toFixed(1)}%</div></div>
         </div>
     </div>
-    ${!chartsOk ? `<div class="wc-banner warn">Graphiques indisponibles (bibliothèque de graphiques injoignable).</div>` : `
+    ${!chartsOk ? `<div class="wc-banner warn">${t("charts_unavailable")}</div>` : `
     <div class="wc-charts-grid">
-        <div class="wc-card"><h4>Taux d'anomalie par ligne</h4><div class="wc-chart-wrap"><canvas id="wc-chart-byline"></canvas></div></div>
-        <div class="wc-card"><h4>Taux d'anomalie par heure de départ</h4><div class="wc-chart-wrap"><canvas id="wc-chart-byhour"></canvas></div></div>
+        <div class="wc-card"><h4>${t("chart_rate_by_line")}</h4><div class="wc-chart-wrap"><canvas id="wc-chart-byline"></canvas></div></div>
+        <div class="wc-card"><h4>${t("chart_rate_by_hour")}</h4><div class="wc-chart-wrap"><canvas id="wc-chart-byhour"></canvas></div></div>
     </div>`}`;
     if (!chartsOk) return;
 
@@ -1217,22 +1320,22 @@ async function renderTicketsView(root) {
     <div class="wc-card">
         <div class="wc-filters">
             <div class="wc-field">
-                <label>Vue</label>
-                <select id="wc-tk-view" data-tip="Vue client : masque les jours explicables par un problème de NOTRE côté (panne probable de la machine à tickets, jour sans service) — seules les vraies anomalies de recette restent. Vue admin : montre tout, ces jours étant marqués plutôt que cachés.">
-                    <option value="client" selected>Client (fiable uniquement)</option>
-                    <option value="admin">Admin (tout)</option>
+                <label>${t("field_view")}</label>
+                <select id="wc-tk-view" data-tip="${t("view_tip")}">
+                    <option value="client" selected>${t("view_client")}</option>
+                    <option value="admin">${t("view_admin")}</option>
                 </select>
             </div>
             <div class="wc-field">
-                <label>Ligne (optionnel)</label>
-                <select id="wc-tk-line"><option value="">Toutes</option></select>
+                <label>${t("field_line_optional")}</label>
+                <select id="wc-tk-line"><option value="">${t("all_fem")}</option></select>
             </div>
             <div class="wc-field">
-                <label>Type d'anomalie</label>
-                <select id="wc-tk-recette" data-tip="Une recette AU-DESSUS de la normale est une anomalie statistique mais une bonne nouvelle (plus d'argent rentré que d'habitude) — pas un signal à traiter comme une recette anormalement basse.">
-                    <option value="" selected>Toutes</option>
-                    <option value="bad">À surveiller (recette basse)</option>
-                    <option value="good">Bonnes (recette haute)</option>
+                <label>${t("field_anomaly_type")}</label>
+                <select id="wc-tk-recette" data-tip="${t("anomaly_type_tip")}">
+                    <option value="" selected>${t("all_fem")}</option>
+                    <option value="bad">${t("anomaly_type_bad")}</option>
+                    <option value="good">${t("anomaly_type_good")}</option>
                 </select>
             </div>
         </div>
@@ -1250,7 +1353,7 @@ async function renderTicketsView(root) {
             const clientSafe = viewSel.value === "client";
             const pat = await withColdStartHint(api("/api/ticket-anomaly-patterns", {}), body);
             if (!pat || pat.total_days === 0) {
-                body.innerHTML = `<div class="wc-banner info">Aucune donnée de billetterie anormale pour cet opérateur.</div>`;
+                body.innerHTML = `<div class="wc-banner info">${t("no_ticket_anomaly_data")}</div>`;
                 return;
             }
             if (!lineSel.dataset.loaded) {
@@ -1262,12 +1365,12 @@ async function renderTicketsView(root) {
             body.innerHTML = `
             <div class="wc-card">
                 <div class="wc-metrics">
-                    <div class="wc-metric"><div class="wc-metric-label">Jours-bus au total</div><div class="wc-metric-value">${pat.total_days.toLocaleString("fr-FR")}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">Anomalies signalées</div><div class="wc-metric-value">${pat.total_anomalies}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">Taux global</div><div class="wc-metric-value">${(pat.overall_rate * 100).toFixed(1)}%</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("metric_bus_days")}</div><div class="wc-metric-value">${pat.total_days.toLocaleString(WC_LOCALE)}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("metric_flagged_anomalies")}</div><div class="wc-metric-value">${pat.total_anomalies}</div></div>
+                    <div class="wc-metric"><div class="wc-metric-label">${t("metric_overall_rate_simple")}</div><div class="wc-metric-value">${(pat.overall_rate * 100).toFixed(1)}%</div></div>
                 </div>
                 ${chartsOk ? `<div class="wc-chart-wrap" style="max-width:100%"><canvas id="wc-tk-chart"></canvas></div>`
-                           : `<div class="wc-banner warn">Graphique indisponible (bibliothèque de graphiques injoignable).</div>`}
+                           : `<div class="wc-banner warn">${t("chart_unavailable_simple")}</div>`}
             </div>
             <div id="wc-tk-cards"></div>`;
 
@@ -1288,12 +1391,12 @@ async function renderTicketsView(root) {
             if (recetteSel.value === "bad") anomalies = anomalies.filter((a) => a.is_good_anomaly === false);
             else if (recetteSel.value === "good") anomalies = anomalies.filter((a) => a.is_good_anomaly === true);
             if (!anomalies.length) {
-                cardsBox.innerHTML = `<div class="wc-banner info">Aucun jour anormal trouvé pour ce filtre.</div>`;
+                cardsBox.innerHTML = `<div class="wc-banner info">${t("no_anomaly_for_filter")}</div>`;
                 return;
             }
             for (const a of anomalies) cardsBox.appendChild(renderTicketCard(a, clientSafe));
         } catch (e) {
-            body.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+            body.innerHTML = `<div class="wc-banner error">${t("error_generic", { msg: esc(e.message) })}</div>`;
         }
     }
     viewSel.addEventListener("change", load);
@@ -1305,9 +1408,9 @@ async function renderTicketsView(root) {
 function _tcell(v, fmt) { return (v === null || v === undefined) ? "—" : fmt(v); }
 
 function stationTableHtml(rows, withType) {
-    let html = `<table class="wc-table"><thead><tr><th>Arrêt</th><th>Tickets</th><th>Recette</th><th>Prix moyen</th>${withType ? "<th>Type</th>" : ""}</tr></thead><tbody>`;
+    let html = `<table class="wc-table"><thead><tr><th>${t("col_stop")}</th><th>${t("col_tickets")}</th><th>${t("col_revenue")}</th><th>${t("col_avg_price")}</th>${withType ? `<th>${t("col_type")}</th>` : ""}</tr></thead><tbody>`;
     for (const r of rows) {
-        const type = r.anomaly ? (r.is_good_anomaly ? "Bonne" : "À surveiller") : "—";
+        const type = r.anomaly ? (r.is_good_anomaly ? t("type_good") : t("type_watch")) : "—";
         html += `<tr><td>${esc(r.station)}</td><td>${r.nbr_ticket}</td><td>${r.recette.toFixed(0)} DT</td><td>${r.avg_fare.toFixed(2)} DT</td>${withType ? `<td>${esc(type)}</td>` : ""}</tr>`;
     }
     html += `</tbody></table>`;
@@ -1322,12 +1425,12 @@ function tripBreakdownHtml(label, combinedRows, byDirection) {
     if (!aller.length && !retour.length) {
         return `<p class="wc-muted"><strong>${esc(label)}</strong></p>${stationTableHtml(combinedRows, true)}`;
     }
-    let html = `<p class="wc-muted"><strong>${esc(label)}</strong> — direction connue pour ce trajet (ALLER/RETOUR séparés)</p>
+    let html = `<p class="wc-muted"><strong>${esc(label)}</strong> — ${t("direction_known_note")}</p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">`;
     for (const [dname, rows] of [["ALLER", aller], ["RETOUR", retour]]) {
         const nT = rows.reduce((s, r) => s + r.nbr_ticket, 0);
         const nR = rows.reduce((s, r) => s + r.recette, 0);
-        html += `<div><p class="wc-muted">${dname} — ${rows.length ? `${nT} tickets / ${nR.toFixed(0)} DT` : "pas de vente enregistrée"}</p>${rows.length ? stationTableHtml(rows, false) : ""}</div>`;
+        html += `<div><p class="wc-muted">${dname} — ${rows.length ? t("tickets_revenue_summary", { n: nT, dt: nR.toFixed(0) }) : t("no_sale_recorded")}</p>${rows.length ? stationTableHtml(rows, false) : ""}</div>`;
     }
     html += `</div>`;
     return html;
@@ -1341,17 +1444,17 @@ function renderTicketCard(a, clientSafe) {
             <span class="wc-alert-title">Bus ${esc(a.bus)} · Ligne ${esc(a.line)}</span>
             <span class="wc-alert-date">${fmtDay(a.day)}</span>
         </div>`;
-    if (a.is_machine_issue) html += `<div class="wc-banner warn">${icon("alert")}Probable panne de la machine à tickets (${a.gps_trip_count || 0} trajets GPS confirmés ce jour).</div>`;
-    else if (a.is_no_service) html += `<div class="wc-banner info">${icon("info")}Aucun trajet GPS ce jour — jour sans service, pas une anomalie de recette.</div>`;
+    if (a.is_machine_issue) html += `<div class="wc-banner warn">${icon("alert")}${t("machine_issue", { n: a.gps_trip_count || 0 })}</div>`;
+    else if (a.is_no_service) html += `<div class="wc-banner info">${icon("info")}${t("no_service_day")}</div>`;
     else if (a.anomaly && a.is_good_anomaly !== null && a.is_good_anomaly !== undefined) {
         html += a.is_good_anomaly
-            ? `<div class="wc-banner success">${icon("up")}Recette au-dessus de la normale.</div>`
-            : `<div class="wc-banner warn">${icon("down")}Recette en dessous de la normale — à surveiller.</div>`;
+            ? `<div class="wc-banner success">${icon("up")}${t("revenue_above_normal")}</div>`
+            : `<div class="wc-banner warn">${icon("down")}${t("revenue_below_normal")}</div>`;
     }
     html += `<div class="wc-metrics">
-        <div class="wc-metric"><div class="wc-metric-label">Tickets</div><div class="wc-metric-value">${a.nbr_ticket}</div></div>
-        <div class="wc-metric"><div class="wc-metric-label">Recette</div><div class="wc-metric-value">${a.recette.toFixed(0)} DT</div></div>
-        <div class="wc-metric"><div class="wc-metric-label">Prix moyen</div><div class="wc-metric-value">${a.avg_fare.toFixed(1)} DT</div></div>
+        <div class="wc-metric"><div class="wc-metric-label">${t("metric_tickets")}</div><div class="wc-metric-value">${a.nbr_ticket}</div></div>
+        <div class="wc-metric"><div class="wc-metric-label">${t("metric_revenue")}</div><div class="wc-metric-value">${a.recette.toFixed(0)} DT</div></div>
+        <div class="wc-metric"><div class="wc-metric-label">${t("metric_avg_price")}</div><div class="wc-metric-value">${a.avg_fare.toFixed(1)} DT</div></div>
     </div>`;
     for (const r of (a.reasons || [])) html += `<div class="wc-reason">${esc(r)}</div>`;
 
@@ -1360,15 +1463,15 @@ function renderTicketCard(a, clientSafe) {
     // src/dashboard/app.py's `ctx` DataFrame (Ce jour / Médiane ligne / Médiane de ce bus).
     if (a.line_median_avg_fare !== undefined && a.line_median_avg_fare !== null) {
         html += `<table class="wc-table" style="margin-top:8px">
-            <thead><tr><th></th><th>Ce jour</th><th>Médiane ligne</th><th>Médiane de ce bus</th></tr></thead>
+            <thead><tr><th></th><th>${t("ctx_table_this_day")}</th><th>${t("ctx_table_line_median")}</th><th>${t("ctx_table_bus_median")}</th></tr></thead>
             <tbody>
-                <tr><td>Tickets</td><td>${a.nbr_ticket}</td>
+                <tr><td>${t("metric_tickets")}</td><td>${a.nbr_ticket}</td>
                     <td>${_tcell(a.line_median_nbr_ticket, (v) => v.toFixed(0))}</td>
                     <td>${_tcell(a.bus_median_nbr_ticket, (v) => v.toFixed(0))}</td></tr>
-                <tr><td>Recette</td><td>${a.recette.toFixed(0)} DT</td>
+                <tr><td>${t("metric_revenue")}</td><td>${a.recette.toFixed(0)} DT</td>
                     <td>${_tcell(a.line_median_recette, (v) => v.toFixed(0) + " DT")}</td>
                     <td>${_tcell(a.bus_median_recette, (v) => v.toFixed(0) + " DT")}</td></tr>
-                <tr><td>Prix moyen</td><td>${a.avg_fare.toFixed(2)} DT</td>
+                <tr><td>${t("metric_avg_price")}</td><td>${a.avg_fare.toFixed(2)} DT</td>
                     <td>${_tcell(a.line_median_avg_fare, (v) => v.toFixed(2) + " DT")}</td>
                     <td>${_tcell(a.bus_median_avg_fare, (v) => v.toFixed(2) + " DT")}</td></tr>
             </tbody>
@@ -1379,14 +1482,14 @@ function renderTicketCard(a, clientSafe) {
     // CE jour, à réévaluer après un réentraînement par ligne plutôt qu'à traiter au cas par
     // cas (mirrors app.py's `rate >= 0.9` warning).
     if (a.line_anomaly_rate !== undefined && a.line_anomaly_rate !== null && a.line_anomaly_rate >= 0.9) {
-        html += `<div class="wc-banner warn">${icon("alert")}${(a.line_anomaly_rate * 100).toFixed(0)}% des jours de cette ligne sont signalés — écart structurel de la ligne (tarification), pas un incident de ce jour précis.</div>`;
+        html += `<div class="wc-banner warn">${icon("alert")}${t("line_structural_warning", { pct: (a.line_anomaly_rate * 100).toFixed(0) })}</div>`;
     }
 
     html += `</div>`;
     const card = el(html);
 
     // ── "Historique de ce bus sur cette ligne" -- volume + prix moyen dans le temps ───────
-    const histBtn = el(`<button class="wc-btn-secondary" style="margin-top:8px">${icon("chart")}Historique de ce bus sur cette ligne</button>`);
+    const histBtn = el(`<button class="wc-btn-secondary" style="margin-top:8px">${icon("chart")}${t("bus_history_btn")}</button>`);
     const histBox = el(`<div class="wc-map-holder" hidden></div>`);
     let histLoaded = false;
     histBtn.addEventListener("click", async () => {
@@ -1398,7 +1501,7 @@ function renderTicketCard(a, clientSafe) {
             const detail = await withColdStartHint(api("/api/ticket-anomaly-explain", { line: a.line, bus: a.bus, client_safe: clientSafe }), histBox);
             const rows = ((detail || {}).days || []).slice().sort((x, y) => String(x.day).localeCompare(String(y.day)));
             if (!rows.length) {
-                histBox.innerHTML = `<div class="wc-banner info">${icon("info")}Pas d'historique disponible pour ce bus.</div>`;
+                histBox.innerHTML = `<div class="wc-banner info">${icon("info")}${t("no_bus_history")}</div>`;
             } else {
                 histBox.innerHTML = `<div class="wc-charts-grid">
                     <div class="wc-chart-wrap"><canvas class="wc-tk-vol"></canvas></div>
@@ -1409,12 +1512,12 @@ function renderTicketCard(a, clientSafe) {
                     ticketVolumeChart(histBox.querySelector(".wc-tk-vol"), rows);
                     ticketFareChart(histBox.querySelector(".wc-tk-fare"), rows, a.line_median_avg_fare);
                 } catch {
-                    histBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}Graphiques indisponibles (bibliothèque injoignable).</div>`;
+                    histBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}${t("charts_unavailable_short")}</div>`;
                 }
             }
             histLoaded = true;
         } catch (e) {
-            histBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur : ${esc(e.message)}</div>`;
+            histBox.innerHTML = `<div class="wc-banner error">${icon("alert")}${t("error_generic", { msg: esc(e.message) })}</div>`;
         } finally {
             histBtn.disabled = false;
         }
@@ -1425,7 +1528,7 @@ function renderTicketCard(a, clientSafe) {
     // ── "Voir le détail par arrêt" -- répartition par arrêt pour CE trajet + comparaison ──
     // au trajet de référence (bus-jour normal de cette ligne), voir /api/ticket-anomaly-
     // stations et /api/ticket-anomaly-reference.
-    const stBtn = el(`<button class="wc-btn-secondary" style="margin-top:8px;margin-left:8px">${icon("pin")}Voir le détail par arrêt</button>`);
+    const stBtn = el(`<button class="wc-btn-secondary" style="margin-top:8px;margin-left:8px">${icon("pin")}${t("stop_detail_btn")}</button>`);
     const stBox = el(`<div class="wc-map-holder" hidden></div>`);
     let stLoaded = false;
     stBtn.addEventListener("click", async () => {
@@ -1440,24 +1543,27 @@ function renderTicketCard(a, clientSafe) {
             ]), stBox);
             const stations = (stRes || {}).stations || [];
             if (!stations.length) {
-                stBox.innerHTML = `<div class="wc-banner info">${icon("info")}Aucune donnée par arrêt pour ce trajet (modèle par arrêt pas encore entraîné, ou trop peu de données).</div>`;
+                stBox.innerHTML = `<div class="wc-banner info">${icon("info")}${t("no_stop_data")}</div>`;
             } else {
                 const sumTicket = stations.reduce((s, r) => s + r.nbr_ticket, 0);
                 const sumRecette = stations.reduce((s, r) => s + r.recette, 0);
-                let inner = `<p class="wc-muted">${stations.length} arrêt(s) desservi(s) par le bus ${esc(a.bus)} ce jour-là — ${sumTicket} tickets / ${sumRecette.toFixed(0)} DT au total (vs ${a.nbr_ticket} tickets / ${a.recette.toFixed(0)} DT affiché ci-dessus pour ce bus-jour).</p>`;
-                inner += tripBreakdownHtml(`Ce trajet — bus ${a.bus} · ${fmtDay(a.day)}`, stations, (stRes || {}).by_direction);
+                let inner = `<p class="wc-muted">${t("stops_summary", {
+                    n: stations.length, bus: esc(a.bus), sumT: sumTicket, sumR: sumRecette.toFixed(0),
+                    t: a.nbr_ticket, r: a.recette.toFixed(0),
+                })}</p>`;
+                inner += tripBreakdownHtml(t("this_trip_label", { bus: a.bus, day: fmtDay(a.day) }), stations, (stRes || {}).by_direction);
                 const refTrip = (refRes || {}).trip;
                 const refStations = (refRes || {}).stations || [];
                 if (refTrip && refStations.length) {
                     inner += tripBreakdownHtml(
-                        `Trajet de référence (normal) — bus ${esc(refTrip.bus)} · ${fmtDay(refTrip.day)} — ${refTrip.nbr_ticket} tickets / ${refTrip.recette.toFixed(0)} DT`,
+                        t("reference_trip_label", { bus: esc(refTrip.bus), day: fmtDay(refTrip.day), n: refTrip.nbr_ticket, dt: refTrip.recette.toFixed(0) }),
                         refStations, (refRes || {}).by_direction);
                 }
                 stBox.innerHTML = inner;
             }
             stLoaded = true;
         } catch (e) {
-            stBox.innerHTML = `<div class="wc-banner error">${icon("alert")}Erreur : ${esc(e.message)}</div>`;
+            stBox.innerHTML = `<div class="wc-banner error">${icon("alert")}${t("error_generic", { msg: esc(e.message) })}</div>`;
         } finally {
             stBtn.disabled = false;
         }
@@ -1471,23 +1577,23 @@ function renderTicketCard(a, clientSafe) {
 // ── View: Chauffeurs ─────────────────────────────────────────────────────────────────────
 async function renderDriversView(root) {
     root.innerHTML = `
-    <div class="wc-banner info">Ces informations sur les chauffeurs sont fournies à titre indicatif — une corrélation avec des trajets signalés n'est pas un verdict automatique. Facteurs externes (trafic, panne, météo…) peuvent expliquer une anomalie sans faute du chauffeur.</div>
+    <div class="wc-banner info">${t("drivers_disclaimer")}</div>
     <div class="wc-card">
         <div class="wc-filters">
             <div class="wc-field">
-                <label>Trajets minimum</label>
+                <label>${t("field_min_trips")}</label>
                 <input type="number" id="wc-dr-min" value="5" min="1" max="50" style="width:80px">
             </div>
-            <div class="wc-field"><label>&nbsp;</label><button id="wc-dr-refresh" class="wc-btn-secondary">Actualiser</button></div>
+            <div class="wc-field"><label>&nbsp;</label><button id="wc-dr-refresh" class="wc-btn-secondary">${t("refresh_btn")}</button></div>
         </div>
-        <h4>Chauffeurs classés par taux d'anomalie</h4>
+        <h4>${t("drivers_leaderboard_title")}</h4>
         <div id="wc-dr-leaderboard">${skeletonTable(6)}</div>
     </div>
     <div class="wc-card">
-        <h4>Rechercher un chauffeur par code</h4>
+        <h4>${t("driver_lookup_title")}</h4>
         <div class="wc-filters">
-            <div class="wc-field"><label>Code chauffeur</label><input type="text" id="wc-dr-code"></div>
-            <div class="wc-field"><label>&nbsp;</label><button id="wc-dr-lookup">Rechercher</button></div>
+            <div class="wc-field"><label>${t("field_driver_code")}</label><input type="text" id="wc-dr-code"></div>
+            <div class="wc-field"><label>&nbsp;</label><button id="wc-dr-lookup">${t("search_btn")}</button></div>
         </div>
         <div id="wc-dr-detail"></div>
     </div>`;
@@ -1499,13 +1605,13 @@ async function renderDriversView(root) {
         try {
             const d = await withColdStartHint(api("/api/drivers-ranked", { min_trips: minTrips, limit: 50 }), box);
             const drivers = (d || {}).drivers || [];
-            if (!drivers.length) { box.innerHTML = `<div class="wc-banner info">Aucun chauffeur avec assez de trajets.</div>`; return; }
+            if (!drivers.length) { box.innerHTML = `<div class="wc-banner info">${t("no_driver_enough_trips")}</div>`; return; }
             let rows = drivers.map((r) => `<tr>
                 <td>${esc(r.driver_code)}</td><td>${r.n_trips}</td><td>${r.n_anomalies}</td>
                 <td>${r.anomaly_rate.toFixed(1)}%</td></tr>`).join("");
-            box.innerHTML = `<table class="wc-table"><thead><tr><th>Code</th><th>Trajets</th><th>Anomalies</th><th>Taux</th></tr></thead><tbody>${rows}</tbody></table>`;
+            box.innerHTML = `<table class="wc-table"><thead><tr><th>${t("col_code")}</th><th>${t("col_trips")}</th><th>${t("col_anomalies")}</th><th>${t("col_rate")}</th></tr></thead><tbody>${rows}</tbody></table>`;
         } catch (e) {
-            box.innerHTML = `<div class="wc-banner error">Erreur : ${esc(e.message)}</div>`;
+            box.innerHTML = `<div class="wc-banner error">${t("error_generic", { msg: esc(e.message) })}</div>`;
         }
     }
     root.querySelector("#wc-dr-refresh").addEventListener("click", loadLeaderboard);
@@ -1515,7 +1621,7 @@ async function renderDriversView(root) {
         const code = root.querySelector("#wc-dr-code").value.trim();
         const detail = root.querySelector("#wc-dr-detail");
         if (!code) return;
-        detail.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> Recherche…</p>`;
+        detail.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> ${t("searching")}</p>`;
         let ds;
         try {
             ds = await api("/api/driver-stats", { driver_code: code });
@@ -1533,15 +1639,15 @@ async function renderDriversView(root) {
         const dom = ds.dominant_cause;
         detail.innerHTML = `
         <div class="wc-metrics">
-            <div class="wc-metric"><div class="wc-metric-label">Trajets</div><div class="wc-metric-value">${ds.total_trips}</div></div>
-            <div class="wc-metric"><div class="wc-metric-label">Anomalies</div><div class="wc-metric-value">${ds.total_anomalies}</div></div>
-            <div class="wc-metric"><div class="wc-metric-label">Taux d'anomalie</div><div class="wc-metric-value">${ds.anomaly_rate.toFixed(1)}%</div></div>
+            <div class="wc-metric"><div class="wc-metric-label">${t("driver_metric_trips")}</div><div class="wc-metric-value">${ds.total_trips}</div></div>
+            <div class="wc-metric"><div class="wc-metric-label">${t("driver_metric_anomalies")}</div><div class="wc-metric-value">${ds.total_anomalies}</div></div>
+            <div class="wc-metric"><div class="wc-metric-label">${t("driver_metric_rate")}</div><div class="wc-metric-value">${ds.anomaly_rate.toFixed(1)}%</div></div>
         </div>
-        ${dom ? `<p class="wc-muted">Cause la plus fréquente : <strong>${esc(TOP_FEATURE_LABELS[dom.top_feature] || dom.top_feature)}</strong> (${dom.pct.toFixed(1)}% de ses anomalies)</p>` : ""}
+        ${dom ? `<p class="wc-muted">${t("driver_dominant_cause", { cause: `<strong>${esc(TOP_FEATURE_LABELS[dom.top_feature] || dom.top_feature)}</strong>`, pct: dom.pct.toFixed(1) })}</p>` : ""}
         ${chartsOk ? `<div class="wc-charts-grid">
             <div class="wc-chart-wrap"><canvas id="wc-dr-chart-cause"></canvas></div>
             <div class="wc-chart-wrap"><canvas id="wc-dr-chart-line"></canvas></div>
-        </div>` : `<div class="wc-banner warn">Graphiques indisponibles (bibliothèque de graphiques injoignable) — les chiffres ci-dessus et la liste ci-dessous restent à jour.</div>`}
+        </div>` : `<div class="wc-banner warn">${t("charts_unavailable_drivers")}</div>`}
         <div id="wc-dr-trips"></div>`;
 
         if (!chartsOk) {

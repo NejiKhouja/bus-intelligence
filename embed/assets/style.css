@@ -627,3 +627,51 @@ button.wc-link-muted:hover { color: var(--wc-orange); }
     .wc-metrics { gap: 12px; }
     .wc-field { min-width: 100%; }
 }
+
+/* ── Pied de page -- avertissement IA ──────────────────────────────────────────────
+   Rappelle sur CHAQUE page (pas seulement au premier chargement) que ce qui précède est
+   généré par un système automatique et peut se tromper -- voir embed/index.php. */
+.wc-footer-disclaimer {
+    margin-top: 22px;
+    padding-top: 14px;
+    border-top: 1px solid var(--wc-border-soft);
+    color: var(--wc-text-muted);
+    font-size: 11px;
+    font-style: italic;
+    line-height: 1.6;
+}
+
+/* ── Sélecteur de langue ─────────────────────────────────────────────────────────
+   Un `<select>` nu (pas de bouton "wc-embed button" ici) réutilisé sur les deux
+   écrans (picker et app principale) -- voir embed/index.php. */
+.wc-lang-switch { display: inline-flex; }
+.wc-lang-switch select {
+    background: var(--wc-bg-elevated);
+    border: 1px solid var(--wc-border);
+    color: var(--wc-text-muted);
+    border-radius: var(--wc-radius-sm);
+    padding: 5px 8px;
+    font-size: 12.5px;
+    font-family: inherit;
+}
+.wc-picker .wc-lang-switch { justify-content: center; margin-bottom: 10px; }
+
+/* ── RTL (arabe) ─────────────────────────────────────────────────────────────────
+   `dir="rtl"` sur .wc-embed (voir index.php) inverse déjà le sens de lecture natif du
+   navigateur (texte, `text-align: start`, ordre des colonnes de `<table>`...). Cette
+   section ne corrige QUE les endroits où le CSS fixe un côté explicitement en dur
+   (text-align/margin/padding/border/position en "left"/"right") au lieu d'utiliser les
+   propriétés logiques (start/end) -- ces points-là ignoreraient `dir` sans ce correctif
+   et resteraient visuellement "à gauche" même en arabe. */
+.wc-embed[dir="rtl"] .wc-table th,
+.wc-embed[dir="rtl"] .wc-table td { text-align: right; }
+.wc-embed[dir="rtl"] .wc-reason { padding-left: 0; padding-right: 14px; }
+.wc-embed[dir="rtl"] .wc-reason::before { left: auto; right: 0; }
+.wc-embed[dir="rtl"] .wc-disclaimer { border-left: none; border-right: 2px solid var(--wc-border); padding-left: 0; padding-right: 8px; }
+.wc-embed[dir="rtl"] .wc-tab .wc-icon { margin-right: 0; margin-left: 5px; }
+.wc-embed[dir="rtl"] .wc-live-dot { margin-right: 0; margin-left: 2px; }
+.wc-embed[dir="rtl"] .wc-legend-dot { margin: 0 10px 0 4px; }
+.wc-embed[dir="rtl"] [data-tip]:hover::after { left: auto; right: 0; border-left: none; border-right: 3px solid var(--wc-orange); }
+.wc-embed[dir="rtl"] .wc-field-analyze { justify-content: flex-start; }
+.wc-embed[dir="rtl"] .wc-ms-tag { padding: 4px 12px 4px 6px; }
+.wc-embed[dir="rtl"] button.wc-link-muted svg { transform: scaleX(-1); }

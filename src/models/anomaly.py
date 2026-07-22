@@ -437,7 +437,7 @@ def explain_trips(models: dict, scored: pd.DataFrame, *,
     if_models = models.get("if_models", {})
 
     out = scored.copy()
-    reasons_col, reason_features_col, top_col = [], [], []
+    reasons_col, reason_features_col, reason_values_col, top_col = [], [], [], []
 
     for _, row in out.iterrows():
         # Use the most specific stats available so z-scores compare against the right
@@ -474,20 +474,33 @@ def explain_trips(models: dict, scored: pd.DataFrame, *,
         scored_feats.sort(reverse=True)
         reasons = [_REASON_BUILDERS[f][1](v) for _, f, v in scored_feats[:max_reasons]]
         reason_features = [f for _, f, v in scored_feats[:max_reasons]]
+        # Valeur brute derrière chaque raison (même valeur que celle passée au builder
+        # ci-dessus) -- portée en plus du texte français déjà rendu (`reasons`, gardé tel
+        # quel pour le dashboard Streamlit qui l'affiche directement) pour que le widget
+        # embarqué (embed/assets/app.js) puisse reconstruire la phrase dans SA langue
+        # (fr/ar) au lieu d'afficher ce texte français en dur (retour utilisateur
+        # 2026-07-22 : "ces raisons ne sont pas traduites").
+        reason_values = [float(v) for _, f, v in scored_feats[:max_reasons]]
 
-        # Informational signal-loss note — only when max_dark_s didn't already trigger
+        # Informational signal-loss note — only when max_dark_s didn't already trigger.
+        # Feature marker "max_dark_s_info" (pas "max_dark_s") : phrasing différent de la
+        # raison normale ci-dessus (insiste sur "non comptée comme immobilisation"), donc
+        # il faut une clé distincte pour que le frontend sache quel gabarit appliquer.
         dark = float(row.get("max_dark_s", 0) or 0)
         already_in_reasons = any(f == "max_dark_s" for _, f, _ in scored_feats)
         if dark > 600 and not already_in_reasons and len(reasons) < max_reasons:
             reasons.append(f"Perte de signal GPS à un arrêt (~{dark/60:.0f} min sans ping — non comptée comme immobilisation)")
-            reason_features.append("max_dark_s")
+            reason_features.append("max_dark_s_info")
+            reason_values.append(dark)
 
         reasons_col.append(reasons)
         reason_features_col.append(reason_features)
+        reason_values_col.append(reason_values)
         top_col.append(scored_feats[0][1] if scored_feats else None)
 
     out["reasons"] = reasons_col
     out["reason_features"] = reason_features_col
+    out["reason_values"] = reason_values_col
     out["top_feature"] = top_col
     out["anomaly_strength"] = (-out["if_score"]).round(3)
     out["severity"] = np.where(out.get("dual_anomaly", False), "high",

@@ -706,19 +706,27 @@ def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
     # Magasin poussé D'ABORD (aucun réseau, voir le relais scripts/push_live_day.py),
     # webservice ensuite (chemin naturel en dev local où le réseau le permet).
     pings = _ingest_read(_ingest_path("gps", day, societe))
+    # `fetched` distingue "le jour est réellement prêt/joignable" (peu importe combien de
+    # trajets il contient, y compris zéro -- ex. jour férié, aucun bus en circulation) de
+    # "webservice pas configuré/pas prêt/injoignable" -- SANS ça, un jour ready-mais-vide
+    # (pings == [], donc faux au sens Python) retombait dans le même `result = None` qu'un
+    # jour vraiment indisponible, et l'appelant (_live_gps_day) perdait la date d'hier
+    # entièrement au lieu de l'afficher avec "0 trajet" (retour utilisateur 2026-07-22).
+    fetched = pings is not None
     if pings is None and ws.WEBSERVICE_URL:
         try:
             if ws.is_day_ready(day):
                 pings = ws.get_pings_for_day(day, societe=societe)
+                fetched = True
         except Exception as e:
             print(f"Live GPS webservice unavailable ({societe}/{day}): {e}")
+    trip_frames, stop_frames = [], []
     if pings:
         try:
             groups = ws.group_pings_by_bus_line(pings)
             usable = _load_usable_lines()
             models = model_manager.get("anomaly")
             cfg = fdn.Config()
-            trip_frames, stop_frames = [], []
             for (grp_line, grp_bus), grp_pings in groups.items():
                 key = (grp_line, societe)
                 if key not in usable:
@@ -751,13 +759,16 @@ def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
                     print(f"  live scoring failed for {societe}/{grp_line}/{grp_bus}: {e}")
                     continue
                 stop_frames.append(fa)
-            if trip_frames:
-                result = {
-                    "trips": pd.concat(trip_frames, ignore_index=True),
-                    "stops": pd.concat(stop_frames, ignore_index=True),
-                }
         except Exception as e:
             print(f"Live GPS scoring failed ({societe}/{day}): {e}")
+            # Échec structurel (pas juste un bus-jour isolé) -- on ne sait plus si ce jour
+            # est vraiment "zéro trajet" ou juste cassé ici, donc on ne l'affirme pas.
+            fetched = False
+    if fetched:
+        result = {
+            "trips": pd.concat(trip_frames, ignore_index=True) if trip_frames else pd.DataFrame(),
+            "stops": pd.concat(stop_frames, ignore_index=True) if stop_frames else pd.DataFrame(),
+        }
 
     _live_cache_put(_current_gps_cache, cache_key, result)
     return result
@@ -980,7 +991,7 @@ async def get_days_for_line(
     live_day = _live_gps_day(societe)
     if live_day and live_day not in days:
         live = _score_all_gps_live(societe, live_day)
-        if live is not None and len(live["trips"][live["trips"]["line"] == line]):
+        if live is not None and len(live["trips"]) and len(live["trips"][live["trips"]["line"] == line]):
             days = [live_day] + days
 
     return {"days": days[:30]}
@@ -1262,9 +1273,13 @@ def _filter_trips(societe: str, line: Optional[str] = None,
     if include_live and (day is None or day == potential_live_day):
         live = _score_all_gps_live(societe, potential_live_day)
         if live is not None:
+            # `live["trips"]` peut être un DataFrame VIDE SANS COLONNES (jour live prêt
+            # mais zéro trajet -- voir _score_all_gps_live) -- y accéder directement ici
+            # perdrait le schéma attendu (`trips["societe"]` etc. plus bas) au lieu de
+            # simplement donner zéro ligne.
             if day == potential_live_day:
-                trips = live["trips"]
-            else:
+                trips = live["trips"] if len(live["trips"]) else trips.iloc[0:0]
+            elif len(live["trips"]):
                 trips = pd.concat([trips, live["trips"]], ignore_index=True, sort=False)
             # Même normalisation que foundation_slice -- `trip_features()` sur des données
             # EN DIRECT peut laisser trip_start/trip_end en dtype object plutôt que
@@ -1395,6 +1410,7 @@ def _rows_with_reasons(models, trips, anomalies_only: bool = True,
             "anomaly_strength": float(r["anomaly_strength"]),
             "reasons": list(r["reasons"]),
             "reason_features": list(r.get("reason_features", [])),
+            "reason_values": [float(v) for v in r.get("reason_values", [])],
             "top_feature": r.get("top_feature"),
             "max_dwell_min": round(float(r["max_dwell_s"]) / 60, 1),
             "max_dark_min": round(float(r.get("max_dark_s", 0) or 0) / 60, 1),
@@ -2004,13 +2020,29 @@ def get_current_anomalies(  # def, pas async def -- voir la note dans get_anomal
     """
     try:
         models = model_manager.get("anomaly")
+        yesterday_date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
         live_day = _live_gps_day(societe)
         today, live = (live_day, True) if live_day else (latest_day_for(societe, line), False)
         _, trips = _filter_trips(societe, line, day=today, dir=dir)
         anomalies = _rows_with_reasons(models, trips, anomalies_only=True)
+        # Toujours renvoyer le dernier jour HISTORIQUE connu à côté du jour live, même
+        # quand celui-ci a zéro trajet (jour prêt mais férié/grève/rien en circulation,
+        # voir _score_all_gps_live) -- sans ça, "0 trajet aujourd'hui" laissait l'admin
+        # sans aucun repère sur la dernière vraie journée de données (retour utilisateur
+        # 2026-07-22). `None` quand elle coïncide avec `today` -- pas la peine d'afficher
+        # deux fois la même date au widget.
+        historical_date = latest_day_for(societe, line)
         return {
             "date": today,
             "live": live,
+            # Toujours la VRAIE date d'hier, même quand `live` est False (aucun signal
+            # live du tout -- web service pas configuré/pas prêt/injoignable, voir
+            # _live_gps_day) -- sans ce champ, le widget n'avait aucun moyen de dire
+            # explicitement "hier, {date}, on n'a aucune donnée" et affichait juste
+            # l'historique en silence, comme si c'était la réponse à "aujourd'hui"
+            # (retour utilisateur 2026-07-22).
+            "yesterday_date": yesterday_date,
+            "historical_date": historical_date if historical_date != today else None,
             "societe": societe,
             "line": line,
             "anomalies": anomalies,
