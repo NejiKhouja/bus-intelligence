@@ -283,8 +283,20 @@
     margin-bottom: 10px;
 }
 .wc-alert-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
-.wc-alert-title { font-weight: 700; font-size: 13.5px; }
+.wc-alert-title { font-weight: 700; font-size: 13.5px; flex: 1; }
 .wc-alert-date { color: var(--wc-text-muted); font-size: 12.5px; }
+/* Icône "confiance réduite" (peu d'historique pour un modèle dédié à cette ligne/cet
+   opérateur) -- discrète, jamais un bandeau ; le detail n'apparaît qu'au survol via
+   [data-tip] (règle globale plus bas). Couleur ambre douce, pas rouge -- ce n'est pas
+   une erreur, juste une réserve sur la confiance du résultat. */
+.wc-low-data-flag {
+    display: inline-flex;
+    color: #d9a441;
+    opacity: .85;
+    flex: none;
+}
+.wc-low-data-flag:hover, .wc-low-data-flag:focus-visible { opacity: 1; }
+.wc-low-data-flag .wc-icon { width: 14px; height: 14px; }
 .wc-reason { font-size: 12.5px; color: #c8d4e6; margin: 3px 0; padding-left: 14px; position: relative; cursor: help; }
 .wc-reason::before { content: "•"; position: absolute; left: 0; color: var(--wc-orange); }
 .wc-chip { font-size: 12px; color: var(--wc-text-muted); margin: 4px 0; }
@@ -382,7 +394,11 @@
     white-space: nowrap;
     box-shadow: 0 1px 4px rgba(0,0,0,.4);
 }
-.wc-btn-map { margin-top: 8px; font-size: 12.5px; }
+.wc-btn-map { font-size: 12.5px; }
+/* Rangée d'actions en bas de carte (bouton carte + « trajet normal de cette ligne ») --
+   passe à la ligne sur mobile plutôt que de déborder. */
+.wc-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.wc-card-actions button { font-size: 12.5px; }
 
 /* ── Tri + verdict + trajet de référence ───────────────────────────────────────── */
 .wc-sort-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }

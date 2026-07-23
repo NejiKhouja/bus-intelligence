@@ -38,6 +38,12 @@ $dir = $lang === 'ar' ? 'rtl' : 'ltr';
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title><?= htmlspecialchars(wt('page_title')) ?></title>
+<!-- Ouvre tôt la connexion (DNS + TLS) vers les CDN utilisés à la demande (cartes Leaflet,
+     tuiles OpenStreetMap, graphiques Chart.js) -- la 1re carte/graphique ouvert ne paie
+     alors plus la poignée de main réseau (retour utilisateur 2026-07-23 : chargement lent). -->
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
+<link rel="preconnect" href="https://tile.openstreetmap.org" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>

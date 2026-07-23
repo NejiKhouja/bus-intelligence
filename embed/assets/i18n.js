@@ -111,6 +111,7 @@ fr: {
     map_unavailable: "Carte indisponible : {msg}",
     map_loading: "Chargement de la carte…",
     btn_show_map: "Voir la carte du trajet",
+    btn_show_reference: "Voir un trajet normal de cette ligne",
 
     // ── Carte d'alerte (renderAlertCard) ────────────────────────────────────────────────
     alert_bus_line_dir: "Bus {bus} · Ligne {line} · {dir}",
@@ -142,6 +143,13 @@ fr: {
     chip_departure_multi_variant: " (horaire multiple, à titre indicatif)",
     chip_driver: "Chauffeur : {code}",
     chip_driver_disclaimer: "Information fournie à titre indicatif — une corrélation entre un chauffeur et des trajets signalés n'est pas un verdict automatique. À interpréter selon le contexte (trafic, panne, météo…).",
+
+    // ── Icône "confiance réduite" sur les cartes (peu d'historique pour un modèle
+    // dédié à cette ligne/cet opérateur) -- formulé comme une limite de DONNÉES
+    // disponibles, jamais comme un défaut du système de détection.
+    low_data_flag_label: "Confiance du résultat",
+    low_data_tip_full: "Confiance à nuancer : cette ligne ne dispose pas encore d'un historique suffisant pour bénéficier de son propre modèle de référence. Ce trajet est donc évalué par comparaison avec l'ensemble du réseau plutôt qu'avec cette ligne en particulier. Le résultat reste pertinent mais à considérer comme indicatif — sa précision s'affinera automatiquement à mesure que l'historique de cette ligne s'enrichira.",
+    low_data_tip_partial: "Confiance légèrement à nuancer : l'un des modèles utilisés pour cette ligne s'appuie encore en partie sur les données de l'ensemble du réseau plutôt que sur cette ligne exclusivement. Le résultat reste fiable dans ses grandes lignes — sa précision continuera de s'affiner automatiquement à mesure que l'historique de cette ligne s'enrichira.",
 
     // ── Filtre par type d'anomalie ───────────────────────────────────────────────────────
     filter_by_category: "Filtrer par type d'anomalie",
@@ -379,6 +387,7 @@ ar: {
     map_unavailable: "الخريطة غير متوفرة: {msg}",
     map_loading: "جارٍ تحميل الخريطة…",
     btn_show_map: "عرض خريطة الرحلة",
+    btn_show_reference: "عرض رحلة عادية على هذا الخط",
 
     alert_bus_line_dir: "حافلة {bus} · خط {line} · {dir}",
     metric_trip_duration: "مدة الرحلة ⓘ",
@@ -409,6 +418,10 @@ ar: {
     chip_departure_multi_variant: " (توقيت متعدد، على سبيل الاستئناس)",
     chip_driver: "السائق: {code}",
     chip_driver_disclaimer: "معلومة مقدَّمة على سبيل الاستئناس فقط — وجود ارتباط بين سائق ورحلات مُبلَّغ عنها ليس حكمًا آليًا. يُفسَّر حسب السياق (ازدحام، عطل، طقس…).",
+
+    low_data_flag_label: "درجة الثقة في النتيجة",
+    low_data_tip_full: "دقة هذه النتيجة نسبية: لا يتوفر لهذا الخط بعد سجل كافٍ لبناء نموذج مرجعي خاص به، لذا تمت مقارنة هذه الرحلة بالشبكة ككل بدل هذا الخط تحديدًا. تبقى هذه النتيجة ذات دلالة لكنها استئناسية، وستتحسن دقتها تلقائيًا كلما تراكم سجل أوفر لهذا الخط.",
+    low_data_tip_partial: "دقة هذه النتيجة نسبية بشكل طفيف: أحد النماذج المستخدمة لهذا الخط لا يزال يعتمد جزئيًا على بيانات الشبكة ككل بدل هذا الخط حصريًا. تبقى النتيجة موثوقة في مجملها، وستستمر دقتها في التحسن تلقائيًا كلما تراكم سجل أوفر لهذا الخط.",
 
     filter_by_category: "تصفية حسب نوع الخلل",
     remove_tag: "إزالة",

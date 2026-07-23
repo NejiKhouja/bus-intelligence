@@ -559,13 +559,102 @@ function renderTripMap(container, seqList, direction, detour) {
     map.fitBounds(L.latLngBounds(latlngs).pad(0.15));
 }
 
+// ── Trajet de référence « à quoi ressemble un trajet NORMAL sur cette ligne » ───────────
+// Extrait du panneau "Expliquer un bus" (2026-07-23) pour être RÉUTILISÉ tel quel par le
+// bouton du même nom sur les cartes de la vue d'ensemble -- même rendu (onglets ALLER/
+// RETOUR, métriques, carte par direction). `container` reçoit le HTML ; `card:false` évite
+// d'imbriquer une seconde .wc-card quand l'appelant fournit déjà un conteneur (bouton de
+// carte). Peut lever (erreur API) -- à l'appelant de décider comment l'afficher.
+async function renderReferenceTrip(container, line, { card = true, open = true } = {}) {
+    container.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> ${t("finding_reference_trip")}</p></div>`;
+    const ref = await api("/api/reference-trip", { line });
+    const dirs = (ref || {}).directions || {};
+    const dirNames = Object.keys(dirs);
+    if (!dirNames.length) {
+        container.innerHTML = `<div class="wc-banner info">${icon("info")}${t("no_reference_trip")}</div>`;
+        return;
+    }
+    let inner = `<details class="wc-ref"${open ? " open" : ""}><summary>${icon("check")}${t("ref_trip_summary", { line: esc(line) })}</summary>`;
+    if (dirNames.length === 2) {
+        const at = dirs["ALLER"] && dirs["ALLER"].trip, rt = dirs["RETOUR"] && dirs["RETOUR"].trip;
+        if (at && rt && at.bus === rt.bus && at.day === rt.day) {
+            inner += `<p class="wc-muted">${t("ref_same_cycle", { bus: `<strong>${esc(at.bus)}</strong>`, day: `<strong>${fmtDay(at.day)}</strong>` })}</p>`;
+        }
+    } else {
+        inner += `<p class="wc-muted">${t("ref_missing_other_dir", { dir: `<strong>${esc(dirNames[0])}</strong>` })}</p>`;
+    }
+    // Onglets ALLER/RETOUR côte à côte (mirrors Streamlit's st.tabs) -- un seul bouton = pas
+    // de barre d'onglets, rien à sélectionner.
+    if (dirNames.length > 1) {
+        inner += `<div class="wc-ref-tabs">${dirNames.map((d, i) =>
+            `<button type="button" class="wc-ref-tab${i === 0 ? " active" : ""}" data-dir="${esc(d)}">${esc(d)}</button>`
+        ).join("")}</div>`;
+    }
+    for (const d of dirNames) {
+        const rt = dirs[d].trip;
+        // Un trajet de référence peut être PARTIEL quand la direction n'a (quasi) aucun
+        // trajet complet -- fait des DONNÉES, pas un bug d'affichage.
+        const partialNote = (rt.is_full === false && rt.geometry_stops)
+            ? `<div class="wc-banner info">${icon("info")}${t("ref_partial_coverage", { covered: `<strong>${rt.covered_stops}</strong>`, total: rt.geometry_stops })}</div>`
+            : "";
+        inner += `
+        <div class="wc-ref-dir" data-dir="${esc(d)}"${d === dirNames[0] ? "" : " hidden"}>
+            ${dirNames.length > 1 ? "" : `<h4>${esc(d)}</h4>`}
+            <p class="wc-muted">${t("ref_trip_caption", { match: (rt.match_rate * 100).toFixed(0) })}</p>
+            ${partialNote}
+            <div class="wc-metrics">
+                <div class="wc-metric"><div class="wc-metric-label">${t("ref_bus")}</div><div class="wc-metric-value">${esc(rt.bus)}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">${t("ref_day")}</div><div class="wc-metric-value" style="font-size:15px">${fmtDay(rt.day)}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">${t("ref_duration")}</div><div class="wc-metric-value">${fmtDuration(rt.duration_min)}</div>
+                    <div class="wc-metric-sub">${t("ref_line_median", { med: fmtDuration(rt.line_median_min) })}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">${t("ref_stops_tracked")}</div><div class="wc-metric-value">${rt.n_stops}</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">${t("ref_avg_dwell")}</div><div class="wc-metric-value">${(rt.mean_dwell_min || 0).toFixed(1)} min</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">${t("metric_departure_arrival")}</div><div class="wc-metric-value" style="font-size:15px">${fmtTime(rt.trip_start)} → ${fmtTime(rt.trip_end)}</div></div>
+            </div>
+            ${rt.typical_terminus_idle_min !== null && rt.typical_terminus_idle_min !== undefined ? `
+            <div class="wc-chip">${icon("parking")}${t("ref_typical_idle", {
+                typ: rt.typical_terminus_idle_min.toFixed(0),
+                extra: rt.service_not_closed_threshold_min ? t("ref_typical_idle_extra", { thr: rt.service_not_closed_threshold_min.toFixed(0) }) : "",
+            })}</div>` : ""}
+            <div class="wc-ref-map" data-dir="${esc(d)}"></div>
+        </div>`;
+    }
+    inner += `</details>`;
+    container.innerHTML = card ? `<div class="wc-card">${inner}</div>` : inner;
+
+    const tabBtns = [...container.querySelectorAll(".wc-ref-tab")];
+    tabBtns.forEach((btn) => btn.addEventListener("click", () => {
+        const d = btn.dataset.dir;
+        tabBtns.forEach((b) => b.classList.toggle("active", b === btn));
+        for (const dd of dirNames) {
+            container.querySelector(`.wc-ref-dir[data-dir="${CSS.escape(dd)}"]`).hidden = dd !== d;
+        }
+        renderRefMap(d);
+    }));
+
+    // Cartes chargées à l'OUVERTURE du bloc (Leaflet dans un <details> fermé ou un onglet
+    // caché mesure une taille nulle et rend une carte grise) -- une seule fois chacune.
+    const details = container.querySelector("details");
+    const mapsBuilt = new Set();
+    async function renderRefMap(d) {
+        if (!details.open || mapsBuilt.has(d) || !dirs[d].sequence) return;
+        mapsBuilt.add(d);
+        try { await ensureLeaflet(); } catch { return; }
+        const holder = container.querySelector(`.wc-ref-map[data-dir="${CSS.escape(d)}"]`);
+        if (holder) renderTripMap(holder, dirs[d].sequence, d, null);
+    }
+    details.addEventListener("toggle", () => { if (details.open) renderRefMap(dirNames[0]); });
+    // Ouvert par défaut (<details open>) -> rend la carte de la 1re direction tout de suite.
+    renderRefMap(dirNames[0]);
+}
+
 // ── Shared: alert card rendering (used by Trips view, Chauffeurs view) ─────────────────
 function rowCategories(a) {
     const cats = [a.top_feature ?? null];
     if (a.has_detour) cats.push("unofficial_detour");
     return cats;
 }
-function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}) {
+function renderAlertCard(a, { showDriverStatsHint = true, withMap = false, overview = false } = {}) {
     const sev = SEV_META[a.severity] || SEV_META.medium;
     const dep = fmtTime(a.trip_start), arr = fmtTime(a.trip_end);
     const dur = a.trip_duration_min || a.total_elapsed_min || 0;
@@ -585,9 +674,21 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     const showEst = est !== undefined && est !== null && (dwellM + darkM) >= 15
                     && medM && dur > medM && matchR >= 0.5;
 
+    // Confiance réduite quand cette ligne/opérateur n'a pas (encore) assez de trajets pour
+    // un modèle qui lui soit propre (voir model_low_data/model_if_dedicated renvoyés par
+    // _rows_with_reasons). Icône "!" discrète, jamais un bandeau -- au survol seulement
+    // (formuler ça comme un manque de recul DE DONNÉES, jamais comme un défaut du système).
+    // RÉSERVÉE à la vue d'ensemble (`overview`) : le panneau "Expliquer un bus" affiche déjà
+    // le MÊME avertissement en tête de liste (renderExplainResults), le répéter par carte y
+    // serait redondant (retour utilisateur 2026-07-23).
+    const lowDataTip = (overview && a.model_low_data)
+        ? t(a.model_if_dedicated ? "low_data_tip_partial" : "low_data_tip_full")
+        : null;
+
     let html = `<div class="wc-alert-card">
         <div class="wc-alert-head">
             <span class="wc-badge ${sev.cls}">${sev.label}</span>
+            ${lowDataTip ? `<span class="wc-low-data-flag" data-tip="${esc(lowDataTip)}" tabindex="0" aria-label="${esc(t("low_data_flag_label"))}">${icon("alert")}</span>` : ""}
             <span class="wc-alert-title">${t("alert_bus_line_dir", { bus: esc(a.bus), line: esc(a.line), dir: esc(a.dir) })}</span>
             <span class="wc-alert-date">${fmtDay(a.day)}</span>
         </div>
@@ -715,6 +816,9 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
     html += `</div>`;
     const card = el(html);
 
+    // Rangée de boutons (carte + éventuellement "trajet normal de cette ligne").
+    const actions = el(`<div class="wc-card-actions"></div>`);
+
     // Bouton carte -- même comportement que le dashboard Streamlit : la séquence par arrêt
     // est chargée À LA DEMANDE (/api/trip-detail), pas avec la liste (une carte Leaflet par
     // carte d'alerte chargée d'office serait ruineux en DOM et en appels API).
@@ -727,10 +831,13 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
             btn.disabled = true;
             mapBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> ${t("map_loading")}</p>`;
             try {
-                await ensureLeaflet();
-                const d = await api("/api/trip-detail", {
-                    line: a.line, bus: a.bus, day: a.day, trip_start: a.trip_start,
-                });
+                // Leaflet (CDN) et le détail du trajet (API) chargés EN PARALLÈLE plutôt
+                // qu'en série -- les deux latences se recouvrent au lieu de s'additionner
+                // (retour utilisateur 2026-07-23 : "la carte met trop de temps à charger").
+                const [, d] = await Promise.all([
+                    ensureLeaflet(),
+                    api("/api/trip-detail", { line: a.line, bus: a.bus, day: a.day, trip_start: a.trip_start }),
+                ]);
                 renderTripMap(mapBox, d.sequence, a.dir, (d.problem_stops || {}).unofficial_detour || a.detour);
                 loaded = true;
             } catch (e) {
@@ -739,8 +846,36 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false } = {}
                 btn.disabled = false;
             }
         });
-        card.appendChild(btn);
+        actions.appendChild(btn);
+        card.appendChild(actions);
         card.appendChild(mapBox);
+    }
+
+    // Bouton "trajet normal de cette ligne" -- RÉSERVÉ aux cartes de la vue d'ensemble
+    // (chargement initial) : le panneau "Expliquer un bus" a déjà son propre bloc trajet de
+    // référence au-dessus de la liste, l'y répéter par carte serait redondant. Ancre de
+    // confiance : montre à quoi ressemble un trajet JUGÉ NORMAL sur la même ligne, à comparer
+    // à l'anomalie (retour utilisateur 2026-07-23).
+    if (overview && a.line) {
+        const refBtn = el(`<button class="wc-btn-secondary">${icon("check")}${t("btn_show_reference")}</button>`);
+        const refBox = el(`<div class="wc-map-holder"></div>`);
+        let refLoaded = false;
+        refBtn.addEventListener("click", async () => {
+            if (refLoaded) { refBox.hidden = !refBox.hidden; return; }
+            refBtn.disabled = true;
+            refBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> ${t("finding_reference_trip")}</p>`;
+            try {
+                await renderReferenceTrip(refBox, a.line, { card: false });
+                refLoaded = true;
+            } catch (e) {
+                refBox.innerHTML = `<div class="wc-banner error">${icon("alert")}${t("error_generic", { msg: esc(e.message) })}</div>`;
+            } finally {
+                refBtn.disabled = false;
+            }
+        });
+        if (!actions.parentNode) card.appendChild(actions);
+        actions.appendChild(refBtn);
+        card.appendChild(refBox);
     }
     return card;
 }
@@ -858,10 +993,22 @@ async function renderTripsView(root) {
     const moreBtn = root.querySelector("#wc-t-more");
     const sortSel = root.querySelector("#wc-t-sort");
 
+    // Préchauffe Leaflet pendant que l'utilisateur lit la liste -- la 1re carte (ou 1er
+    // "trajet normal") ouverte n'attend alors plus le téléchargement du CDN (retour
+    // utilisateur 2026-07-23 : "la carte met trop de temps à charger"). Fait pendant un
+    // temps mort du navigateur, sans jamais bloquer l'affichage de la liste.
+    const warmLeaflet = () => ensureLeaflet().catch(() => {});
+    if ("requestIdleCallback" in window) requestIdleCallback(warmLeaflet, { timeout: 4000 });
+    else setTimeout(warmLeaflet, 1500);
+
     const PAGE = 15;
     let shown = PAGE;
     let currentList = [];
     let baseList = [];
+    // `overview` = liste non recadrée (chargement initial / retour à la vue d'ensemble),
+    // par opposition aux résultats du panneau "Expliquer un bus" (scoped). Détermine
+    // quelles cartes reçoivent l'icône "!" confiance réduite ET le bouton "trajet normal".
+    let overview = true;
 
     function drawList() {
         cardsBox.innerHTML = "";
@@ -871,7 +1018,7 @@ async function renderTripsView(root) {
             moreBtn.hidden = true;
             return;
         }
-        for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a, { withMap: true }));
+        for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a, { withMap: true, overview }));
         moreBtn.hidden = shown >= sorted.length;
         moreBtn.textContent = t("show_more", { shown: Math.min(shown, sorted.length), total: sorted.length });
     }
@@ -884,6 +1031,7 @@ async function renderTripsView(root) {
     function setScope(list, { title, scoped = false } = {}) {
         currentList = list;
         shown = PAGE;
+        overview = !scoped;
         listTitle.textContent = title;
         backBtn.hidden = !scoped;
         const getFiltered = categoryFilterPills(pillsBox, list, (filtered) => { currentList = filtered; shown = PAGE; drawList(); });
@@ -1049,7 +1197,9 @@ async function renderExplainPanel(root, { onResults }) {
         refBox.innerHTML = "";
         if (!lineSel.value) return;
         loadLineVerdict(lineSel.value);
-        loadReferenceTrip(lineSel.value);
+        // Bloc replié par défaut dans le panneau "Expliquer un bus" (open:false) --
+        // l'utilisateur déplie via le résumé ; l'échec API vide simplement la boîte.
+        renderReferenceTrip(refBox, lineSel.value, { open: false }).catch(() => { refBox.innerHTML = ""; });
         try {
             const [busesD, daysD] = await Promise.all([
                 api("/api/buses-for-line", { line: lineSel.value }),
@@ -1092,100 +1242,6 @@ async function renderExplainPanel(root, { onResults }) {
         </div>`;
     }
 
-    // Trajet de référence -- « voici à quoi ressemble un trajet NORMAL sur cette ligne » :
-    // ancre de confiance, comme l'expander Streamlit, avec carte par direction.
-    async function loadReferenceTrip(line) {
-        refBox.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> ${t("finding_reference_trip")}</p></div>`;
-        let ref;
-        try { ref = await api("/api/reference-trip", { line }); }
-        catch { refBox.innerHTML = ""; return; }
-        const dirs = (ref || {}).directions || {};
-        const dirNames = Object.keys(dirs);
-        if (!dirNames.length) {
-            refBox.innerHTML = `<div class="wc-banner info">${icon("info")}${t("no_reference_trip")}</div>`;
-            return;
-        }
-        let inner = `<details class="wc-ref"><summary>${icon("check")}${t("ref_trip_summary", { line: esc(line) })}</summary>`;
-        if (dirNames.length === 2) {
-            const at = dirs["ALLER"] && dirs["ALLER"].trip, rt = dirs["RETOUR"] && dirs["RETOUR"].trip;
-            if (at && rt && at.bus === rt.bus && at.day === rt.day) {
-                inner += `<p class="wc-muted">${t("ref_same_cycle", { bus: `<strong>${esc(at.bus)}</strong>`, day: `<strong>${fmtDay(at.day)}</strong>` })}</p>`;
-            }
-        } else {
-            inner += `<p class="wc-muted">${t("ref_missing_other_dir", { dir: `<strong>${esc(dirNames[0])}</strong>` })}</p>`;
-        }
-        // Onglets ALLER/RETOUR côte à côte (redesign 2026-07-19, retour utilisateur : "je
-        // veux y accéder à travers les tabs comme dans Streamlit" -- st.tabs(dirs.keys())).
-        // Un seul bouton = pas de barre d'onglets, rien à sélectionner.
-        if (dirNames.length > 1) {
-            inner += `<div class="wc-ref-tabs">${dirNames.map((d, i) =>
-                `<button type="button" class="wc-ref-tab${i === 0 ? " active" : ""}" data-dir="${esc(d)}">${esc(d)}</button>`
-            ).join("")}</div>`;
-        }
-        for (const d of dirNames) {
-            const entry = dirs[d];
-            const rt = entry.trip;
-            // Un trajet de référence peut être PARTIEL quand la direction n'a (quasi)
-            // aucun trajet complet -- fait des DONNÉES, pas un bug d'affichage (constaté
-            // 2026-07-18, S.R.T.K/202 : 409/498 ALLER complets contre 2/443 RETOUR, le
-            // traceur s'arrête systématiquement en route au retour). Sans cette note,
-            // l'écart de nombre d'arrêts/durée entre les deux directions est illisible.
-            const partialNote = (rt.is_full === false && rt.geometry_stops)
-                ? `<div class="wc-banner info">${icon("info")}${t("ref_partial_coverage", { covered: `<strong>${rt.covered_stops}</strong>`, total: rt.geometry_stops })}</div>`
-                : "";
-            inner += `
-            <div class="wc-ref-dir" data-dir="${esc(d)}"${d === dirNames[0] ? "" : " hidden"}>
-                ${dirNames.length > 1 ? "" : `<h4>${esc(d)}</h4>`}
-                <p class="wc-muted">${t("ref_trip_caption", { match: (rt.match_rate * 100).toFixed(0) })}</p>
-                ${partialNote}
-                <div class="wc-metrics">
-                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_bus")}</div><div class="wc-metric-value">${esc(rt.bus)}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_day")}</div><div class="wc-metric-value" style="font-size:15px">${fmtDay(rt.day)}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_duration")}</div><div class="wc-metric-value">${fmtDuration(rt.duration_min)}</div>
-                        <div class="wc-metric-sub">${t("ref_line_median", { med: fmtDuration(rt.line_median_min) })}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_stops_tracked")}</div><div class="wc-metric-value">${rt.n_stops}</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">${t("ref_avg_dwell")}</div><div class="wc-metric-value">${(rt.mean_dwell_min || 0).toFixed(1)} min</div></div>
-                    <div class="wc-metric"><div class="wc-metric-label">${t("metric_departure_arrival")}</div><div class="wc-metric-value" style="font-size:15px">${fmtTime(rt.trip_start)} → ${fmtTime(rt.trip_end)}</div></div>
-                </div>
-                ${rt.typical_terminus_idle_min !== null && rt.typical_terminus_idle_min !== undefined ? `
-                <div class="wc-chip">${icon("parking")}${t("ref_typical_idle", {
-                    typ: rt.typical_terminus_idle_min.toFixed(0),
-                    extra: rt.service_not_closed_threshold_min ? t("ref_typical_idle_extra", { thr: rt.service_not_closed_threshold_min.toFixed(0) }) : "",
-                })}</div>` : ""}
-                <div class="wc-ref-map" data-dir="${esc(d)}"></div>
-            </div>`;
-        }
-        inner += `</details>`;
-        refBox.innerHTML = `<div class="wc-card">${inner}</div>`;
-
-        // Bascule d'onglet : montre/cache le bloc de direction correspondant. La carte
-        // Leaflet de la direction nouvellement affichée est instanciée à la demande (voir
-        // plus bas) -- pas les deux à l'ouverture -- puisque seule une est visible à la fois.
-        const tabBtns = [...refBox.querySelectorAll(".wc-ref-tab")];
-        tabBtns.forEach((btn) => btn.addEventListener("click", () => {
-            const d = btn.dataset.dir;
-            tabBtns.forEach((b) => b.classList.toggle("active", b === btn));
-            for (const dd of dirNames) {
-                refBox.querySelector(`.wc-ref-dir[data-dir="${CSS.escape(dd)}"]`).hidden = dd !== d;
-            }
-            renderRefMap(d);
-        }));
-
-        // Cartes chargées à l'OUVERTURE du bloc (pas d'office) -- Leaflet dans un <details>
-        // fermé, ou dans un onglet caché (display:none), mesure une taille nulle et rend
-        // une carte grise ; on attend le premier affichage RÉEL de chaque direction pour
-        // instancier la sienne, une seule fois chacune.
-        const details = refBox.querySelector("details");
-        const mapsBuilt = new Set();
-        async function renderRefMap(d) {
-            if (!details.open || mapsBuilt.has(d) || !dirs[d].sequence) return;
-            mapsBuilt.add(d);
-            try { await ensureLeaflet(); } catch { return; }
-            const holder = refBox.querySelector(`.wc-ref-map[data-dir="${CSS.escape(d)}"]`);
-            if (holder) renderTripMap(holder, dirs[d].sequence, d, null);
-        }
-        details.addEventListener("toggle", () => { if (details.open) renderRefMap(dirNames[0]); });
-    }
 
     async function runAnalysis() {
         const line = lineSel.value || null;

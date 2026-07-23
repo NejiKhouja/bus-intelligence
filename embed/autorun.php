@@ -19,6 +19,17 @@
 
 function winicari_maybe_trigger_relay(): void
 {
+    // Serveur de dev PHP intégré (`php -S`) : MONO-THREAD. Une auto-requête HTTP vers
+    // relay.php sur CE même serveur ne peut PAS être servie tant qu'il est occupé à
+    // produire la page courante -> la connexion reste bloquée jusqu'au timeout (~300-400 ms
+    // AJOUTÉS à chaque premier chargement d'une fenêtre de 10 min). En dev on lance le
+    // relais à la main (scripts/push_live_day.py) ; on saute donc le déclencheur ici pour
+    // que `php -S localhost:8090` réponde instantanément (retour utilisateur 2026-07-23).
+    // En production (Apache/nginx/php-fpm, multi-workers) l'auto-requête fonctionne : pas
+    // de saut.
+    if (PHP_SAPI === 'cli-server') {
+        return;
+    }
     if (!defined('WINICARI_WEBSERVICE_URL') || !WINICARI_WEBSERVICE_URL) {
         return; // pas de webservices configurés sur ce serveur -> relais impossible ici
     }
