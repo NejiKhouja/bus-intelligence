@@ -267,11 +267,15 @@ function skeletonTable(n = 6) {
 const _apiMemCache = new Map(); // url -> { t: Date.now(), data }
 const _API_MEM_TTL_MS = 5 * 60 * 1000;
 
-async function api(endpoint, params = {}) {
+async function api(endpoint, params = {}, { fresh = false } = {}) {
     const qs = new URLSearchParams({ endpoint, ...cleanParams(params) });
     const url = `${WINICARI_PROXY}?${qs.toString()}`;
+    // `fresh` (interrogation répétée de la veille, voir loadCurrent) SAUTE le cache mémoire
+    // JS pour vraiment re-solliciter proxy.php -- mais SANS casser le cache fichier du proxy
+    // (même URL, donc même clé) : on profite de son stale-while-revalidate au lieu de
+    // marteler Render. Une réponse fraîche met quand même à jour le cache mémoire ci-dessous.
     const hit = _apiMemCache.get(url);
-    if (hit && (Date.now() - hit.t) < _API_MEM_TTL_MS) return hit.data;
+    if (!fresh && hit && (Date.now() - hit.t) < _API_MEM_TTL_MS) return hit.data;
     const res = await fetch(url);
     const cacheStatus = res.headers.get("X-Cache"); // HIT / STALE / MISS -- voir proxy.php
     if (!res.ok) {
@@ -565,9 +569,17 @@ function renderTripMap(container, seqList, direction, detour) {
 // RETOUR, métriques, carte par direction). `container` reçoit le HTML ; `card:false` évite
 // d'imbriquer une seconde .wc-card quand l'appelant fournit déjà un conteneur (bouton de
 // carte). Peut lever (erreur API) -- à l'appelant de décider comment l'afficher.
-async function renderReferenceTrip(container, line, { card = true, open = true } = {}) {
+async function renderReferenceTrip(container, line, { card = true, open = true, withStats = false } = {}) {
     container.innerHTML = `<div class="wc-card"><p class="wc-muted"><span class="wc-spin"></span> ${t("finding_reference_trip")}</p></div>`;
-    const ref = await api("/api/reference-trip", { line });
+    // `withStats` (bouton "trajet normal" d'une carte) : on récupère AUSSI, en parallèle, le
+    // bilan de la ligne (nb de trajets analysés + nb signalés) pour le montrer au-dessus du
+    // trajet de référence -- l'utilisateur voit d'un coup sur combien de trajets repose le
+    // jugement de la ligne (retour utilisateur 2026-07-23). Inutile dans le panneau
+    // "Expliquer un bus", qui affiche déjà ce bilan séparément (loadLineVerdict).
+    const [ref, pat] = await Promise.all([
+        api("/api/reference-trip", { line }),
+        withStats ? api("/api/anomaly-patterns", { line }).catch(() => null) : Promise.resolve(null),
+    ]);
     const dirs = (ref || {}).directions || {};
     const dirNames = Object.keys(dirs);
     if (!dirNames.length) {
@@ -575,6 +587,13 @@ async function renderReferenceTrip(container, line, { card = true, open = true }
         return;
     }
     let inner = `<details class="wc-ref"${open ? " open" : ""}><summary>${icon("check")}${t("ref_trip_summary", { line: esc(line) })}</summary>`;
+    if (withStats && pat && pat.total_trips) {
+        inner += `<p class="wc-muted wc-ref-stats">${t("ref_line_stats", {
+            trips: pat.total_trips.toLocaleString(WC_LOCALE),
+            flagged: pat.total_anomalies,
+            rate: (pat.overall_rate * 100).toFixed(1),
+        })}</p>`;
+    }
     if (dirNames.length === 2) {
         const at = dirs["ALLER"] && dirs["ALLER"].trip, rt = dirs["RETOUR"] && dirs["RETOUR"].trip;
         if (at && rt && at.bus === rt.bus && at.day === rt.day) {
@@ -674,14 +693,17 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false, overv
     const showEst = est !== undefined && est !== null && (dwellM + darkM) >= 15
                     && medM && dur > medM && matchR >= 0.5;
 
-    // Confiance réduite quand cette ligne/opérateur n'a pas (encore) assez de trajets pour
-    // un modèle qui lui soit propre (voir model_low_data/model_if_dedicated renvoyés par
-    // _rows_with_reasons). Icône "!" discrète, jamais un bandeau -- au survol seulement
-    // (formuler ça comme un manque de recul DE DONNÉES, jamais comme un défaut du système).
-    // RÉSERVÉE à la vue d'ensemble (`overview`) : le panneau "Expliquer un bus" affiche déjà
-    // le MÊME avertissement en tête de liste (renderExplainResults), le répéter par carte y
-    // serait redondant (retour utilisateur 2026-07-23).
-    const lowDataTip = (overview && a.model_low_data)
+    // Confiance à nuancer quand CETTE LIGNE n'a pas son propre modèle dédié : pas assez de
+    // trajets sur la ligne, donc elle s'appuie sur le modèle de l'opérateur (voire du réseau
+    // entier). Le déclencheur est `model_line_dedicated` (niveau LIGNE) et NON `model_low_data`
+    // (niveau OPÉRATEUR) -- ce dernier manquait les lignes peu fournies d'un opérateur par
+    // ailleurs bien doté, ex. ligne 84 qui n'affichait donc aucun "!" (retour utilisateur
+    // 2026-07-23). `=== false` (pas juste falsy) : ne s'affiche que si le champ est bien
+    // présent dans la réponse, pas sur une vieille réponse en cache qui l'ignore.
+    // Affichée sur TOUTES les cartes -- vue d'ensemble ET "Expliquer un bus" (l'utilisateur
+    // veut le rappel partout). Icône "!" discrète au survol, jamais un bandeau ; formulée
+    // comme un manque de recul DE DONNÉES, jamais comme un défaut du système de détection.
+    const lowDataTip = (a.model_line_dedicated === false)
         ? t(a.model_if_dedicated ? "low_data_tip_partial" : "low_data_tip_full")
         : null;
 
@@ -865,7 +887,7 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false, overv
             refBtn.disabled = true;
             refBox.innerHTML = `<p class="wc-muted"><span class="wc-spin"></span> ${t("finding_reference_trip")}</p>`;
             try {
-                await renderReferenceTrip(refBox, a.line, { card: false });
+                await renderReferenceTrip(refBox, a.line, { card: false, withStats: true });
                 refLoaded = true;
             } catch (e) {
                 refBox.innerHTML = `<div class="wc-banner error">${icon("alert")}${t("error_generic", { msg: esc(e.message) })}</div>`;
@@ -1082,53 +1104,101 @@ async function renderTripsView(root) {
         return;
     }
 
-    freshBox.innerHTML = `<div class="wc-banner info"><span class="wc-spin"></span> ${t("fetching_yesterday")}</div>`;
-    withColdStartHint(api("/api/current-anomalies", {}), freshBox).then((today) => {
-        // Toujours dire COMBIEN de trajets ont été analysés, et le dire explicitement quand
-        // AUCUN n'est anormal (retour utilisateur 2026-07-20) -- sans ça, "pas d'anomalie
-        // hier" et "les données d'hier ne sont pas encore arrivées" se ressemblaient trop.
-        const nTrips = today.total_trips ?? 0;
-        const tripsLabel = tPlural("trips_analyzed", nTrips);
-        const nAnom = today.anomaly_count ?? 0;
-        const anomLabel = nAnom === 0 ? t("no_anomaly_detected") : tPlural("anomaly_detected", nAnom);
-        let mainLine, secondLine = "";
+    // ── Récupération de la veille + INTERROGATION RÉPÉTÉE (2026-07-23) ────────────────────
+    // Au 1er chargement, la veille n'est peut-être pas ENCORE sur Render : le relais vient
+    // d'être déclenché en arrière-plan (autorun.php) et met ~1-2 min à tirer les pings puis
+    // à les pousser. Plutôt qu'un sec "aucune donnée" exigeant un rafraîchissement manuel, on
+    // montre une animation "données en cours de préparation" expliquant ce qui se passe, et
+    // on RE-INTERROGE l'API à intervalle régulier : dès que la veille arrive, elle s'affiche
+    // toute seule (bandeau + fusion des anomalies). Borné (LIVE_POLL_MAX) pour ne jamais
+    // tourner indéfiniment ni solliciter le serveur sans fin ; passé ce délai, message calme
+    // invitant à revenir plus tard. `fresh:true` saute le cache mémoire JS mais s'appuie sur
+    // le stale-while-revalidate de proxy.php -> pas de martèlement de Render.
+    const LIVE_POLL_INTERVAL_MS = 30000;
+    const LIVE_POLL_MAX = 8; // ~4 min de fenêtre : couvre largement le push du relais
+    let livePollTimer = null;
+    let livePollTries = 0;
+
+    function mergeLiveAnoms(today) {
+        // Insère les anomalies de la veille manquantes en tête (l'historique servi par le
+        // cache proxy peut être antérieur au push) -- clef (jour, bus, trip_start), jamais
+        // de doublon. Ne re-rend la liste que si l'utilisateur est encore sur la vue
+        // d'ensemble (pas s'il a recadré via "Filtrer / analyser un bus").
+        const liveAnoms = today.anomalies || [];
+        if (!liveAnoms.length) return;
+        const have = new Set(baseList.map((a) => `${a.day}|${a.bus}|${a.trip_start}`));
+        const missing = liveAnoms.filter((a) => !have.has(`${a.day}|${a.bus}|${a.trip_start}`));
+        if (missing.length) {
+            baseList = [...missing, ...baseList];
+            if (backBtn.hidden) setScope(baseList, { title: t("flagged_trips_title") });
+        }
+    }
+    function histFallbackLine(today) {
+        const n = today.total_trips ?? 0;
+        const k = today.anomaly_count ?? 0;
+        const anom = k === 0 ? t("no_anomaly_detected") : tPlural("anomaly_detected", k);
+        return `<div class="wc-muted" style="margin-top:8px">${t("historical_data_badge", { date: fmtDay(today.date) })} · ${tPlural("trips_analyzed", n)} · ${anom}</div>`;
+    }
+    function renderLiveBanner(today) {
+        const n = today.total_trips ?? 0;
+        const k = today.anomaly_count ?? 0;
+        const anom = k === 0 ? t("no_anomaly_detected") : tPlural("anomaly_detected", k);
+        const live = `<div class="wc-banner success">${LIVE_DOT}${t("live_data_badge", { date: fmtDay(today.date) })} · ${tPlural("trips_analyzed", n)} · ${anom}</div>`;
+        const hist = today.historical_date
+            ? `<div class="wc-muted" style="margin-top:4px">${t("historical_data_badge", { date: fmtDay(today.historical_date) })}</div>`
+            : "";
+        freshBox.innerHTML = live + hist;
+    }
+    function renderIncomingBanner(today, exhausted) {
+        const yday = fmtDay(today.yesterday_date || ymdYesterday());
+        if (exhausted) {
+            // Assez attendu : on n'affirme rien de faux, on invite à revenir. L'historique
+            // reste consultable ci-dessous.
+            freshBox.innerHTML = `<div class="wc-banner info">${icon("chart")}${t("live_incoming_timeout", { date: yday })}</div>${histFallbackLine(today)}`;
+            return;
+        }
+        // Animation "en préparation" : point vert pulsé + barre indéterminée + explication.
+        freshBox.innerHTML = `
+        <div class="wc-banner info wc-live-incoming">
+            <span class="wc-live-dot" aria-hidden="true"></span>
+            <div class="wc-live-incoming-body">
+                <div class="wc-live-incoming-title">${t("live_incoming_title", { date: yday })}</div>
+                <div class="wc-live-incoming-sub">${t("live_incoming_sub")}</div>
+                <div class="wc-live-incoming-bar" aria-hidden="true"><span></span></div>
+            </div>
+        </div>${histFallbackLine(today)}`;
+    }
+    function scheduleNextPoll() {
+        clearTimeout(livePollTimer);
+        livePollTimer = setTimeout(() => { livePollTries += 1; loadCurrent(true); }, LIVE_POLL_INTERVAL_MS);
+    }
+    async function loadCurrent(isPoll) {
+        let today;
+        try {
+            const req = api("/api/current-anomalies", {}, { fresh: isPoll });
+            // Indice "serveur en veille" seulement au 1er appel -- en polling, l'animation
+            // "en préparation" est déjà à l'écran, pas besoin de la remplacer.
+            today = isPoll ? await req : await withColdStartHint(req, freshBox);
+        } catch {
+            if (!isPoll) freshBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}${t("yesterday_unavailable")}</div>`;
+            if (livePollTries < LIVE_POLL_MAX) scheduleNextPoll(); // erreur réseau transitoire -> on retente (borné)
+            return;
+        }
         if (today.live) {
-            // Jour d'hier confirmé par le web service GPS -- éventuellement 0 trajet
-            // (férié, grève, rien en circulation ce jour-là), mais c'est une réponse
-            // réelle, pas une absence de donnée (voir _score_all_gps_live côté API).
-            mainLine = `<div class="wc-banner success">${LIVE_DOT}${t("live_data_badge", { date: fmtDay(today.date) })} · ${tripsLabel} · ${anomLabel}</div>`;
-            // Repère supplémentaire : la dernière journée avec de VRAIES données
-            // historiques, pour que l'admin ne se retrouve jamais sans aucune autre
-            // date exploitable sous les yeux (retour utilisateur 2026-07-22).
-            if (today.historical_date) {
-                secondLine = `<div class="wc-muted" style="margin-top:4px">${t("historical_data_badge", { date: fmtDay(today.historical_date) })}</div>`;
-            }
-        } else {
-            // Aucun signal live du tout pour hier (web service pas configuré / pas prêt /
-            // injoignable) -- on le DIT explicitement au lieu de montrer l'historique en
-            // silence comme si c'était la réponse à "hier" (retour utilisateur 2026-07-22).
-            // `today.date`/`total_trips`/`anomaly_count` restent le repli historique réel.
-            mainLine = `<div class="wc-banner info">${icon("chart")}${t("live_data_badge", { date: fmtDay(today.yesterday_date || ymdYesterday()) })} · ${t("live_data_unavailable")}</div>`;
-            secondLine = `<div class="wc-muted" style="margin-top:4px">${t("historical_data_badge", { date: fmtDay(today.date) })} · ${tripsLabel} · ${anomLabel}</div>`;
+            // Veille confirmée par le web service GPS (éventuellement 0 trajet un jour férié,
+            // mais c'est une vraie réponse). On l'affiche et on ARRÊTE d'interroger.
+            renderLiveBanner(today);
+            mergeLiveAnoms(today);
+            return;
         }
-        freshBox.innerHTML = mainLine + secondLine;
-        // Fusion : si l'historique servi (cache proxy possiblement antérieur au push du
-        // jour) ne contenait pas encore les anomalies de la veille, on les insère en tête
-        // -- clef (jour, bus, trip_start), le même trajet ne peut pas y être deux fois.
-        const liveAnoms = (today.anomalies || []);
-        if (liveAnoms.length) {
-            const have = new Set(baseList.map((a) => `${a.day}|${a.bus}|${a.trip_start}`));
-            const missing = liveAnoms.filter((a) => !have.has(`${a.day}|${a.bus}|${a.trip_start}`));
-            if (missing.length) {
-                baseList = [...missing, ...baseList];
-                // Ne re-rend la liste partagée que si l'utilisateur est encore sur la vue
-                // d'ensemble -- pas s'il a déjà recadré via "Filtrer / analyser un bus".
-                if (backBtn.hidden) setScope(baseList, { title: t("flagged_trips_title") });
-            }
-        }
-    }).catch(() => {
-        freshBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}${t("yesterday_unavailable")}</div>`;
-    });
+        // Pas encore là : animation "en préparation" + prochaine tentative (tant qu'il en reste).
+        const exhausted = livePollTries >= LIVE_POLL_MAX;
+        renderIncomingBanner(today, exhausted);
+        if (!exhausted) scheduleNextPoll();
+    }
+
+    freshBox.innerHTML = `<div class="wc-banner info"><span class="wc-spin"></span> ${t("fetching_yesterday")}</div>`;
+    loadCurrent(false);
 }
 
 // ── Panneau "Expliquer un bus" (filtres + verdict de ligne + référence) ─────────────────

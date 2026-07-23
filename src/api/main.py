@@ -706,21 +706,19 @@ def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
     # Magasin poussé D'ABORD (aucun réseau, voir le relais scripts/push_live_day.py),
     # webservice ensuite (chemin naturel en dev local où le réseau le permet).
     pings = _ingest_read(_ingest_path("gps", day, societe))
-    # `fetched` distingue "le jour est réellement prêt/joignable" (peu importe combien de
-    # trajets il contient, y compris zéro -- ex. jour férié, aucun bus en circulation) de
-    # "webservice pas configuré/pas prêt/injoignable" -- SANS ça, un jour ready-mais-vide
-    # (pings == [], donc faux au sens Python) retombait dans le même `result = None` qu'un
-    # jour vraiment indisponible, et l'appelant (_live_gps_day) perdait la date d'hier
-    # entièrement au lieu de l'afficher avec "0 trajet" (retour utilisateur 2026-07-22).
-    fetched = pings is not None
+    # `source_answered` : une source (magasin poussé OU webservice) a effectivement RÉPONDU
+    # pour ce jour -- même si sa réponse est une liste VIDE (`pings == []`, donc falsy). À
+    # distinguer de "aucune source joignable/configurée/prête" (`pings is None`).
+    source_answered = pings is not None
     if pings is None and ws.WEBSERVICE_URL:
         try:
             if ws.is_day_ready(day):
                 pings = ws.get_pings_for_day(day, societe=societe)
-                fetched = True
+                source_answered = pings is not None
         except Exception as e:
             print(f"Live GPS webservice unavailable ({societe}/{day}): {e}")
     trip_frames, stop_frames = [], []
+    scoring_crashed = False
     if pings:
         try:
             groups = ws.group_pings_by_bus_line(pings)
@@ -761,10 +759,21 @@ def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
                 stop_frames.append(fa)
         except Exception as e:
             print(f"Live GPS scoring failed ({societe}/{day}): {e}")
-            # Échec structurel (pas juste un bus-jour isolé) -- on ne sait plus si ce jour
-            # est vraiment "zéro trajet" ou juste cassé ici, donc on ne l'affirme pas.
-            fetched = False
-    if fetched:
+            scoring_crashed = True
+
+    # On ne renvoie un résultat NON-None (jour "connu", affiché comme la journée live) que
+    # dans deux cas CERTAINS :
+    #   1. on a effectivement reconstruit des trajets (`trip_frames`), OU
+    #   2. la source a explicitement répondu "aucun ping ce jour" (`pings == []`) -- aucun
+    #      bus en service (férié, grève...), une vraie réponse "0 trajet".
+    # Un lot de pings NON vide qui ne produit AUCUN trajet (lignes hors périmètre du modèle
+    # slim, reconstruction infructueuse, scoring planté) N'EST PAS une réponse "0 trajet"
+    # fiable : on retombe sur la vue historique (result=None) comme avant, au lieu de
+    # prétendre que la veille n'a eu aucun trajet et de faire DISPARAÎTRE ses trajets de la
+    # vue live (régression 2026-07-23 : "tu as cassé les requêtes live qui récupèrent les
+    # trajets de la veille").
+    definitive_no_service = source_answered and not pings and not scoring_crashed
+    if trip_frames or definitive_no_service:
         result = {
             "trips": pd.concat(trip_frames, ignore_index=True) if trip_frames else pd.DataFrame(),
             "stops": pd.concat(stop_frames, ignore_index=True) if stop_frames else pd.DataFrame(),

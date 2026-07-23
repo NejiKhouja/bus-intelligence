@@ -19,17 +19,12 @@
 
 function winicari_maybe_trigger_relay(): void
 {
-    // Serveur de dev PHP intégré (`php -S`) : MONO-THREAD. Une auto-requête HTTP vers
-    // relay.php sur CE même serveur ne peut PAS être servie tant qu'il est occupé à
-    // produire la page courante -> la connexion reste bloquée jusqu'au timeout (~300-400 ms
-    // AJOUTÉS à chaque premier chargement d'une fenêtre de 10 min). En dev on lance le
-    // relais à la main (scripts/push_live_day.py) ; on saute donc le déclencheur ici pour
-    // que `php -S localhost:8090` réponde instantanément (retour utilisateur 2026-07-23).
-    // En production (Apache/nginx/php-fpm, multi-workers) l'auto-requête fonctionne : pas
-    // de saut.
-    if (PHP_SAPI === 'cli-server') {
-        return;
-    }
+    // Ce déclencheur DOIT tourner aussi sur le serveur de dev `php -S` : c'est PRÉCISÉMENT
+    // la machine locale (seule à joindre le webservice 102.128.57.59) qui pousse les données
+    // de la veille vers l'API Render (qui, elle, ne peut PAS joindre le webservice). Le
+    // sauter couperait l'alimentation en données live -> la veille afficherait 0 trajet pour
+    // toutes les sociétés (régression 2026-07-23). Le déclenchement lui-même est désormais
+    // « tir et oubli » sur socket (voir plus bas) : ~1 ms, il ne retarde plus la page.
     if (!defined('WINICARI_WEBSERVICE_URL') || !WINICARI_WEBSERVICE_URL) {
         return; // pas de webservices configurés sur ce serveur -> relais impossible ici
     }
@@ -57,17 +52,39 @@ function winicari_maybe_trigger_relay(): void
     }
     $url .= '?' . http_build_query(['auto' => 1, 'key' => WINICARI_API_KEY]);
 
-    // Tir et oubli : timeout court, résultat ignoré -- relay.php survit à la coupure.
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT_MS => 400,
-        CURLOPT_CONNECTTIMEOUT_MS => 300,
-        CURLOPT_NOSIGNAL => 1, // requis pour les timeouts < 1s (comportement libcurl)
-        CURLOPT_SSL_VERIFYPEER => false, // auto-requête locale, éventuel certif interne
-    ]);
-    curl_exec($ch);
-    curl_close($ch);
+    // Tir et oubli VRAIMENT non bloquant (retour utilisateur 2026-07-23 : "ne bloque pas
+    // l'appli, affiche la page tout de suite et fais l'envoi vers Render en arrière-plan").
+    // On ENVOIE la requête sur une socket brute puis on ferme SANS attendre la réponse --
+    // relay.php tourne seul (ignore_user_abort, verrou, vérif "déjà poussé ?"). L'ancien
+    // curl, lui, ATTENDAIT la réponse jusqu'à 400 ms : sur le serveur de dev `php -S`
+    // (mono-thread) relay.php ne démarre même pas tant qu'index.php n'a pas fini, donc ces
+    // 400 ms étaient du temps mort pur devant la page. Ici : le noyau accepte la connexion
+    // dans son backlog, on pousse ~120 octets de requête, on ferme -> ~1 ms, aucune latence
+    // ajoutée ; relay.php est traité juste après, sans le visiteur.
+    $parts = parse_url($url);
+    if ($parts === false || empty($parts['host'])) {
+        return;
+    }
+    $https  = (($parts['scheme'] ?? 'http') === 'https');
+    $host   = $parts['host'];
+    $port   = $parts['port'] ?? ($https ? 443 : 80);
+    $target = ($parts['path'] ?? '/relay.php') . (isset($parts['query']) ? '?' . $parts['query'] : '');
+    $remote = ($https ? 'ssl://' : '') . $host;
+
+    $errno = 0;
+    $errstr = '';
+    // 1 s de timeout UNIQUEMENT pour établir la connexion (instantané en local) ; on n'attend
+    // jamais la réponse. @ + garde : si ça échoue (backlog plein, refus...), on abandonne
+    // silencieusement -- le cron/relais manuel reste le filet de sécurité.
+    $fp = @fsockopen($remote, $port, $errno, $errstr, 1.0);
+    if ($fp) {
+        $req  = "GET $target HTTP/1.1\r\n";
+        $req .= "Host: $host\r\n";
+        $req .= "Connection: Close\r\n";
+        $req .= "\r\n";
+        fwrite($fp, $req);
+        fclose($fp);
+    }
 }
 
 winicari_maybe_trigger_relay();
