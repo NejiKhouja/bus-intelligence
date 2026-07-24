@@ -467,6 +467,34 @@ function ensureLeaflet() {
     return _leafletPromise;
 }
 
+// ── Google Maps JS API (line-tracing tab) -- lazy load, same pattern as Leaflet/Chart.js
+// above, except the key comes from config.php (WINICARI_GMAPS_KEY, see index.php) instead
+// of being free/keyless like the OSM tiles Leaflet uses. Callback-based load (Google's own
+// convention) rather than a plain onload -- the SDK isn't fully initialized until its
+// callback fires.
+let _gmapsPromise = null;
+function ensureGoogleMaps(apiKey) {
+    if (window.google && window.google.maps) return Promise.resolve();
+    if (_gmapsPromise) return _gmapsPromise;
+    _gmapsPromise = new Promise((resolve, reject) => {
+        window.__wcGmapsInit = resolve;
+        const s = document.createElement("script");
+        // `loading=async` (retour utilisateur 2026-07-24 : "ouvrir la carte est lent en
+        // production") -- SANS ce paramètre, Google charge son propre bootstrap loader de
+        // façon synchrone/bloquante par défaut et l'avertit explicitement dans la console
+        // ("...has been included more than once..."/perf warning) : c'est le paramètre que
+        // Google documente lui-même comme LE correctif de performance pour l'API Maps JS.
+        // `s.async = true` en plus, par cohérence avec ensureLeaflet/ensureChartJs
+        // au-dessus (déjà implicite pour un <script> inséré dynamiquement, mais explicite
+        // vaut mieux que supposé).
+        s.async = true;
+        s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&loading=async&callback=__wcGmapsInit`;
+        s.onerror = reject;
+        document.head.appendChild(s);
+    });
+    return _gmapsPromise;
+}
+
 // Mirrors src/dashboard/app.py::render_trip_map -- same colors, same thresholds, same
 // visit-order semantics (RETOUR = seq décroissant), same legend, same detour overlay.
 function stopColor(s) {
@@ -840,13 +868,17 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false, overv
 
     // Rangée de boutons (carte + éventuellement "trajet normal de cette ligne").
     const actions = el(`<div class="wc-card-actions"></div>`);
+    // Hissé hors du `if` ci-dessous (retour utilisateur 2026-07-24 : "le trajet normal doit
+    // apparaître AU-DESSUS de la carte du trajet") -- le bloc "trajet normal" a besoin de
+    // savoir où insérer le sien par rapport à celui-ci, qu'il existe ou non.
+    let mapBox = null;
 
     // Bouton carte -- même comportement que le dashboard Streamlit : la séquence par arrêt
     // est chargée À LA DEMANDE (/api/trip-detail), pas avec la liste (une carte Leaflet par
     // carte d'alerte chargée d'office serait ruineux en DOM et en appels API).
     if (withMap && a.trip_start) {
         const btn = el(`<button class="wc-btn-secondary wc-btn-map">${icon("pin")}${t("btn_show_map")}</button>`);
-        const mapBox = el(`<div class="wc-map-holder"></div>`);
+        mapBox = el(`<div class="wc-map-holder"></div>`);
         let loaded = false;
         btn.addEventListener("click", async () => {
             if (loaded) { mapBox.hidden = !mapBox.hidden; return; }
@@ -897,7 +929,11 @@ function renderAlertCard(a, { showDriverStatsHint = true, withMap = false, overv
         });
         if (!actions.parentNode) card.appendChild(actions);
         actions.appendChild(refBtn);
-        card.appendChild(refBox);
+        // AVANT `mapBox` (pas `appendChild`, qui le mettrait après) -- retour utilisateur
+        // 2026-07-24 : "trajet normal" doit se voir sans avoir à défiler passé la carte du
+        // trajet signalé, surtout quand les deux sont ouverts en même temps.
+        if (mapBox) card.insertBefore(refBox, mapBox);
+        else card.appendChild(refBox);
     }
     return card;
 }
@@ -986,7 +1022,6 @@ function sortAnomalies(list, key) {
 // vue d'ensemble par défaut.
 async function renderTripsView(root) {
     root.innerHTML = `
-    <div id="wc-t-coverage" hidden></div>
     <div id="wc-t-freshness"><div class="wc-banner info"><span class="wc-spin"></span> ${t("checking_live_data")}</div></div>
     <button id="wc-t-explain-toggle" class="wc-btn-secondary wc-explain-toggle">
         ${icon("search")}<span>${t("explain_toggle_open")}</span>
@@ -1006,7 +1041,6 @@ async function renderTripsView(root) {
     </div>
     `;
 
-    const coverageBox = root.querySelector("#wc-t-coverage");
     const freshBox = root.querySelector("#wc-t-freshness");
     const toggleBtn = root.querySelector("#wc-t-explain-toggle");
     const explainPanel = root.querySelector("#wc-t-explain-panel");
@@ -1017,54 +1051,15 @@ async function renderTripsView(root) {
     const moreBtn = root.querySelector("#wc-t-more");
     const sortSel = root.querySelector("#wc-t-sort");
 
-    // Avertissement "couverture partielle des lignes" (retour utilisateur 2026-07-24 :
-    // un admin qui voit "2 trajets analysés" alors que sa société en a fait tourner
-    // bien plus doit comprendre que c'est une intégration en cours, pas une panne du
-    // suivi -- voir /api/line-coverage). Chargement en tâche de fond, n'attend/ne
-    // bloque jamais le reste de la vue ; silencieux en cas d'échec (accessoire, pas
-    // critique -- pas la peine d'ajouter un message d'erreur pour un simple bandeau
-    // d'information).
-    //
-    // Détail dépliable (retour utilisateur 2026-07-24, suite) : lister les lignes
-    // suivies ET celles en attente, avec une explication -- pas juste un décompte, pour
-    // qu'un admin puisse vérifier SA ligne précisément plutôt que deviner si elle en
-    // fait partie. Repliée par défaut (le résumé seul suffit la plupart du temps) --
-    // même pattern que le panneau "Expliquer un bus" (toggle + contenu construit à la
-    // 1re ouverture). Les lignes "en attente" n'ont, PAR DÉFINITION, aucune géométrie
-    // enregistrée (c'est justement ce qui manque) -- on ne peut donc afficher que leur
-    // code, jamais un nom de trajet, pour ce groupe-là.
-    api("/api/line-coverage").then((cov) => {
-        if (cov.coverage_pct == null || cov.coverage_pct >= 100) return;
-        const covered = (cov.lines || []).filter((l) => l.covered).map((l) => l.line);
-        const missing = (cov.lines || []).filter((l) => !l.covered).map((l) => l.line);
-        const chips = (codes, cls) => codes.map((c) => `<span class="wc-line-chip ${cls}">${esc(c)}</span>`).join("");
-        coverageBox.hidden = false;
-        coverageBox.innerHTML = `
-        <div class="wc-banner info wc-coverage-banner">
-            <div class="wc-coverage-summary">
-                ${icon("chart")}<span>${t("line_coverage_notice", { covered: cov.covered_lines, total: cov.total_lines })}</span>
-                <button type="button" id="wc-t-coverage-toggle" class="wc-link-muted">${t("coverage_details_show")}</button>
-            </div>
-            <div id="wc-t-coverage-detail" class="wc-coverage-detail" hidden>
-                <div class="wc-coverage-group">
-                    <div class="wc-coverage-group-label">${t("coverage_covered_label", { n: covered.length })}</div>
-                    <div class="wc-coverage-chips">${chips(covered, "ok")}</div>
-                </div>
-                <div class="wc-coverage-group">
-                    <div class="wc-coverage-group-label">${t("coverage_missing_label", { n: missing.length })}</div>
-                    <p class="wc-muted">${t("coverage_missing_explain")}</p>
-                    <div class="wc-coverage-chips">${chips(missing, "pending")}</div>
-                </div>
-            </div>
-        </div>`;
-        const covToggleBtn = coverageBox.querySelector("#wc-t-coverage-toggle");
-        const covDetail = coverageBox.querySelector("#wc-t-coverage-detail");
-        covToggleBtn.addEventListener("click", () => {
-            const opening = covDetail.hidden;
-            covDetail.hidden = !opening;
-            covToggleBtn.textContent = opening ? t("coverage_details_hide") : t("coverage_details_show");
-        });
-    }).catch(() => {});
+    // Couverture des lignes (retour utilisateur 2026-07-24 : un admin qui voit "2 trajets
+    // analysés" alors que sa société en a fait tourner bien plus doit comprendre que c'est
+    // une intégration en cours, pas une panne du suivi -- voir /api/line-coverage). Lancé
+    // tout de suite, en parallèle du reste, mais PAS rendu tout seul dans son propre
+    // bandeau -- retour utilisateur (2e round) : "je veux tout ça caché sous 'Données en
+    // direct... Plus de détails'", un seul bouton pour tout, pas deux bandeaux avec chacun
+    // le leur. `renderLiveBanner` (plus bas) attend cette promesse et fusionne son contenu
+    // avec le détail par ligne de la veille dans UN SEUL panneau dépliable.
+    const coveragePromise = api("/api/line-coverage").catch(() => null);
 
     // Préchauffe Leaflet pendant que l'utilisateur lit la liste -- la 1re carte (ou 1er
     // "trajet normal") ouverte n'attend alors plus le téléchargement du CDN (retour
@@ -1215,49 +1210,81 @@ async function renderTripsView(root) {
         const anom = k === 0 ? t("no_anomaly_detected") : tPlural("anomaly_detected", k);
         return `<div class="wc-muted" style="margin-top:8px">${t("historical_data_badge", { date: fmtDay(today.date) })} · ${tPlural("trips_analyzed", n)} · ${anom}</div>`;
     }
-    function renderLiveBanner(today) {
+    async function renderLiveBanner(today) {
         const n = today.total_trips ?? 0;
         const k = today.anomaly_count ?? 0;
         const anom = k === 0 ? t("no_anomaly_detected") : tPlural("anomaly_detected", k);
-        const live = `<div class="wc-banner success">${LIVE_DOT}${t("live_data_badge", { date: fmtDay(today.date) })} · ${tPlural("trips_analyzed", n)} · ${anom}</div>`;
+        const chips = (codes, cls) => codes.map((c) => `<span class="wc-line-chip ${cls}">${esc(c)}</span>`).join("");
+
+        // Détail par ligne, EN UN SEUL panneau dépliable (retour utilisateur 2026-07-24,
+        // 2e round : "je veux tout ça caché sous Données en direct... Plus de détails" --
+        // avant, le détail par ligne (veille) et la couverture des lignes avaient chacun
+        // leur propre bandeau + bouton, ce qui faisait deux endroits à ouvrir pour une
+        // seule question ("qu'est-ce qui se passe avec mes lignes ?"). Un seul bouton
+        // "Plus de détails", DANS la même ligne que le résumé (retour utilisateur, 1er
+        // round : "à côté, pas en dessous").
+        const byLine = today.by_line || [];
+        const ok = byLine.filter((l) => l.anomaly_count === 0).map((l) => l.line);
+        const bad = byLine.filter((l) => l.anomaly_count > 0).map((l) => l.line);
+        let byLineHtml = "";
+        if (byLine.length) {
+            byLineHtml = `
+            <div class="wc-coverage-group">
+                <div class="wc-coverage-group-label">${t("byline_ok_label", { n: ok.length })}</div>
+                <div class="wc-coverage-chips">${chips(ok, "ok")}</div>
+            </div>
+            <div class="wc-coverage-group">
+                <div class="wc-coverage-group-label">${t("byline_anomaly_label", { n: bad.length })}</div>
+                <div class="wc-coverage-chips">${chips(bad, "warn")}</div>
+            </div>`;
+        }
+
+        // Couverture des lignes -- la promesse a été lancée dès l'entrée dans la vue
+        // (voir `coveragePromise` plus haut), donc déjà résolue ou sur le point de
+        // l'être ici (arrive presque toujours avant la veille, qui attend le scoring).
+        const cov = await coveragePromise;
+        let covHtml = "";
+        if (cov && cov.coverage_pct != null && cov.coverage_pct < 100) {
+            const covered = (cov.lines || []).filter((l) => l.covered).map((l) => l.line);
+            const missing = (cov.lines || []).filter((l) => !l.covered).map((l) => l.line);
+            covHtml = `
+            <div class="wc-coverage-group">
+                <p class="wc-muted">${t("line_coverage_notice", { covered: cov.covered_lines, total: cov.total_lines })}</p>
+            </div>
+            <div class="wc-coverage-group">
+                <div class="wc-coverage-group-label">${t("coverage_covered_label", { n: covered.length })}</div>
+                <div class="wc-coverage-chips">${chips(covered, "ok")}</div>
+            </div>
+            <div class="wc-coverage-group">
+                <div class="wc-coverage-group-label">${t("coverage_missing_label", { n: missing.length })}</div>
+                <p class="wc-muted">${t("coverage_missing_explain")}</p>
+                <div class="wc-coverage-chips">${chips(missing, "pending")}</div>
+            </div>`;
+        }
+
+        const hasDetail = byLineHtml || covHtml;
+        const toggleBtn = hasDetail
+            ? `<button type="button" id="wc-t-details-toggle" class="wc-link-muted">${t("details_show")}</button>` : "";
+        const live = `<div class="wc-banner success">
+            <div class="wc-banner-row">
+                <span>${LIVE_DOT}${t("live_data_badge", { date: fmtDay(today.date) })} · ${tPlural("trips_analyzed", n)} · ${anom}</span>
+                ${toggleBtn}
+            </div>
+        </div>`;
         const hist = today.historical_date
             ? `<div class="wc-muted" style="margin-top:4px">${t("historical_data_badge", { date: fmtDay(today.historical_date) })}</div>`
             : "";
-        // Détail par ligne (retour utilisateur 2026-07-24 : voir les NOMS des lignes
-        // analysées hier -- lesquelles n'ont rien à signaler, lesquelles ont une anomalie
-        // -- pas juste le total agrégé société ci-dessus). Repliable, même pattern que le
-        // bandeau de couverture (#wc-t-coverage) juste au-dessus dans la vue. `by_line`
-        // (voir /api/current-anomalies) ne couvre QUE les lignes qui ont eu au moins un
-        // trajet hier -- les lignes sans géométrie DU TOUT restent dans le bandeau de
-        // couverture, pas ici (deux causes différentes d'absence : pas de géométrie vs.
-        // géométrie présente mais aucun trajet ce jour-là).
-        const byLine = today.by_line || [];
-        let detailHtml = "";
-        if (byLine.length) {
-            const ok = byLine.filter((l) => l.anomaly_count === 0).map((l) => l.line);
-            const bad = byLine.filter((l) => l.anomaly_count > 0).map((l) => l.line);
-            const chips = (codes, cls) => codes.map((c) => `<span class="wc-line-chip ${cls}">${esc(c)}</span>`).join("");
-            detailHtml = `
-            <button type="button" id="wc-t-byline-toggle" class="wc-link-muted" style="margin-top:6px">${t("byline_details_show")}</button>
-            <div id="wc-t-byline-detail" class="wc-coverage-detail" hidden>
-                <div class="wc-coverage-group">
-                    <div class="wc-coverage-group-label">${t("byline_ok_label", { n: ok.length })}</div>
-                    <div class="wc-coverage-chips">${chips(ok, "ok")}</div>
-                </div>
-                <div class="wc-coverage-group">
-                    <div class="wc-coverage-group-label">${t("byline_anomaly_label", { n: bad.length })}</div>
-                    <div class="wc-coverage-chips">${chips(bad, "warn")}</div>
-                </div>
-            </div>`;
-        }
+        const detailHtml = hasDetail
+            ? `<div id="wc-t-details" class="wc-coverage-detail" hidden>${byLineHtml}${covHtml}</div>` : "";
+
         freshBox.innerHTML = live + hist + detailHtml;
-        if (byLine.length) {
-            const blToggle = freshBox.querySelector("#wc-t-byline-toggle");
-            const blDetail = freshBox.querySelector("#wc-t-byline-detail");
-            blToggle.addEventListener("click", () => {
-                const opening = blDetail.hidden;
-                blDetail.hidden = !opening;
-                blToggle.textContent = opening ? t("byline_details_hide") : t("byline_details_show");
+        if (hasDetail) {
+            const dToggle = freshBox.querySelector("#wc-t-details-toggle");
+            const dDetail = freshBox.querySelector("#wc-t-details");
+            dToggle.addEventListener("click", () => {
+                const opening = dDetail.hidden;
+                dDetail.hidden = !opening;
+                dToggle.textContent = opening ? t("details_hide") : t("details_show");
             });
         }
     }
@@ -1299,7 +1326,7 @@ async function renderTripsView(root) {
         if (today.live) {
             // Veille confirmée par le web service GPS (éventuellement 0 trajet un jour férié,
             // mais c'est une vraie réponse). On l'affiche et on ARRÊTE d'interroger.
-            renderLiveBanner(today);
+            await renderLiveBanner(today);
             liveDate = today.date;
             mergeLiveAnoms(today);
             // mergeLiveAnoms() ne redessine QUE s'il avait de nouvelles anomalies à
@@ -1677,12 +1704,17 @@ async function renderTicketsView(root) {
 function _tcell(v, fmt) { return (v === null || v === undefined) ? "—" : fmt(v); }
 
 function stationTableHtml(rows, withType) {
-    let html = `<table class="wc-table"><thead><tr><th>${t("col_stop")}</th><th>${t("col_tickets")}</th><th>${t("col_revenue")}</th><th>${t("col_avg_price")}</th>${withType ? `<th>${t("col_type")}</th>` : ""}</tr></thead><tbody>`;
+    // Enveloppe scrollable horizontalement (retour utilisateur 2026-07-24 : "rendre tout le
+    // widget responsive sur téléphone") -- sans elle, une table avec assez de colonnes
+    // (ici jusqu'à 5) force le CONTENEUR PARENT à déborder sur un écran étroit, ce qui fait
+    // défiler toute la page horizontalement, pas juste la table. Voir aussi la note
+    // générale sur .wc-table-wrap plus bas dans style.css.
+    let html = `<div class="wc-table-wrap"><table class="wc-table"><thead><tr><th>${t("col_stop")}</th><th>${t("col_tickets")}</th><th>${t("col_revenue")}</th><th>${t("col_avg_price")}</th>${withType ? `<th>${t("col_type")}</th>` : ""}</tr></thead><tbody>`;
     for (const r of rows) {
         const type = r.anomaly ? (r.is_good_anomaly ? t("type_good") : t("type_watch")) : "—";
         html += `<tr><td>${esc(r.station)}</td><td>${r.nbr_ticket}</td><td>${r.recette.toFixed(0)} DT</td><td>${r.avg_fare.toFixed(2)} DT</td>${withType ? `<td>${esc(type)}</td>` : ""}</tr>`;
     }
-    html += `</tbody></table>`;
+    html += `</tbody></table></div>`;
     return html;
 }
 // ALLER/RETOUR séparés quand la direction est connue pour ce bus-jour (voir
@@ -1731,7 +1763,7 @@ function renderTicketCard(a, clientSafe) {
     // : "je veux plus de détails comme dans app.py, un tableau etc etc") -- mirrors
     // src/dashboard/app.py's `ctx` DataFrame (Ce jour / Médiane ligne / Médiane de ce bus).
     if (a.line_median_avg_fare !== undefined && a.line_median_avg_fare !== null) {
-        html += `<table class="wc-table" style="margin-top:8px">
+        html += `<div class="wc-table-wrap"><table class="wc-table" style="margin-top:8px">
             <thead><tr><th></th><th>${t("ctx_table_this_day")}</th><th>${t("ctx_table_line_median")}</th><th>${t("ctx_table_bus_median")}</th></tr></thead>
             <tbody>
                 <tr><td>${t("metric_tickets")}</td><td>${a.nbr_ticket}</td>
@@ -1744,7 +1776,7 @@ function renderTicketCard(a, clientSafe) {
                     <td>${_tcell(a.line_median_avg_fare, (v) => v.toFixed(2) + " DT")}</td>
                     <td>${_tcell(a.bus_median_avg_fare, (v) => v.toFixed(2) + " DT")}</td></tr>
             </tbody>
-        </table>`;
+        </table></div>`;
     }
 
     // Ligne structurellement atypique (quasi tous ses jours signalés) -- pas un incident de
@@ -1878,7 +1910,7 @@ async function renderDriversView(root) {
             let rows = drivers.map((r) => `<tr>
                 <td>${esc(r.driver_code)}</td><td>${r.n_trips}</td><td>${r.n_anomalies}</td>
                 <td>${r.anomaly_rate.toFixed(1)}%</td></tr>`).join("");
-            box.innerHTML = `<table class="wc-table"><thead><tr><th>${t("col_code")}</th><th>${t("col_trips")}</th><th>${t("col_anomalies")}</th><th>${t("col_rate")}</th></tr></thead><tbody>${rows}</tbody></table>`;
+            box.innerHTML = `<div class="wc-table-wrap"><table class="wc-table"><thead><tr><th>${t("col_code")}</th><th>${t("col_trips")}</th><th>${t("col_anomalies")}</th><th>${t("col_rate")}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
         } catch (e) {
             box.innerHTML = `<div class="wc-banner error">${t("error_generic", { msg: esc(e.message) })}</div>`;
         }
@@ -1941,8 +1973,327 @@ async function renderDriversView(root) {
     root.querySelector("#wc-dr-code").addEventListener("keydown", (e) => { if (e.key === "Enter") lookup(); });
 }
 
+// ── View: Tracer une nouvelle ligne ─────────────────────────────────────────────────────
+// Port du "route_demo" Streamlit (src/dashboard/route_demo.py) : clic sur la carte pour
+// poser des arrêts (le 1er = terminus "T"), Annuler/Effacer, Google Directions API pour un
+// itinéraire routier réel, horaire estimé à partir d'une heure de départ. RIEN n'est
+// persisté -- outil de repérage/démo, pas un formulaire d'ajout de ligne définitif (comme
+// côté Streamlit). Différences volontaires par rapport à la version Streamlit (retour
+// utilisateur 2026-07-24) :
+//   - clé Google Maps lue depuis WINICARI_GMAPS_KEY (config.php, voir index.php), jamais
+//     redemandée à l'admin à chaque session -- la version Streamlit la faisait recoller à
+//     chaque fois faute de config serveur équivalente.
+//   - PAS de 2e colonne "estimation vitesse flotte" (route_demo.py l'appelait FLEET_AVG_
+//     SPEED_KMH/FLEET_AVG_DWELL_S) -- seule la durée RÉELLE Google Directions est affichée
+//     ("je ne veux que l'ETA Google Maps, pas l'IA").
+//   - temps d'arrêt (dwell) éditable PAR ARRÊT et OPTIONNEL (vide = ignoré, pas de valeur
+//     par défaut imposée à tous) -- remplace le FLEET_AVG_DWELL_S fixe (30s partout) de la
+//     version Streamlit.
+async function renderTraceLineView(root) {
+    root.innerHTML = `
+    <div class="wc-banner info">${icon("info")}${t("traceline_not_ai_notice")}</div>
+    <div id="wc-tl-status"></div>
+    <div class="wc-card wc-traceline-layout">
+        <div class="wc-traceline-map">
+            <div id="wc-tl-map"></div>
+            <p class="wc-muted">${t("traceline_map_help")}</p>
+        </div>
+        <div class="wc-traceline-side">
+            <div class="wc-field">
+                <label>${t("traceline_line_name")}</label>
+                <input type="text" id="wc-tl-line-name" placeholder="${t("traceline_line_name_placeholder")}">
+            </div>
+            <h4>${t("traceline_stops_header")}</h4>
+            <div id="wc-tl-stops"></div>
+            <div class="wc-traceline-actions">
+                <button type="button" id="wc-tl-undo" class="wc-btn-secondary" disabled>${t("traceline_undo_btn")}</button>
+                <button type="button" id="wc-tl-clear" class="wc-btn-secondary" disabled>${t("traceline_clear_btn")}</button>
+            </div>
+            <div class="wc-field">
+                <label>${t("traceline_departure_time")}</label>
+                <input type="time" id="wc-tl-depart" value="06:00">
+            </div>
+            <button type="button" id="wc-tl-finish" disabled>${t("traceline_finish_btn")}</button>
+        </div>
+    </div>
+    <div id="wc-tl-timetable"></div>
+    `;
+
+    const statusBox = root.querySelector("#wc-tl-status");
+    const mapDiv = root.querySelector("#wc-tl-map");
+    const stopsBox = root.querySelector("#wc-tl-stops");
+    const undoBtn = root.querySelector("#wc-tl-undo");
+    const clearBtn = root.querySelector("#wc-tl-clear");
+    const lineNameInput = root.querySelector("#wc-tl-line-name");
+    const departInput = root.querySelector("#wc-tl-depart");
+    const finishBtn = root.querySelector("#wc-tl-finish");
+    const timetableBox = root.querySelector("#wc-tl-timetable");
+
+    if (!WINICARI_GMAPS_KEY) {
+        statusBox.innerHTML = `<div class="wc-banner warn">${icon("alert")}${t("traceline_no_key_warning")}</div>`;
+        return;
+    }
+    // Animation de chargement pendant que le SDK Google Maps se télécharge (retour
+    // utilisateur 2026-07-24) -- sans ça, #wc-tl-map restait vide/blanc pendant ce temps,
+    // pas de retour visuel qu'il se passe quelque chose. `new google.maps.Map(mapDiv, ...)`
+    // plus bas remplace ce contenu de lui-même une fois la carte prête, pas besoin de
+    // l'effacer explicitement.
+    mapDiv.innerHTML = `<div class="wc-tl-map-loading"><span class="wc-spin"></span> ${t("traceline_loading_map")}</div>`;
+    try {
+        await ensureGoogleMaps(WINICARI_GMAPS_KEY);
+    } catch {
+        statusBox.innerHTML = `<div class="wc-banner error">${t("traceline_load_failed")}</div>`;
+        return;
+    }
+
+    let stops = [];     // [{lat, lng}], 1er = terminus
+    let dwellMin = [];  // même longueur que `stops` -- minutes ou null (optionnel) par arrêt
+    let stopNames = []; // même longueur que `stops` -- nom personnalisé ou null (optionnel,
+                         // retour utilisateur 2026-07-24 : "choisir les noms des arrêts")
+    let legs = null;    // legs Google Directions une fois "Terminé" cliqué
+    let markers = [];
+
+    // Nom affiché pour l'arrêt d'indice `i` -- le nom personnalisé s'il y en a un, sinon
+    // le nom par défaut (Terminus pour le premier ET le dernier, "Arrêt N" pour les
+    // intermédiaires). Centralisé ici -- utilisé par la liste latérale, l'horaire ET
+    // l'export, pour que les trois s'accordent toujours.
+    function stopLabel(i) {
+        const isEnd = i === 0 || i === stops.length - 1;
+        const def = isEnd ? t("traceline_terminal_label") : `${t("traceline_stop_label")} ${i}`;
+        const custom = (stopNames[i] || "").trim();
+        return custom || def;
+    }
+
+    const map = new google.maps.Map(mapDiv, {
+        center: { lat: 35.0, lng: 9.5 }, zoom: 8, // Tunisie centrale, repère par défaut
+        streetViewControl: false, mapTypeControl: false,
+    });
+    const directionsRenderer = new google.maps.DirectionsRenderer({ map, suppressMarkers: true });
+    const directionsService = new google.maps.DirectionsService();
+
+    function resetRoute() {
+        directionsRenderer.setDirections({ routes: [] });
+        legs = null;
+        timetableBox.innerHTML = "";
+    }
+
+    function drawStopsList() {
+        stopsBox.innerHTML = "";
+        if (!stops.length) {
+            stopsBox.innerHTML = `<p class="wc-muted">${t("traceline_no_stops_yet")}</p>`;
+        } else {
+            stops.forEach((s, i) => {
+                const isLast = i === stops.length - 1;
+                // Champ de temps d'arrêt affiché SEULEMENT pour les arrêts intermédiaires
+                // (pas l'origine, pas le terminus final) -- drawTimetable() n'applique de
+                // toute façon dwellMin QUE pour ceux-là (voir sa boucle : `dwellMin[i+1]`
+                // sur les legs, jamais dwellMin[0]) : un temps de terminus n'a pas de sens
+                // dans un horaire ancré sur l'heure de DÉPART, donc pas la peine d'offrir
+                // un champ qui n'aurait aucun effet -- ça aurait trompé l'admin.
+                const isIntermediate = i > 0 && !isLast;
+                // Nom éditable (retour utilisateur 2026-07-24 : "je veux pouvoir choisir les
+                // noms des arrêts") -- le nom par défaut (Terminus/Arrêt N) reste en
+                // `placeholder`, jamais forcé dans `value` : laisser le champ vide garde le
+                // comportement par défaut, le remplir le personnalise. Optionnel PAR ARRÊT,
+                // comme le temps d'arrêt à côté.
+                stopsBox.appendChild(el(`<div class="wc-traceline-stop-row">
+                    <input type="text" class="wc-traceline-stop-name" data-idx="${i}" placeholder="${esc(stopLabel(i))}" value="${esc(stopNames[i] || "")}">
+                    <span class="wc-traceline-stop-coords wc-muted">${s.lat.toFixed(5)}, ${s.lng.toFixed(5)}</span>
+                    ${isIntermediate ? `<input type="number" min="0" step="1" class="wc-traceline-dwell" data-idx="${i}" placeholder="${t("traceline_dwell_placeholder")}" value="${dwellMin[i] ?? ""}">` : "<span></span>"}
+                </div>`));
+            });
+            stopsBox.querySelectorAll(".wc-traceline-stop-name").forEach((inp) => {
+                inp.addEventListener("input", () => {
+                    const idx = parseInt(inp.dataset.idx, 10);
+                    stopNames[idx] = inp.value.trim() || null;
+                    if (legs) drawTimetable(); // l'horaire déjà affiché se met à jour en direct
+                });
+            });
+            stopsBox.querySelectorAll(".wc-traceline-dwell").forEach((inp) => {
+                inp.addEventListener("input", () => {
+                    const idx = parseInt(inp.dataset.idx, 10);
+                    dwellMin[idx] = inp.value === "" ? null : Math.max(0, parseInt(inp.value, 10) || 0);
+                    if (legs) drawTimetable(); // l'horaire déjà affiché se met à jour en direct
+                });
+            });
+        }
+        undoBtn.disabled = !stops.length;
+        clearBtn.disabled = !stops.length;
+        finishBtn.disabled = stops.length < 2;
+    }
+
+    function addStop(latLng) {
+        stops.push({ lat: latLng.lat(), lng: latLng.lng() });
+        dwellMin.push(null);
+        stopNames.push(null);
+        markers.push(new google.maps.Marker({
+            position: latLng, map,
+            label: { text: stops.length === 1 ? "T" : String(stops.length - 1), color: "#fff", fontWeight: "bold" },
+        }));
+        resetRoute();
+        drawStopsList();
+    }
+    map.addListener("click", (e) => addStop(e.latLng));
+
+    undoBtn.addEventListener("click", () => {
+        if (!stops.length) return;
+        stops.pop();
+        dwellMin.pop();
+        stopNames.pop();
+        const m = markers.pop();
+        if (m) m.setMap(null);
+        resetRoute();
+        drawStopsList();
+    });
+    clearBtn.addEventListener("click", () => {
+        stops = [];
+        dwellMin = [];
+        stopNames = [];
+        markers.forEach((m) => m.setMap(null));
+        markers = [];
+        resetRoute();
+        drawStopsList();
+    });
+
+    finishBtn.addEventListener("click", () => {
+        if (stops.length < 2) return;
+        statusBox.innerHTML = `<div class="wc-banner info"><span class="wc-spin"></span> ${t("traceline_computing")}</div>`;
+        const origin = stops[0];
+        const destination = stops[stops.length - 1];
+        const waypoints = stops.slice(1, -1).map((s) => ({ location: new google.maps.LatLng(s.lat, s.lng), stopover: true }));
+        directionsService.route({
+            origin, destination, waypoints, optimizeWaypoints: false,
+            travelMode: google.maps.TravelMode.DRIVING,
+        }, (result, status) => {
+            if (status === "OK") {
+                directionsRenderer.setDirections(result);
+                legs = result.routes[0].legs.map((l) => ({
+                    distance_m: l.distance ? l.distance.value : null,
+                    duration_s: l.duration ? l.duration.value : null,
+                }));
+                statusBox.innerHTML = "";
+                drawTimetable();
+            } else {
+                statusBox.innerHTML = `<div class="wc-banner error">${t("traceline_route_failed", { status: esc(status) })}</div>`;
+            }
+        });
+    });
+
+    // Changer l'heure de départ ne change AUCUN leg Google (juste le décalage de base) --
+    // pas la peine de rappeler l'API pour ça, un simple redessin de l'horaire suffit.
+    departInput.addEventListener("change", () => { if (legs) drawTimetable(); });
+
+    function fmtClock(secondsFromMidnight) {
+        secondsFromMidnight = ((secondsFromMidnight % 86400) + 86400) % 86400;
+        const h = Math.floor(secondsFromMidnight / 3600);
+        const m = Math.floor((secondsFromMidnight % 3600) / 60);
+        return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    }
+
+    // Téléchargement direct (Blob + lien éphémère), aucune dépendance externe -- CSV
+    // (Excel l'ouvre nativement) et texte brut, incluant les coordonnées de CHAQUE arrêt
+    // (retour utilisateur 2026-07-24 : "l'excel doit aussi avoir les coordonnées des
+    // arrêts"), pas seulement nom + heure.
+    function downloadBlob(filename, content, mime) {
+        const blob = new Blob([content], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+    // Nom de fichier à partir du nom de ligne saisi (retour utilisateur 2026-07-24 : "je
+    // veux pouvoir donner un nom à la ligne et sauvegarder le fichier avec ce nom") --
+    // n'importe quelle lettre/chiffre (toute langue, via \p{L}/\p{N} -- pas juste a-z,
+    // sinon un nom arabe ressortirait vide) est gardé, le reste (/, \, :, etc. -- invalides
+    // dans un nom de fichier sur la plupart des OS) est retiré. Repli sur "trajet" si vide.
+    function safeFilename(name) {
+        const cleaned = (name || "").trim()
+            .replace(/[^\p{L}\p{N}_\- ]+/gu, "")
+            .trim().replace(/\s+/g, "_");
+        return cleaned || "trajet";
+    }
+    function exportBaseName() {
+        return `${safeFilename(lineNameInput.value)}_${todayStamp()}`;
+    }
+    function exportCsv(rows) {
+        const esc2 = (v) => `"${String(v).replace(/"/g, '""')}"`;
+        const header = ["#", t("traceline_col_stop"), t("traceline_col_lat"), t("traceline_col_lng"), t("traceline_col_time")];
+        const lines = [header.map(esc2).join(",")];
+        rows.forEach((r, i) => lines.push(
+            [i + 1, r.label, r.lat.toFixed(6), r.lng.toFixed(6), r.time].map(esc2).join(",")));
+        // BOM UTF-8 -- sans lui, Excel (surtout sous Windows) ouvre les accents FR/AR d'un
+        // simple .csv en charabia, faute d'indice d'encodage explicite dans le fichier.
+        downloadBlob(`${exportBaseName()}.csv`, "\uFEFF" + lines.join("\r\n"), "text/csv;charset=utf-8");
+    }
+    function exportText(rows) {
+        const lineName = lineNameInput.value.trim();
+        const header = lineName ? [`${t("traceline_line_name")} : ${lineName}`, ""] : [];
+        const lines = rows.map((r, i) => `${i + 1}. ${r.label} — ${r.time} (${r.lat.toFixed(6)}, ${r.lng.toFixed(6)})`);
+        downloadBlob(`${exportBaseName()}.txt`, [...header, ...lines].join("\r\n"), "text/plain;charset=utf-8");
+    }
+    function todayStamp() {
+        return new Date().toISOString().slice(0, 10);
+    }
+
+    // Horaire à partir de la durée RÉELLE Google Directions (legs) + temps d'arrêt manuel
+    // OPTIONNEL par arrêt -- pas de vitesse moyenne flotte, pas de dwell par défaut imposé
+    // (voir la note en tête de fonction).
+    function drawTimetable() {
+        if (!legs) return;
+        const [dh, dm] = (departInput.value || "06:00").split(":").map(Number);
+        let cum = (dh || 0) * 3600 + (dm || 0) * 60;
+        const totalDistKm = legs.reduce((s, l) => s + (l.distance_m || 0), 0) / 1000;
+        let totalDwellS = 0;
+
+        // `rows` porte aussi lat/lng -- réutilisé tel quel par l'export (retour utilisateur :
+        // "les coordonnées des arrêts" dans l'export), pas de 2e passe séparée qui pourrait
+        // diverger de ce qui est réellement affiché à l'écran.
+        const rows = [{ label: stopLabel(0), lat: stops[0].lat, lng: stops[0].lng, time: fmtClock(cum) }];
+        legs.forEach((leg, i) => {
+            cum += leg.duration_s || 0;
+            const isLast = i === legs.length - 1;
+            const s = stops[i + 1];
+            rows.push({ label: stopLabel(i + 1), lat: s.lat, lng: s.lng, time: fmtClock(cum) });
+            const dwell = dwellMin[i + 1]; // arrêt ATTEINT par ce leg -- dwell éventuel avant de repartir
+            if (!isLast && dwell) {
+                cum += dwell * 60;
+                totalDwellS += dwell * 60;
+            }
+        });
+
+        const totalGoogleS = legs.reduce((s, l) => s + (l.duration_s || 0), 0);
+        timetableBox.innerHTML = `
+        <div class="wc-card">
+            <h4>${t("traceline_timetable_header")}</h4>
+            <p class="wc-muted">${t("traceline_timetable_caption", { dist: totalDistKm.toFixed(1), n_stops: stops.length })}</p>
+            <div class="wc-table-wrap">
+                <table class="wc-table">
+                    <thead><tr><th>${t("traceline_col_stop")}</th><th>${t("traceline_col_lat")}</th><th>${t("traceline_col_lng")}</th><th>${t("traceline_col_time")}</th></tr></thead>
+                    <tbody>${rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${r.lat.toFixed(5)}</td><td>${r.lng.toFixed(5)}</td><td>${r.time}</td></tr>`).join("")}</tbody>
+                </table>
+            </div>
+            <div class="wc-metrics" style="margin-top:12px">
+                <div class="wc-metric"><div class="wc-metric-label">${t("traceline_metric_distance")}</div><div class="wc-metric-value">${totalDistKm.toFixed(1)} km</div></div>
+                <div class="wc-metric"><div class="wc-metric-label">${t("traceline_metric_google_eta")}</div><div class="wc-metric-value">${fmtDuration((totalGoogleS + totalDwellS) / 60)}</div></div>
+            </div>
+            <div class="wc-traceline-export">
+                <button type="button" id="wc-tl-export-csv" class="wc-btn-secondary">${t("traceline_export_csv")}</button>
+                <button type="button" id="wc-tl-export-txt" class="wc-btn-secondary">${t("traceline_export_txt")}</button>
+            </div>
+        </div>`;
+        timetableBox.querySelector("#wc-tl-export-csv").addEventListener("click", () => exportCsv(rows));
+        timetableBox.querySelector("#wc-tl-export-txt").addEventListener("click", () => exportText(rows));
+    }
+
+    drawStopsList();
+}
+
 // ── Tab wiring ───────────────────────────────────────────────────────────────────────────
-const VIEWS = { trips: renderTripsView, trends: renderTrendsView, tickets: renderTicketsView, drivers: renderDriversView };
+const VIEWS = {
+    trips: renderTripsView, trends: renderTrendsView, tickets: renderTicketsView,
+    drivers: renderDriversView, traceline: renderTraceLineView,
+};
 
 function init() {
     const root = document.getElementById("wc-view-root");

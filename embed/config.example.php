@@ -25,3 +25,14 @@ define('WINICARI_FALLBACK_COMPANIES', [
 // journée de la veille vers l'API Render, voir relay.php). Laisser vide si le relais
 // tourne ailleurs.
 define('WINICARI_WEBSERVICE_URL', 'http://102.128.57.59:8123');
+
+// Clé Google Maps JavaScript API -- onglet "Tracer une nouvelle ligne" (voir
+// assets/app.js::renderTraceLineView). ATTENTION, différent de WINICARI_API_KEY
+// au-dessus : celle-ci N'A PAS BESOIN de rester secrète -- le SDK Google Maps JS
+// s'exécute dans le navigateur, donc cette clé apparaît forcément dans le code source
+// de la page (visible via view-source). C'est le modèle de sécurité normal de Google :
+// on la restreint côté Google Cloud Console (API Google Maps Platform > Identifiants)
+// par référent HTTP (le domaine de ce site) et par API activée (Maps JavaScript API +
+// Directions API uniquement), pas en la cachant. Stockée ici uniquement pour que
+// l'admin n'ait pas à la recoller à chaque session (retour utilisateur 2026-07-24).
+define('WINICARI_GOOGLE_MAPS_KEY', 'REPLACE_ME');

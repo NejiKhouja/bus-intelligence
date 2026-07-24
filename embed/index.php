@@ -44,6 +44,8 @@ $dir = $lang === 'ar' ? 'rtl' : 'ltr';
 <link rel="preconnect" href="https://unpkg.com" crossorigin>
 <link rel="preconnect" href="https://tile.openstreetmap.org" crossorigin>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://maps.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://maps.gstatic.com" crossorigin>
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
@@ -105,6 +107,7 @@ $langSwitchHtml = '
         <button class="wc-tab" data-view="trends" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="14"/></svg><?= htmlspecialchars(wt('tab_trends')) ?></button>
         <button class="wc-tab" data-view="tickets" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 0 1 0 6v4a1 1 0 0 0 1 1h18a1 1 0 0 0 1-1v-4a3 3 0 0 1 0-6V5a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1z"/><line x1="13" y1="5" x2="13" y2="19" stroke-dasharray="2 3"/></svg><?= htmlspecialchars(wt('tab_tickets')) ?></button>
         <button class="wc-tab" data-view="drivers" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="8" cy="11" r="2"/><path d="M5.5 17c.5-2 4.5-2 5 0"/><line x1="14" y1="9" x2="19" y2="9"/><line x1="14" y1="13" x2="18" y2="13"/></svg><?= htmlspecialchars(wt('tab_drivers')) ?></button>
+        <button class="wc-tab" data-view="traceline" role="tab"><svg class="wc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg><?= htmlspecialchars(wt('tab_traceline')) ?></button>
     </nav>
 
     <main id="wc-view-root" class="wc-view-root">
@@ -121,6 +124,12 @@ $langSwitchHtml = '
     const WINICARI_COMPANY = <?= json_encode($company) ?>;
     const WINICARI_PROXY = 'proxy.php';
     const WINICARI_LANG = <?= json_encode($lang) ?>;
+    // Voir config.php -- clé publique par design (SDK Google Maps JS), restreinte par
+    // référent HTTP côté Google Cloud Console, pas cachée comme WINICARI_API_KEY (qui,
+    // lui, ne quitte jamais proxy.php -- voir sa note en tête de ce fichier).
+    const WINICARI_GMAPS_KEY = <?= json_encode(
+        (defined('WINICARI_GOOGLE_MAPS_KEY') && WINICARI_GOOGLE_MAPS_KEY !== 'REPLACE_ME') ? WINICARI_GOOGLE_MAPS_KEY : null
+    ) ?>;
 </script>
 <script src="assets/i18n.js"></script>
 <script src="assets/app.js"></script>

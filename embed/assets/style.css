@@ -126,7 +126,7 @@
 .wc-picker-form select { flex: 1; }
 
 /* ── Form controls ───────────────────────────────────────────────────────────── */
-.wc-embed select, .wc-embed input[type="text"], .wc-embed input[type="date"], .wc-embed input[type="number"] {
+.wc-embed select, .wc-embed input[type="text"], .wc-embed input[type="date"], .wc-embed input[type="number"], .wc-embed input[type="time"] {
     background: var(--wc-bg-elevated);
     border: 1px solid var(--wc-border);
     color: var(--wc-text);
@@ -345,6 +345,14 @@
 }
 
 /* ── Tables ──────────────────────────────────────────────────────────────────── */
+/* Enveloppe scrollable horizontalement (retour utilisateur 2026-07-24 : "rendre tout le
+   widget responsive sur téléphone") -- toute table de 4+ colonnes (contexte billetterie,
+   détail par station ALLER/RETOUR, horaire de la ligne tracée...) peut dépasser la largeur
+   d'un écran de téléphone ; SANS cette enveloppe, le débordement se propage à la CARTE
+   parente puis à toute la page (scroll horizontal du corps entier -- exactement ce qu'il
+   ne faut jamais laisser arriver, voir la règle générale du design system). Avec elle,
+   seule la table elle-même défile, le reste de la mise en page reste fixe. */
+.wc-table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .wc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .wc-table th, .wc-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--wc-border-soft); }
 .wc-table th { color: var(--wc-text-muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .02em; }
@@ -426,33 +434,52 @@
     margin: 4px 0 10px;
 }
 .wc-anomaly-group-label .wc-live-dot { margin-right: 0; }
+/* Rendu plus visible (retour utilisateur 2026-07-24 : le séparateur d'origine -- ligne 1px
+   + texte gris discret -- se voyait à peine) : ligne 2px, texte plein contraste dans une
+   pastille bordée plutôt que flottant nu sur la ligne -- se lit comme un vrai changement de
+   section, pas comme un simple `wc-muted` de plus. */
 .wc-anomaly-divider {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin: 22px 0 14px;
-    color: var(--wc-text-muted);
-    font-size: 12px;
+    gap: 12px;
+    margin: 28px 0 16px;
+    font-size: 12.5px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: .04em;
+    letter-spacing: .05em;
+}
+.wc-anomaly-divider span {
+    color: var(--wc-text);
+    background: var(--wc-bg-elevated);
+    border: 1px solid var(--wc-border);
+    border-radius: 999px;
+    padding: 4px 14px;
+    white-space: nowrap;
 }
 .wc-anomaly-divider::before,
 .wc-anomaly-divider::after {
     content: "";
     flex: 1;
-    height: 1px;
+    height: 2px;
     background: var(--wc-border);
 }
 
-/* ── Bandeau "couverture partielle des lignes" (voir /api/line-coverage, app.js) ────────
-   Résumé toujours visible + détail dépliable listant les lignes suivies vs en attente
-   d'intégration, chacune comme un "chip" -- reprend la forme des tags de wc-ms-tag (pilule,
-   même famille visuelle) mais en lecture seule (pas de bouton de suppression), avec deux
-   variantes de couleur pour distinguer les deux groupes d'un coup d'oeil. */
-.wc-coverage-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.wc-coverage-summary > span { flex: 1; min-width: 200px; }
-.wc-coverage-summary .wc-link-muted { white-space: nowrap; }
+/* ── Détail "Plus de détails" du bandeau "Données en direct" (voir renderLiveBanner dans
+   app.js) -- un seul panneau dépliable qui fusionne DEUX sources : le statut des lignes
+   analysées hier (/api/current-anomalies `by_line`) ET la couverture géométrique des
+   lignes (/api/line-coverage), auparavant deux bandeaux séparés avec chacun leur bouton
+   (retour utilisateur 2026-07-24, 2e round : "je veux tout ça caché sous Données en
+   direct... Plus de détails"). Chaque ligne listée est un "chip" -- reprend la forme des
+   tags de wc-ms-tag (pilule, même famille visuelle) mais en lecture seule (pas de bouton
+   de suppression), avec des variantes de couleur pour distinguer les groupes d'un coup
+   d'oeil. Repliée par défaut. */
+.wc-banner-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.wc-banner-row > span { flex: 1; min-width: 200px; }
+/* `button.wc-link-muted` (voir plus haut) porte `margin-bottom: 10px`, pensé pour le
+   bouton "retour à la vue d'ensemble" sur SA PROPRE ligne -- réutilisé ici À CÔTÉ du texte
+   dans une ligne flex, cette marge le poussait vers le bas et le désalignait visiblement
+   du texte voisin (retour utilisateur 2026-07-24 : "pas bien centré"). Neutralisée ici. */
+.wc-banner-row .wc-link-muted { white-space: nowrap; margin: 0; }
 .wc-coverage-detail { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--wc-border-soft); }
 .wc-coverage-group + .wc-coverage-group { margin-top: 14px; }
 .wc-coverage-group-label {
@@ -740,11 +767,100 @@ button.wc-link-muted:hover { color: var(--wc-orange); }
 }
 @keyframes wc-spin { to { transform: rotate(360deg); } }
 
-/* ── Responsive ──────────────────────────────────────────────────────────────── */
+/* ── Onglet "Tracer une nouvelle ligne" (voir renderTraceLineView dans app.js) ──────────
+   Port du "route_demo" Streamlit (src/dashboard/route_demo.py) -- carte + panneau latéral
+   côte à côte, comme la mise en page Streamlit à 2 colonnes (3:2). */
+.wc-traceline-layout { display: grid; grid-template-columns: 3fr 2fr; gap: 18px; align-items: start; }
+#wc-tl-map {
+    width: 100%;
+    height: 480px;
+    border-radius: var(--wc-radius-sm);
+    overflow: hidden;
+    border: 1px solid var(--wc-border);
+}
+.wc-tl-map-loading {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--wc-text-muted);
+    font-size: 13px;
+    background: var(--wc-bg-elevated);
+}
+.wc-traceline-side h4 { margin-top: 0; }
+/* `flex-wrap` + `min-width` (retour utilisateur 2026-07-24 : "des boutons sont mal placés")
+   -- SANS ça, 2 boutons à `flex:1` dans une colonne latérale étroite (le widget est fait
+   pour être embarqué dans un conteneur hôte de largeur inconnue, pas juste plein écran)
+   pouvaient se comprimer au point de faire déborder ou tronquer leur texte ; ici, ils
+   passent proprement à la ligne plutôt que de s'écraser. */
+.wc-traceline-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 16px; }
+.wc-traceline-actions button { flex: 1; min-width: 130px; }
+#wc-tl-finish { width: 100%; margin-top: 14px; }
+.wc-traceline-stop-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--wc-border-soft);
+    font-size: 12.5px;
+}
+.wc-traceline-stop-row:last-child { border-bottom: none; }
+/* Nom d'arrêt ÉDITABLE (retour utilisateur 2026-07-24 : "je veux pouvoir choisir les noms
+   des arrêts") -- un `<input>`, pas un `<span>` figé comme avant ; le nom par défaut
+   (Terminus / Arrêt N) reste visible en `placeholder` tant que rien n'est saisi. Taille
+   réduite par rapport au style de champ générique (padding/font) pour tenir dans une ligne
+   de liste sans l'alourdir. */
+.wc-traceline-stop-name { width: 100%; padding: 5px 8px !important; font-weight: 600; }
+.wc-traceline-stop-coords { white-space: nowrap; }
+/* Temps d'arrêt PAR ARRÊT, OPTIONNEL (retour utilisateur 2026-07-24 : "je peux l'ajouter à
+   un arrêt et pas à un autre") -- champ étroit, vide par défaut (pas de valeur imposée),
+   ignoré dans le calcul de l'horaire tant qu'il reste vide (voir drawTimetable). */
+.wc-traceline-dwell { width: 64px !important; padding: 5px 6px !important; text-align: right; }
+/* Boutons d'export (retour utilisateur 2026-07-24 : "pouvoir exporter en excel ou texte") */
+.wc-traceline-export { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+
+/* ── Responsive (retour utilisateur 2026-07-24 : "rendre tout le widget responsive sur
+   téléphone", pas juste l'onglet ajouté récemment) ─────────────────────────────────────
+   Élargi d'une simple règle de padding à un vrai passage mobile : en-tête, onglets,
+   grilles de filtres/graphiques/métriques, cartes Leaflet/Google, et la mise en page de
+   l'onglet "Tracer une nouvelle ligne" (boutons Annuler/Effacer empilés plutôt que
+   compressés côte à côte, ligne d'arrêt en 2 lignes plutôt que 3 colonnes serrées --
+   retour utilisateur : "des boutons sont mal placés"). */
 @media (max-width: 640px) {
     .wc-embed { padding: 12px; font-size: 13px; }
-    .wc-metrics { gap: 12px; }
+    .wc-title { font-size: 16px; }
+    .wc-subtitle { font-size: 11px; }
+    .wc-header { gap: 8px; margin-bottom: 12px; }
+    .wc-header-right { gap: 8px; }
+    .wc-embed button.wc-tab { padding: 7px 10px; font-size: 12.5px; }
+    .wc-metrics { gap: 12px 16px; }
+    .wc-metric-value { font-size: 20px; }
     .wc-field { min-width: 100%; }
+    .wc-filters { grid-template-columns: 1fr; gap: 14px; }
+    .wc-field-analyze { justify-content: stretch; }
+    .wc-field-analyze button { width: 100%; min-width: 0; }
+    .wc-charts-grid { grid-template-columns: 1fr; }
+    .wc-chart-wrap { min-height: 200px; }
+    .wc-list-head { flex-direction: column; align-items: stretch; }
+    .wc-sort-row select { min-width: 0; flex: 1; }
+    .wc-map { height: 280px; }
+
+    /* Onglet "Tracer une nouvelle ligne" */
+    .wc-traceline-layout { grid-template-columns: 1fr; }
+    #wc-tl-map { height: 320px; }
+    .wc-traceline-actions { flex-direction: column; }
+    .wc-traceline-stop-row {
+        grid-template-columns: 1fr auto;
+        grid-template-areas: "label dwell" "coords dwell";
+        row-gap: 2px;
+    }
+    .wc-traceline-stop-row .wc-traceline-stop-name { grid-area: label; }
+    .wc-traceline-stop-row .wc-traceline-stop-coords { grid-area: coords; }
+    .wc-traceline-stop-row .wc-traceline-dwell { grid-area: dwell; align-self: center; }
+    .wc-traceline-export { flex-direction: column; }
+    .wc-traceline-export button { width: 100%; }
 }
 
 /* ── Pied de page -- avertissement IA ──────────────────────────────────────────────

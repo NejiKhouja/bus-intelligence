@@ -716,7 +716,14 @@ def _score_all_gps_live(societe: str, day: str) -> Optional[dict]:
                 pings = ws.get_pings_for_day(day, societe=societe)
                 source_answered = pings is not None
         except Exception as e:
-            print(f"Live GPS webservice unavailable ({societe}/{day}): {e}")
+            # Attendu tant que relay.php n'a pas encore poussé ce jour -- le webservice est
+            # sur le réseau local de la plateforme, Render ne peut pas le joindre en direct
+            # (voir le disjoncteur dans webservices.py). Pas une panne : juste "pas encore
+            # là", et l'appelant retombe déjà sur l'historique. Formulé pour ne pas se lire
+            # comme une erreur au premier coup d'oeil dans les logs (retour utilisateur
+            # 2026-07-24 : le message précédent semblait signaler un problème).
+            print(f"{societe}/{day} : pas encore poussé par relay.php, webservice injoignable "
+                  f"depuis Render (normal) -- {e} -- historique servi en attendant")
     trip_frames, stop_frames = [], []
     scoring_crashed = False
     if pings:
@@ -2452,7 +2459,19 @@ def anomaly_explain(  # def, pas async def -- voir la note dans get_anomaly_hist
 
 
 @app.get("/api/trip-detail")
-async def trip_detail(
+# `def`, PAS `async def` -- même correctif que get_anomaly_history/get_current_anomalies/
+# ticket_anomaly_history (voir leurs notes) : ce handler manquait à l'appel quand ces 5
+# autres ont été convertis. Retour utilisateur 2026-07-24 : "la carte du trajet est lente à
+# ouvrir en production". Ce handler fait pourtant du travail synchrone réel -- une requête
+# SQLite (foundation_slice), et pour un trajet du jour LIVE (hier), potentiellement toute la
+# reconstruction GPS société entière si le cache de current-anomalies a expiré, PLUS une
+# lecture MongoDB en direct pour le détour -- tout ça sous `async def` bloquait l'unique
+# event loop de l'instance Render (WEB_CONCURRENCY=1) pendant toute sa durée, gelant /health
+# et toute autre requête concurrente, pas seulement celle-ci. `def` simple fait tourner ce
+# travail dans le threadpool de Starlette à la place. `@_limit_concurrency` ajouté par
+# cohérence avec les 5 autres handlers lourds déjà convertis.
+@_limit_concurrency
+def trip_detail(
     societe: str, line: str, bus: int, day: str, trip_start: str
 ):
     """Sequence + problem stops for one specific trip (used for per-trip map/chart).

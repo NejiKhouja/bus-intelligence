@@ -40,7 +40,10 @@ def _guard() -> None:
 def _mark_down(e: Exception) -> None:
     global _down_until
     _down_until = time.time() + 600
-    print(f"  webservice injoignable ({e.__class__.__name__}) -- circuit ouvert 10 min")
+    # Attendu depuis Render (réseau privé, voir le commentaire du disjoncteur ci-dessus) --
+    # pas une panne à traiter, juste un rappel que ce chemin restera silencieux 10 min.
+    print(f"  webservice injoignable depuis ce serveur (normal, réseau privé) : "
+          f"{e.__class__.__name__} -- nouvel essai dans 10 min")
 
 
 def _get(path: str, params: dict, read_timeout: float, stream: bool = False) -> requests.Response:
