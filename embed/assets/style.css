@@ -444,6 +444,35 @@
     height: 1px;
     background: var(--wc-border);
 }
+
+/* ── Bandeau "couverture partielle des lignes" (voir /api/line-coverage, app.js) ────────
+   Résumé toujours visible + détail dépliable listant les lignes suivies vs en attente
+   d'intégration, chacune comme un "chip" -- reprend la forme des tags de wc-ms-tag (pilule,
+   même famille visuelle) mais en lecture seule (pas de bouton de suppression), avec deux
+   variantes de couleur pour distinguer les deux groupes d'un coup d'oeil. */
+.wc-coverage-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.wc-coverage-summary > span { flex: 1; min-width: 200px; }
+.wc-coverage-summary .wc-link-muted { white-space: nowrap; }
+.wc-coverage-detail { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--wc-border-soft); }
+.wc-coverage-group + .wc-coverage-group { margin-top: 14px; }
+.wc-coverage-group-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--wc-text-muted);
+    margin-bottom: 6px;
+}
+.wc-coverage-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.wc-line-chip {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+.wc-line-chip.ok { background: var(--wc-green-soft); color: var(--wc-green); }
+.wc-line-chip.pending, .wc-line-chip.warn { background: var(--wc-orange-soft); color: var(--wc-orange); }
 /* Bouton "retour à la vue d'ensemble" -- réutilise .wc-link-muted (couleur/taille) mais
    c'est un <button>, pas un <a> : reset des styles de bouton natif + curseur + survol. */
 button.wc-link-muted {

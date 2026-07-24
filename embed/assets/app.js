@@ -986,6 +986,7 @@ function sortAnomalies(list, key) {
 // vue d'ensemble par défaut.
 async function renderTripsView(root) {
     root.innerHTML = `
+    <div id="wc-t-coverage" hidden></div>
     <div id="wc-t-freshness"><div class="wc-banner info"><span class="wc-spin"></span> ${t("checking_live_data")}</div></div>
     <button id="wc-t-explain-toggle" class="wc-btn-secondary wc-explain-toggle">
         ${icon("search")}<span>${t("explain_toggle_open")}</span>
@@ -1005,6 +1006,7 @@ async function renderTripsView(root) {
     </div>
     `;
 
+    const coverageBox = root.querySelector("#wc-t-coverage");
     const freshBox = root.querySelector("#wc-t-freshness");
     const toggleBtn = root.querySelector("#wc-t-explain-toggle");
     const explainPanel = root.querySelector("#wc-t-explain-panel");
@@ -1014,6 +1016,55 @@ async function renderTripsView(root) {
     const pillsBox = root.querySelector("#wc-t-pills");
     const moreBtn = root.querySelector("#wc-t-more");
     const sortSel = root.querySelector("#wc-t-sort");
+
+    // Avertissement "couverture partielle des lignes" (retour utilisateur 2026-07-24 :
+    // un admin qui voit "2 trajets analysés" alors que sa société en a fait tourner
+    // bien plus doit comprendre que c'est une intégration en cours, pas une panne du
+    // suivi -- voir /api/line-coverage). Chargement en tâche de fond, n'attend/ne
+    // bloque jamais le reste de la vue ; silencieux en cas d'échec (accessoire, pas
+    // critique -- pas la peine d'ajouter un message d'erreur pour un simple bandeau
+    // d'information).
+    //
+    // Détail dépliable (retour utilisateur 2026-07-24, suite) : lister les lignes
+    // suivies ET celles en attente, avec une explication -- pas juste un décompte, pour
+    // qu'un admin puisse vérifier SA ligne précisément plutôt que deviner si elle en
+    // fait partie. Repliée par défaut (le résumé seul suffit la plupart du temps) --
+    // même pattern que le panneau "Expliquer un bus" (toggle + contenu construit à la
+    // 1re ouverture). Les lignes "en attente" n'ont, PAR DÉFINITION, aucune géométrie
+    // enregistrée (c'est justement ce qui manque) -- on ne peut donc afficher que leur
+    // code, jamais un nom de trajet, pour ce groupe-là.
+    api("/api/line-coverage").then((cov) => {
+        if (cov.coverage_pct == null || cov.coverage_pct >= 100) return;
+        const covered = (cov.lines || []).filter((l) => l.covered).map((l) => l.line);
+        const missing = (cov.lines || []).filter((l) => !l.covered).map((l) => l.line);
+        const chips = (codes, cls) => codes.map((c) => `<span class="wc-line-chip ${cls}">${esc(c)}</span>`).join("");
+        coverageBox.hidden = false;
+        coverageBox.innerHTML = `
+        <div class="wc-banner info wc-coverage-banner">
+            <div class="wc-coverage-summary">
+                ${icon("chart")}<span>${t("line_coverage_notice", { covered: cov.covered_lines, total: cov.total_lines })}</span>
+                <button type="button" id="wc-t-coverage-toggle" class="wc-link-muted">${t("coverage_details_show")}</button>
+            </div>
+            <div id="wc-t-coverage-detail" class="wc-coverage-detail" hidden>
+                <div class="wc-coverage-group">
+                    <div class="wc-coverage-group-label">${t("coverage_covered_label", { n: covered.length })}</div>
+                    <div class="wc-coverage-chips">${chips(covered, "ok")}</div>
+                </div>
+                <div class="wc-coverage-group">
+                    <div class="wc-coverage-group-label">${t("coverage_missing_label", { n: missing.length })}</div>
+                    <p class="wc-muted">${t("coverage_missing_explain")}</p>
+                    <div class="wc-coverage-chips">${chips(missing, "pending")}</div>
+                </div>
+            </div>
+        </div>`;
+        const covToggleBtn = coverageBox.querySelector("#wc-t-coverage-toggle");
+        const covDetail = coverageBox.querySelector("#wc-t-coverage-detail");
+        covToggleBtn.addEventListener("click", () => {
+            const opening = covDetail.hidden;
+            covDetail.hidden = !opening;
+            covToggleBtn.textContent = opening ? t("coverage_details_hide") : t("coverage_details_show");
+        });
+    }).catch(() => {});
 
     // Préchauffe Leaflet pendant que l'utilisateur lit la liste -- la 1re carte (ou 1er
     // "trajet normal") ouverte n'attend alors plus le téléchargement du CDN (retour
@@ -1172,7 +1223,43 @@ async function renderTripsView(root) {
         const hist = today.historical_date
             ? `<div class="wc-muted" style="margin-top:4px">${t("historical_data_badge", { date: fmtDay(today.historical_date) })}</div>`
             : "";
-        freshBox.innerHTML = live + hist;
+        // Détail par ligne (retour utilisateur 2026-07-24 : voir les NOMS des lignes
+        // analysées hier -- lesquelles n'ont rien à signaler, lesquelles ont une anomalie
+        // -- pas juste le total agrégé société ci-dessus). Repliable, même pattern que le
+        // bandeau de couverture (#wc-t-coverage) juste au-dessus dans la vue. `by_line`
+        // (voir /api/current-anomalies) ne couvre QUE les lignes qui ont eu au moins un
+        // trajet hier -- les lignes sans géométrie DU TOUT restent dans le bandeau de
+        // couverture, pas ici (deux causes différentes d'absence : pas de géométrie vs.
+        // géométrie présente mais aucun trajet ce jour-là).
+        const byLine = today.by_line || [];
+        let detailHtml = "";
+        if (byLine.length) {
+            const ok = byLine.filter((l) => l.anomaly_count === 0).map((l) => l.line);
+            const bad = byLine.filter((l) => l.anomaly_count > 0).map((l) => l.line);
+            const chips = (codes, cls) => codes.map((c) => `<span class="wc-line-chip ${cls}">${esc(c)}</span>`).join("");
+            detailHtml = `
+            <button type="button" id="wc-t-byline-toggle" class="wc-link-muted" style="margin-top:6px">${t("byline_details_show")}</button>
+            <div id="wc-t-byline-detail" class="wc-coverage-detail" hidden>
+                <div class="wc-coverage-group">
+                    <div class="wc-coverage-group-label">${t("byline_ok_label", { n: ok.length })}</div>
+                    <div class="wc-coverage-chips">${chips(ok, "ok")}</div>
+                </div>
+                <div class="wc-coverage-group">
+                    <div class="wc-coverage-group-label">${t("byline_anomaly_label", { n: bad.length })}</div>
+                    <div class="wc-coverage-chips">${chips(bad, "warn")}</div>
+                </div>
+            </div>`;
+        }
+        freshBox.innerHTML = live + hist + detailHtml;
+        if (byLine.length) {
+            const blToggle = freshBox.querySelector("#wc-t-byline-toggle");
+            const blDetail = freshBox.querySelector("#wc-t-byline-detail");
+            blToggle.addEventListener("click", () => {
+                const opening = blDetail.hidden;
+                blDetail.hidden = !opening;
+                blToggle.textContent = opening ? t("byline_details_hide") : t("byline_details_show");
+            });
+        }
     }
     function renderIncomingBanner(today, exhausted) {
         const yday = fmtDay(today.yesterday_date || ymdYesterday());
@@ -1531,7 +1618,13 @@ async function renderTicketsView(root) {
                 ${chartsOk ? `<div class="wc-chart-wrap" style="max-width:100%"><canvas id="wc-tk-chart"></canvas></div>`
                            : `<div class="wc-banner warn">${t("chart_unavailable_simple")}</div>`}
             </div>
-            <div id="wc-tk-cards"></div>`;
+            <div class="wc-card">
+                <div class="wc-list-head">
+                    <h4 id="wc-tk-list-title">${t("ticket_history_title")}</h4>
+                </div>
+                <p class="wc-muted" id="wc-tk-list-sub">${t("ticket_history_sub")}</p>
+                <div id="wc-tk-cards">${skeletonCards(3)}</div>
+            </div>`;
 
             if (chartsOk) {
                 const byLine = (pat.by_line || []).slice().sort((a, b) => a.rate - b.rate);
@@ -1542,6 +1635,8 @@ async function renderTicketsView(root) {
             const hist = await api("/api/ticket-anomaly-history", {
                 line: lineSel.value || null, limit: 150, client_safe: clientSafe,
             });
+            const listTitle = body.querySelector("#wc-tk-list-title");
+            const listSub = body.querySelector("#wc-tk-list-sub");
             const cardsBox = body.querySelector("#wc-tk-cards");
             let anomalies = (hist || {}).anomalies || [];
             // Filtre bonne/mauvaise anomalie APRÈS coup sur les 150 récupérées (même
@@ -1549,10 +1644,25 @@ async function renderTicketsView(root) {
             // d'affichage, pas un paramètre du modèle ni de l'API.
             if (recetteSel.value === "bad") anomalies = anomalies.filter((a) => a.is_good_anomaly === false);
             else if (recetteSel.value === "good") anomalies = anomalies.filter((a) => a.is_good_anomaly === true);
+            // "Historique" explicite (retour utilisateur 2026-07-24 : cette liste n'avait
+            // ni titre ni explication -- juste des cartes empilées, aucun moyen de savoir
+            // ce qu'on regardait ni depuis quand). Le titre porte le compte réel (connu
+            // seulement une fois `hist` arrivé, pas avant) ; le sous-titre affiche la
+            // période couverte -- ticket-anomaly-history est trié par gravité (if_score),
+            // PAS par date (voir _ticket_rows_with_reasons côté API), donc sans cette
+            // période explicite un jour récent et un jour d'il y a 2 ans peuvent voisiner
+            // sans que ce soit visible.
+            listTitle.textContent = t("ticket_history_title_n", { n: anomalies.length });
             if (!anomalies.length) {
+                listSub.textContent = t("ticket_history_sub");
                 cardsBox.innerHTML = `<div class="wc-banner info">${t("no_anomaly_for_filter")}</div>`;
                 return;
             }
+            const days = anomalies.map((a) => a.day).filter(Boolean).sort();
+            listSub.textContent = `${t("ticket_history_sub")} ${
+                t("ticket_history_range", { from: fmtDay(days[0]), to: fmtDay(days[days.length - 1]) })
+            }`;
+            cardsBox.innerHTML = "";
             for (const a of anomalies) cardsBox.appendChild(renderTicketCard(a, clientSafe));
         } catch (e) {
             body.innerHTML = `<div class="wc-banner error">${t("error_generic", { msg: esc(e.message) })}</div>`;

@@ -54,6 +54,7 @@ const ALLOWED_ENDPOINTS = [
     '/api/ticket-anomaly-explain',
     '/api/ticket-anomaly-stations',
     '/api/ticket-anomaly-reference',
+    '/api/line-coverage',
 ];
 
 // [ttl_frais_secondes, age_max_avant_blocage_secondes] par endpoint. Choisi large plutôt
@@ -84,6 +85,9 @@ const CACHE_RULES = [
     '/api/ticket-anomaly-explain'   => [600, 3600],
     '/api/ticket-anomaly-stations'  => [1800, 21600],
     '/api/ticket-anomaly-reference' => [1800, 21600],
+    // Ne change que quand quelqu'un peuple manuellement line_stops côté reference DB, puis
+    // redémarre l'API -- aussi statique que /api/options, même TTL large.
+    '/api/line-coverage'            => [3600, 86400],
 ];
 
 // Endpoints trop coûteux côté serveur Render pour être revalidés SILENCIEUSEMENT --

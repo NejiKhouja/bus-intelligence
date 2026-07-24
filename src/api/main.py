@@ -953,6 +953,48 @@ async def get_buses(societe: str, line: str):
     options = get_available_options(societe=societe, line=line)
     return {"buses": options["buses"]}
 
+@app.get("/api/line-coverage")
+def get_line_coverage(societe: str):
+    """How much of a company's registered lines have route geometry (`line_stops`) in the
+    reference DB. Lines WITHOUT geometry are silently skipped by `_score_all_gps_live`
+    (`if key not in usable: continue`) -- their pings never get segmented into trips, with
+    nothing in the numbers themselves to explain why. Confirmed 2026-07-24: S.R.T.SELIANA
+    showed "2 trips analyzed" on a day its real service ran far more, traced to only 5 of
+    its 41 lines having any `line_stops` rows. Exposed here so the embed widget can show a
+    plain-language notice instead of leaving admins to wonder if it's a bug.
+
+    Direct query, not `_load_usable_lines()` (that cache only holds the RESOLVED lines --
+    no way to know the total registered count to compare against). Cheap (one join, one
+    company), called at most once per page load -- no need to cache beyond the proxy's own
+    HTTP cache (see embed/proxy.php's CACHE_RULES).
+    """
+    try:
+        conn = rdb.init_db()
+        try:
+            rows = conn.execute("""
+                SELECT l.line_code, COUNT(ls.stop_id) AS n_stops
+                FROM lines l
+                JOIN companies c ON c.company_id = l.company_id
+                LEFT JOIN line_stops ls ON ls.line_id = l.line_id
+                WHERE c.canonical_name = ?
+                GROUP BY l.line_id
+                ORDER BY l.line_code
+            """, (societe,)).fetchall()
+        finally:
+            conn.close()
+        lines = [{"line": r[0], "covered": r[1] > 0} for r in rows]
+        covered = sum(1 for l in lines if l["covered"])
+        return {
+            "societe": societe,
+            "total_lines": len(lines),
+            "covered_lines": covered,
+            "coverage_pct": round(100 * covered / len(lines), 1) if lines else None,
+            "lines": lines,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting line coverage: {str(e)}")
+
+
 @app.get("/api/days")
 async def get_days(
     societe: Optional[str] = Query(None), 
@@ -2034,6 +2076,23 @@ def get_current_anomalies(  # def, pas async def -- voir la note dans get_anomal
         today, live = (live_day, True) if live_day else (latest_day_for(societe, line), False)
         _, trips = _filter_trips(societe, line, day=today, dir=dir)
         anomalies = _rows_with_reasons(models, trips, anomalies_only=True)
+        # Répartition par ligne du jour `today` (retour utilisateur 2026-07-24 : voir quelles
+        # lignes ont été analysées hier, et lesquelles n'ont RIEN à signaler, pas juste un
+        # total agrégé société entière) -- `trips` est déjà scoré (colonne `anomaly` bool,
+        # voir anomaly.score()), donc un simple groupby suffit, pas de nouveau calcul. Vide
+        # quand `today` n'a aucun trajet (jour non live, ou live mais zéro trajet -- voir
+        # _score_all_gps_live). Ne dit PAS quelles lignes sont dépourvues de géométrie (ça,
+        # c'est /api/line-coverage) -- seulement, PARMI les lignes qui ONT tourné ce jour,
+        # lesquelles ont au moins une anomalie détectée.
+        by_line = []
+        if len(trips):
+            grp = trips.groupby("line").agg(
+                trip_count=("anomaly", "size"), anomaly_count=("anomaly", "sum")
+            ).reset_index().sort_values("line")
+            by_line = [
+                {"line": r["line"], "trip_count": int(r["trip_count"]), "anomaly_count": int(r["anomaly_count"])}
+                for _, r in grp.iterrows()
+            ]
         # Toujours renvoyer le dernier jour HISTORIQUE connu à côté du jour live, même
         # quand celui-ci a zéro trajet (jour prêt mais férié/grève/rien en circulation,
         # voir _score_all_gps_live) -- sans ça, "0 trajet aujourd'hui" laissait l'admin
@@ -2057,6 +2116,7 @@ def get_current_anomalies(  # def, pas async def -- voir la note dans get_anomal
             "anomalies": anomalies,
             "total_trips": int(len(trips)),
             "anomaly_count": len(anomalies),
+            "by_line": by_line,
         }
     except KeyError:
         raise HTTPException(status_code=503, detail="Anomaly models not loaded")
