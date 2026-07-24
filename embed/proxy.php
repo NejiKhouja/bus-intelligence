@@ -28,6 +28,7 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/session.php';
+require_once __DIR__ . '/http.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -132,18 +133,8 @@ function winicari_fetch_upstream(string $endpoint, array $params): array {
     if ($params) {
         $url .= '?' . http_build_query($params);
     }
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => ['X-API-Key: ' . WINICARI_API_KEY],
-        CURLOPT_TIMEOUT => 90, // le contrôle de détour côté API peut prendre jusqu'à ~40s
-        CURLOPT_CONNECTTIMEOUT => 15,
-    ]);
-    $body = curl_exec($ch);
-    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err = curl_error($ch);
-    curl_close($ch);
-    return [$body, $status, $err];
+    // le contrôle de détour côté API peut prendre jusqu'à ~40s -- timeout large
+    return winicari_http_request($url, ['X-API-Key: ' . WINICARI_API_KEY], 'GET', null, 90.0, true);
 }
 
 // ── Clé de cache : endpoint + paramètres (dont societe) triés, insensible à l'ordre ────
@@ -191,6 +182,18 @@ if ($age !== null && $cached_status < 400) {
         header("X-Cache-Age: $age");
         http_response_code($cached_status);
         readfile($cache_file);
+        // Rendre la réponse au visiteur MAINTENANT -- le déclenchement de revalidation
+        // ci-dessous est un appel HTTP vers ce serveur lui-même (hairpin via l'IPLB) dont
+        // le timeout n'est plus garanti aussi strict qu'avec curl (voir http.php) ; sans
+        // ce flush, le visiteur restait bloqué jusqu'à la fin du script entier, pas
+        // seulement jusqu'à readfile() -- constaté 2026-07-24 (Render répondait vite,
+        // mais l'onglet restait en "loading").
+        if (function_exists('fastcgi_finish_request')) {
+            fastcgi_finish_request();
+        } else {
+            @ob_end_flush();
+            @flush();
+        }
         // PAS de revalidation en arrière-plan pour les endpoints coûteux (voir
         // NO_BG_REFRESH) -- anomaly-explain?check_detours=true fait tourner un filtre de
         // Kalman par bus-jour signalé sur le serveur Render 512MB, déjà responsable de
@@ -216,24 +219,72 @@ if ($age !== null && $cached_status < 400) {
             if ($company !== null) {
                 $bg_params['_company'] = $company;
             }
-            $ch = curl_init($self . '?' . http_build_query($bg_params));
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT_MS => 400,
-                CURLOPT_CONNECTTIMEOUT_MS => 300,
-                CURLOPT_NOSIGNAL => 1,
-                CURLOPT_SSL_VERIFYPEER => false,
-            ]);
-            curl_exec($ch);
-            curl_close($ch);
+            winicari_http_request($self . '?' . http_build_query($bg_params), [], 'GET', null, 0.4, false);
         }
         exit;
     }
 }
 
-// MISS ou trop vieux pour être servi tel quel : on bloque, comme avant caching.
+// MISS ou trop vieux pour être servi tel quel : on bloque, comme avant caching -- MAIS
+// avec un verrou anti-troupeau (stampede lock), ajouté 2026-07-24 suite aux 502 constatés
+// en production dès que 2 visiteurs arrivaient en même temps.
+//
+// Cause : SANS ce verrou, 2 visiteurs qui tombent sur la même clé manquante en même temps
+// déclenchaient chacun leur propre appel bloquant vers Render (jusqu'à 90s) -- double
+// charge mémoire sur un service Render à 512MB déjà responsable de plusieurs OOM (voir
+// NO_BG_REFRESH plus haut), ET chacun occupe un worker PHP-FPM pendant tout ce temps. Une
+// seule page ouvre pourtant ~8-10 appels proxy.php en parallèle (options, lignes,
+// current-anomalies, historique, tickets, chauffeurs...) : 2 visiteurs suffisent à
+// épuiser un pool de workers PHP-FPM mutualisé de taille modeste. Une fois le pool à sec,
+// TOUTE requête suivante (y compris d'autres visiteurs, y compris des endpoints déjà en
+// cache) reçoit un 502 Bad Gateway du serveur web -- alors même que Render, dans ses
+// propres logs, répond normalement : le goulot est ici, côté PHP, pas côté Render.
+//
+// Fix : un seul visiteur par clé de cache va réellement chercher la donnée chez Render ;
+// les autres attendent (verrou fichier, borné) puis servent le résultat que le premier
+// vient d'écrire -- une seule requête Render au lieu de N, et une attente bornée au lieu
+// d'un doublement du temps de réponse.
+$miss_lock = fopen("$cache_dir/$cache_key.miss.lock", 'c');
+$have_miss_lock = false;
+if ($miss_lock !== false) {
+    $waited = 0.0;
+    // Borne large (proche du timeout upstream de 90s, voir winicari_fetch_upstream) --
+    // le but est que l'attente se résolve presque toujours par un cache tout frais
+    // écrit par le premier visiteur, pas par un abandon suivi d'un 2e appel Render.
+    while (!($have_miss_lock = flock($miss_lock, LOCK_EX | LOCK_NB))) {
+        if ($waited >= 95.0) {
+            break; // filet de sécurité -- ne jamais bloquer un worker indéfiniment
+        }
+        usleep(200000); // 200ms
+        $waited += 0.2;
+    }
+    if (!$have_miss_lock) {
+        @fclose($miss_lock);
+        $miss_lock = null;
+    } elseif ($waited > 0) {
+        // On a attendu : un autre visiteur vient peut-être de rafraîchir cette même clé
+        // pendant notre attente -- si oui, on sert son résultat au lieu de resolliciter
+        // Render pour rien.
+        clearstatcache(true, $cache_file);
+        clearstatcache(true, $status_file);
+        $age2 = file_exists($cache_file) ? (time() - filemtime($cache_file)) : null;
+        if ($age2 !== null && $age2 <= $stale_max) {
+            $cached_status2 = file_exists($status_file) ? (int)file_get_contents($status_file) : 200;
+            if ($cached_status2 < 400) {
+                flock($miss_lock, LOCK_UN);
+                fclose($miss_lock);
+                header('X-Cache: HIT-AFTER-WAIT');
+                http_response_code($cached_status2);
+                readfile($cache_file);
+                exit;
+            }
+        }
+    }
+}
+
 [$body, $status, $err] = winicari_fetch_upstream($endpoint, $params);
 if ($body === false) {
+    if ($have_miss_lock) { flock($miss_lock, LOCK_UN); fclose($miss_lock); }
     http_response_code(502);
     echo json_encode(['detail' => 'Upstream request failed: ' . $err]);
     exit;
@@ -242,6 +293,7 @@ if ($status < 500) {
     file_put_contents($cache_file, $body, LOCK_EX);
     file_put_contents($status_file, (string)$status, LOCK_EX);
 }
+if ($have_miss_lock) { flock($miss_lock, LOCK_UN); fclose($miss_lock); }
 header('X-Cache: MISS');
 http_response_code($status ?: 502);
 echo $body;

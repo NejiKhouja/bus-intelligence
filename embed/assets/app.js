@@ -1031,6 +1031,11 @@ async function renderTripsView(root) {
     // par opposition aux résultats du panneau "Expliquer un bus" (scoped). Détermine
     // quelles cartes reçoivent l'icône "!" confiance réduite ET le bouton "trajet normal".
     let overview = true;
+    // Jour (YYYY-MM-DD) des données "en direct" une fois confirmées par
+    // /api/current-anomalies (voir loadCurrent) -- sert à séparer visuellement ces
+    // anomalies-là du reste de l'historique dans drawList() ci-dessous. `null` tant que
+    // la veille n'est pas encore confirmée : pas de séparation prématurée.
+    let liveDate = null;
 
     function drawList() {
         cardsBox.innerHTML = "";
@@ -1040,7 +1045,27 @@ async function renderTripsView(root) {
             moreBtn.hidden = true;
             return;
         }
-        for (const a of sorted.slice(0, shown)) cardsBox.appendChild(renderAlertCard(a, { withMap: true, overview }));
+        const page = sorted.slice(0, shown);
+        // Séparation visuelle "hier / en direct" vs "historique" (retour utilisateur
+        // 2026-07-24 : les deux étaient mélangées dans une seule liste, pas de distinction
+        // claire) -- seulement en vue d'ensemble (pas dans les résultats recadrés du
+        // panneau "Expliquer un bus"), et seulement une fois la veille confirmée. Le tri
+        // choisi par l'utilisateur continue de s'appliquer normalement, à l'intérieur de
+        // chaque groupe.
+        if (overview && liveDate) {
+            const recent = page.filter((a) => a.day === liveDate);
+            const older = page.filter((a) => a.day !== liveDate);
+            if (recent.length) {
+                cardsBox.appendChild(el(`<div class="wc-anomaly-group-label">${LIVE_DOT}${t("recent_anomalies_label")}</div>`));
+                for (const a of recent) cardsBox.appendChild(renderAlertCard(a, { withMap: true, overview }));
+            }
+            if (older.length) {
+                cardsBox.appendChild(el(`<div class="wc-anomaly-divider"><span>${t("historique_anomalies_label")}</span></div>`));
+                for (const a of older) cardsBox.appendChild(renderAlertCard(a, { withMap: true, overview }));
+            }
+        } else {
+            for (const a of page) cardsBox.appendChild(renderAlertCard(a, { withMap: true, overview }));
+        }
         moreBtn.hidden = shown >= sorted.length;
         moreBtn.textContent = t("show_more", { shown: Math.min(shown, sorted.length), total: sorted.length });
     }
@@ -1188,7 +1213,15 @@ async function renderTripsView(root) {
             // Veille confirmée par le web service GPS (éventuellement 0 trajet un jour férié,
             // mais c'est une vraie réponse). On l'affiche et on ARRÊTE d'interroger.
             renderLiveBanner(today);
+            liveDate = today.date;
             mergeLiveAnoms(today);
+            // mergeLiveAnoms() ne redessine QUE s'il avait de nouvelles anomalies à
+            // fusionner -- si l'historique les contenait déjà (voir commentaire plus haut
+            // sur /api/anomaly-history qui fusionne déjà le direct), rien ne redessinait
+            // et la séparation "hier / historique" ci-dessus n'apparaissait jamais tant
+            // que l'utilisateur ne changeait pas le tri. On force donc un redessin ici,
+            // maintenant que liveDate est connu, dans tous les cas.
+            if (backBtn.hidden) drawList();
             return;
         }
         // Pas encore là : animation "en préparation" + prochaine tentative (tant qu'il en reste).

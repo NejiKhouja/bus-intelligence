@@ -35,6 +35,7 @@
  */
 
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/http.php';
 
 // ── Garde d'accès : CLI librement ; via web, uniquement avec la clé API ──────────────
 $is_cli = (php_sapi_name() === 'cli');
@@ -90,16 +91,7 @@ if ($is_auto) {
 // ── Helpers HTTP ─────────────────────────────────────────────────────────────────────
 function ws_get(string $path, array $params, int $timeout = 180) {
     $url = rtrim(WINICARI_WEBSERVICE_URL, '/') . $path . '?' . http_build_query($params);
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_CONNECTTIMEOUT => 10,
-    ]);
-    $body = curl_exec($ch);
-    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err = curl_error($ch);
-    curl_close($ch);
+    [$body, $status, $err] = winicari_http_request($url, [], 'GET', null, (float)$timeout, true);
     if ($body === false || $status >= 400) {
         throw new RuntimeException("web service $path: " . ($err ?: "HTTP $status"));
     }
@@ -107,28 +99,18 @@ function ws_get(string $path, array $params, int $timeout = 180) {
 }
 
 function render_req(string $method, string $path, $json_body = null, int $timeout = 300) {
-    $ch = curl_init(rtrim(WINICARI_API_BASE, '/') . $path);
     $headers = ['X-API-Key: ' . WINICARI_API_KEY];
-    $opts = [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_CUSTOMREQUEST => $method,
-    ];
+    $body = null;
     if ($json_body !== null) {
         $headers[] = 'Content-Type: application/json';
-        $opts[CURLOPT_POSTFIELDS] = json_encode($json_body);
+        $body = json_encode($json_body);
     }
-    $opts[CURLOPT_HTTPHEADER] = $headers;
-    curl_setopt_array($ch, $opts);
-    $body = curl_exec($ch);
-    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err = curl_error($ch);
-    curl_close($ch);
-    if ($body === false || $status >= 400) {
-        throw new RuntimeException("API $path: " . ($err ?: "HTTP $status -- $body"));
+    $url = rtrim(WINICARI_API_BASE, '/') . $path;
+    [$respBody, $status, $err] = winicari_http_request($url, $headers, $method, $body, (float)$timeout, true);
+    if ($respBody === false || $status >= 400) {
+        throw new RuntimeException("API $path: " . ($err ?: "HTTP $status -- $respBody"));
     }
-    return json_decode($body, true);
+    return json_decode($respBody, true);
 }
 
 // Miroir de src/data/webservices.py::_slim_ping -- mêmes 7 champs, même filtrage.

@@ -407,6 +407,43 @@
 .wc-list-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .wc-list-head h4 { margin: 0; }
 .wc-list-head .wc-sort-row { margin: 0; }
+
+/* ── Séparation "hier / en direct" vs "historique" dans la liste de trajets signalés ──
+   (2026-07-24, retour utilisateur : distinguer clairement les deux plutôt que les mélanger
+   dans une seule liste triée -- voir drawList() dans app.js). Le label du haut réutilise
+   le point vert pulsé de wc-live-dot pour rester cohérent avec le bandeau "Données en
+   direct" au-dessus. Le séparateur est une ligne pleine largeur avec un texte centré,
+   pattern classique pour marquer un changement de section sans ajouter une carte de plus. */
+.wc-anomaly-group-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--wc-green);
+    margin: 4px 0 10px;
+}
+.wc-anomaly-group-label .wc-live-dot { margin-right: 0; }
+.wc-anomaly-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 22px 0 14px;
+    color: var(--wc-text-muted);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+.wc-anomaly-divider::before,
+.wc-anomaly-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--wc-border);
+}
 /* Bouton "retour à la vue d'ensemble" -- réutilise .wc-link-muted (couleur/taille) mais
    c'est un <button>, pas un <a> : reset des styles de bouton natif + curseur + survol. */
 button.wc-link-muted {
